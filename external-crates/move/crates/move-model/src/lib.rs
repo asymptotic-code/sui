@@ -38,7 +38,6 @@ use crate::{
     builder::model_builder::ModelBuilder,
     model::{DatatypeId, FunId, FunctionData, GlobalEnv, Loc, ModuleData, ModuleId},
     options::ModelBuilderOptions,
-    simplifier::{SpecRewriter, SpecRewriterPipeline},
 };
 
 pub mod ast;
@@ -46,11 +45,9 @@ mod builder;
 pub mod code_writer;
 pub mod exp_generator;
 pub mod exp_rewriter;
-pub mod intrinsics;
 pub mod model;
 pub mod options;
 pub mod pragmas;
-pub mod simplifier;
 pub mod spec_translator;
 pub mod symbol;
 pub mod ty;
@@ -458,24 +455,8 @@ fn run_spec_checker(env: &mut GlobalEnv, units: Vec<AnnotatedCompiledUnit>, mut 
         );
     }
 
-    // Populate GlobalEnv with model-level information
-    builder.populate_env();
-
     // After all specs have been processed, warn about any unused schemas.
     builder.warn_unused_schemas();
-
-    // Apply simplification passes
-    run_spec_simplifier(env);
-}
-
-fn run_spec_simplifier(env: &mut GlobalEnv) {
-    let options = env
-        .get_extension::<ModelBuilderOptions>()
-        .expect("options for model builder");
-    let mut rewriter = SpecRewriterPipeline::new(&options.simplification_pipeline);
-    rewriter
-        .override_with_rewrite(env)
-        .unwrap_or_else(|e| panic!("Failed to run spec simplification: {}", e))
 }
 
 // =================================================================================================

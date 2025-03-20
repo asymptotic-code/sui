@@ -19,7 +19,6 @@ use move_compiler::{expansion::ast as EA, parser::ast as PA, shared::NumericalAd
 use crate::{
     ast::{Attribute, ModuleName, Operation, QualifiedSymbol, Spec, Value},
     builder::spec_builtins,
-    intrinsics::IntrinsicDecl,
     model::{
         DatatypeId, FunId, FunctionVisibility, GlobalEnv, Loc, ModuleId, QualifiedId, SpecFunId,
         SpecVarId,
@@ -58,8 +57,6 @@ pub(crate) struct ModelBuilder<'env> {
     pub const_table: BTreeMap<QualifiedSymbol, ConstEntry>,
     /// A call graph mapping callers to callees that are Move functions.
     pub move_fun_call_graph: BTreeMap<QualifiedId<SpecFunId>, BTreeSet<QualifiedId<SpecFunId>>>,
-    /// A list of intrinsic declarations
-    pub intrinsics: Vec<IntrinsicDecl>,
 }
 
 /// A declaration of a specification function or operator in the builders state.
@@ -163,7 +160,6 @@ impl<'env> ModelBuilder<'env> {
             fun_table: BTreeMap::new(),
             const_table: BTreeMap::new(),
             move_fun_call_graph: BTreeMap::new(),
-            intrinsics: Default::default(),
         };
         spec_builtins::declare_spec_builtins(&mut translator);
         translator
@@ -448,14 +444,6 @@ impl<'env> ModelBuilder<'env> {
                     self.propagate_move_fun_usage(*n);
                 }
             });
-        }
-    }
-
-    /// Pass model-level information to the global env
-    pub fn populate_env(&mut self) {
-        // register all intrinsic declarations
-        for decl in &self.intrinsics {
-            self.env.intrinsics.add_decl(decl);
         }
     }
 }

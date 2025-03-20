@@ -65,7 +65,6 @@ use crate::{
         Attribute, ConditionKind, Exp, ExpData, GlobalInvariant, ModuleName, PropertyBag,
         PropertyValue, QualifiedSymbol, Spec, SpecBlockInfo, SpecFunDecl, SpecVarDecl, Value,
     },
-    intrinsics::IntrinsicsAnnotation,
     pragmas::{
         DELEGATE_INVARIANTS_TO_CALLER_PRAGMA, DISABLE_INVARIANTS_IN_BODY_PRAGMA, FRIEND_PRAGMA,
         INTRINSIC_PRAGMA, OPAQUE_PRAGMA, VERIFY_PRAGMA,
@@ -537,8 +536,6 @@ pub struct GlobalEnv {
     /// are represented without type instantiation because we assume the backend can handle
     /// generics in the expression language.
     pub used_spec_funs: BTreeSet<QualifiedId<SpecFunId>>,
-    /// An annotation of all intrinsic declarations
-    pub intrinsics: IntrinsicsAnnotation,
     /// A type-indexed container for storing extension data in the environment.
     extensions: RefCell<BTreeMap<TypeId, Box<dyn Any>>>,
     /// The address of the standard and extension libaries.
@@ -594,7 +591,6 @@ impl GlobalEnv {
             global_invariants: Default::default(),
             global_invariants_for_memory: Default::default(),
             used_spec_funs: BTreeSet::new(),
-            intrinsics: Default::default(),
             extensions: Default::default(),
             stdlib_address: None,
             extlib_address: None,
@@ -3415,26 +3411,6 @@ impl<'env> StructEnv<'env> {
         }
     }
 
-    /// Returns true if this struct has the pragma intrinsic set to true.
-    pub fn is_intrinsic(&self) -> bool {
-        self.is_pragma_true(INTRINSIC_PRAGMA, || {
-            self.module_env
-                .env
-                .intrinsics
-                .get_decl_for_struct(&self.get_qualified_id())
-                .is_some()
-        })
-    }
-
-    /// Returns true if this is an intrinsic struct of a given name
-    pub fn is_intrinsic_of(&self, name: &str) -> bool {
-        self.module_env.env.intrinsics.is_intrinsic_of_for_struct(
-            self.symbol_pool(),
-            &self.get_qualified_id(),
-            name,
-        )
-    }
-
     /// Returns true if this struct is ghost memory for a specification variable.
     pub fn is_ghost_memory(&self) -> bool {
         self.symbol_pool()
@@ -3623,11 +3599,6 @@ impl<'env> StructEnv<'env> {
             return b;
         }
         default()
-    }
-
-    /// Returns true if this struct is native or marked as intrinsic.
-    pub fn is_native_or_intrinsic(&self) -> bool {
-        self.is_native() || self.is_intrinsic()
     }
 }
 
@@ -4163,36 +4134,11 @@ impl<'env> FunctionEnv<'env> {
         self.definition().is_native()
     }
 
-    /// Returns true if this function has the pragma intrinsic set to true.
-    pub fn is_intrinsic(&self) -> bool {
-        self.is_pragma_true(INTRINSIC_PRAGMA, || {
-            self.module_env
-                .env
-                .intrinsics
-                .get_decl_for_move_fun(&self.get_qualified_id())
-                .is_some()
-        })
-    }
-
-    /// Returns true if function is either native or intrinsic.
-    pub fn is_native_or_intrinsic(&self) -> bool {
-        self.is_native() || self.is_intrinsic()
-    }
-
-    /// Returns true if this is an intrinsic struct of a given name
-    pub fn is_intrinsic_of(&self, name: &str) -> bool {
-        self.module_env.env.intrinsics.is_intrinsic_of_for_move_fun(
-            self.symbol_pool(),
-            &self.get_qualified_id(),
-            name,
-        )
-    }
-
     /// Returns true if this is the well-known native or intrinsic function of the given name.
     /// The function must reside either in stdlib or extlib address domain.
     pub fn is_well_known(&self, name: &str) -> bool {
         let env = self.module_env.env;
-        if !self.is_native_or_intrinsic() {
+        if !self.is_native() {
             return false;
         }
         let addr = self.module_env.get_name().addr();
