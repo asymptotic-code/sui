@@ -25,16 +25,16 @@ use move_compiler::{
     compiled_unit::{self, AnnotatedCompiledUnit},
     diagnostics::{warning_filters::WarningFiltersBuilder, Diagnostics},
     expansion::ast::{self as E, ModuleIdent, ModuleIdent_, TargetKind},
-    parser::ast::{self as P},
+    parser::ast as P,
     shared::{parse_named_address, unique_map::UniqueMap, NumericalAddress, PackagePaths},
-    typing::ast::{self as T},
+    typing::ast as T,
     Compiler, Flags, PASS_COMPILATION, PASS_EXPANSION, PASS_PARSER, PASS_TYPING,
 };
 use move_core_types::account_address::AccountAddress;
 use move_symbol_pool::Symbol as MoveSymbol;
 
 use crate::{
-    ast::{ModuleName, Spec},
+    ast::ModuleName,
     builder::model_builder::ModelBuilder,
     model::{DatatypeId, FunId, FunctionData, GlobalEnv, Loc, ModuleData, ModuleId},
     options::ModelBuilderOptions,
@@ -350,14 +350,8 @@ pub fn run_bytecode_model_builder<'a>(
             let name = m.identifier_at(m.datatype_handle_at(def.struct_handle).name);
             let symbol = env.symbol_pool().make(name.as_str());
             let struct_id = DatatypeId::new(symbol);
-            let data = env.create_move_struct_data(
-                m,
-                def_idx,
-                symbol,
-                Loc::default(),
-                Vec::default(),
-                Spec::default(),
-            );
+            let data =
+                env.create_move_struct_data(m, def_idx, symbol, Loc::default(), Vec::default());
             module_data.struct_data.insert(struct_id, data);
             module_data.struct_idx_to_id.insert(def_idx, struct_id);
         }
@@ -454,9 +448,6 @@ fn run_spec_checker(env: &mut GlobalEnv, units: Vec<AnnotatedCompiledUnit>, mut 
             function_infos,
         );
     }
-
-    // After all specs have been processed, warn about any unused schemas.
-    builder.warn_unused_schemas();
 }
 
 // =================================================================================================

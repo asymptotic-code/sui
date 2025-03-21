@@ -19,10 +19,10 @@ use move_ir_types::location::Spanned;
 use crate::{
     ast::{Exp, ExpData, LocalVarDecl, ModuleName, Operation, QualifiedSymbol, QuantKind, Value},
     builder::{
-        model_builder::{ConstEntry, DatatypeData, LocalVarEntry, SpecFunEntry},
+        model_builder::{ConstEntry, DatatypeData, LocalVarEntry},
         module_builder::ModuleBuilder,
     },
-    model::{DatatypeId, FieldId, Loc, ModuleId, NodeId, QualifiedId, SpecFunId},
+    model::{DatatypeId, FieldId, Loc, ModuleId, NodeId, QualifiedId},
     symbol::{Symbol, SymbolPool},
     ty::{PrimitiveType, Substitution, Type, TypeDisplayContext, Variance, BOOL_TYPE},
 };
@@ -59,8 +59,6 @@ pub(crate) struct ExpTranslator<'env, 'translator, 'module_translator> {
     pub translating_fun_as_spec_fun: bool,
     /// A flag to indicate whether errors have been generated so far.
     pub errors_generated: RefCell<bool>,
-    /// Set containing all the functions called during translation.
-    pub called_spec_funs: BTreeSet<(ModuleId, SpecFunId)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -90,7 +88,6 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
             /// Following flags used to translate pure Move functions.
             translating_fun_as_spec_fun: false,
             errors_generated: RefCell::new(false),
-            called_spec_funs: BTreeSet::new(),
         }
     }
 
@@ -482,8 +479,6 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
     /// Displays a call target for error messages.
     fn display_call_target(&mut self, module: &Option<ModuleName>, name: Symbol) -> String {
         if let Some(m) = module {
-            if m != &self.parent.parent.builtin_module() {
-                // Only print the module name if it is not the pseudo builtin module.
                 return format!(
                     "{}",
                     QualifiedSymbol {
@@ -492,31 +487,30 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
                     }
                     .display(self.symbol_pool())
                 );
-            }
         }
         format!("{}", name.display(self.symbol_pool()))
     }
 
-    /// Displays a call target candidate for error messages.
-    fn display_call_cand(
-        &mut self,
-        module: &Option<ModuleName>,
-        name: Symbol,
-        entry: &SpecFunEntry,
-    ) -> String {
-        let target = self.display_call_target(module, name);
-        let type_display_context = self.type_display_context();
-        format!(
-            "{}({}): {}",
-            target,
-            entry
-                .arg_types
-                .iter()
-                .map(|ty| ty.display(&type_display_context))
-                .join(", "),
-            entry.result_type.display(&type_display_context)
-        )
-    }
+    // /// Displays a call target candidate for error messages.
+    // fn display_call_cand(
+    //     &mut self,
+    //     module: &Option<ModuleName>,
+    //     name: Symbol,
+    //     entry: &SpecFunEntry,
+    // ) -> String {
+    //     let target = self.display_call_target(module, name);
+    //     let type_display_context = self.type_display_context();
+    //     format!(
+    //         "{}({}): {}",
+    //         target,
+    //         entry
+    //             .arg_types
+    //             .iter()
+    //             .map(|ty| ty.display(&type_display_context))
+    //             .join(", "),
+    //         entry.result_type.display(&type_display_context)
+    //     )
+    // }
 }
 
 /// # Type Translation
@@ -737,14 +731,14 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
                     self.new_error_exp()
                 }
             }
-            EA::Exp_::Name(maccess, type_params) => {
-                self.translate_name(&loc, maccess, type_params.as_deref(), expected_type)
-            }
-            EA::Exp_::Call(maccess, _is_macro, type_params, args) => {
-                // Need to make a &[&Exp] out of args.
-                let args = args.value.iter().collect_vec();
-                self.translate_fun_call(expected_type, &loc, maccess, type_params.as_deref(), &args)
-            }
+            // EA::Exp_::Name(maccess, type_params) => {
+            //     self.translate_name(&loc, maccess, type_params.as_deref(), expected_type)
+            // }
+            // EA::Exp_::Call(maccess, _is_macro, type_params, args) => {
+            //     // Need to make a &[&Exp] out of args.
+            //     let args = args.value.iter().collect_vec();
+            //     self.translate_fun_call(expected_type, &loc, maccess, type_params.as_deref(), &args)
+            // }
             EA::Exp_::Pack(maccess, generics, fields) => {
                 self.translate_pack(&loc, maccess, generics, fields, expected_type)
             }
@@ -768,22 +762,22 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
                 body,
                 expected_type,
             ),
-            EA::Exp_::BinopExp(l, op, r) => {
-                let args = vec![l.as_ref(), r.as_ref()];
-                let QualifiedSymbol {
-                    module_name,
-                    symbol,
-                } = self.parent.parent.bin_op_symbol(&op.value);
-                self.translate_call(&loc, &Some(module_name), symbol, None, &args, expected_type)
-            }
-            EA::Exp_::UnaryExp(op, exp) => {
-                let args = vec![exp.as_ref()];
-                let QualifiedSymbol {
-                    module_name,
-                    symbol,
-                } = self.parent.parent.unary_op_symbol(&op.value);
-                self.translate_call(&loc, &Some(module_name), symbol, None, &args, expected_type)
-            }
+            // EA::Exp_::BinopExp(l, op, r) => {
+            //     let args = vec![l.as_ref(), r.as_ref()];
+            //     let QualifiedSymbol {
+            //         module_name,
+            //         symbol,
+            //     } = self.parent.parent.bin_op_symbol(&op.value);
+            //     self.translate_call(&loc, &Some(module_name), symbol, None, &args, expected_type)
+            // }
+            // EA::Exp_::UnaryExp(op, exp) => {
+            //     let args = vec![exp.as_ref()];
+            //     let QualifiedSymbol {
+            //         module_name,
+            //         symbol,
+            //     } = self.parent.parent.unary_op_symbol(&op.value);
+            //     self.translate_call(&loc, &Some(module_name), symbol, None, &args, expected_type)
+            // }
             EA::Exp_::ExpDotted(usage, dotted) => match usage {
                 EA::DottedUsage::Move(_)
                 | EA::DottedUsage::Copy(_)
@@ -903,67 +897,67 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
         }
     }
 
-    fn translate_fun_call(
-        &mut self,
-        expected_type: &Type,
-        loc: &Loc,
-        maccess: &Spanned<EA::ModuleAccess_>,
-        generics: Option<&[EA::Type]>,
-        args: &[&EA::Exp],
-    ) -> ExpData {
-        // First check for builtin functions.
-        if let EA::ModuleAccess_::Name(n) = &maccess.value {
-            if n.value.as_str() == "update_field" {
-                return self.translate_update_field(expected_type, loc, generics, args);
-            }
-        }
-        // First check whether this is an Invoke on a function value.
-        if let EA::ModuleAccess_::Name(n) = &maccess.value {
-            let sym = self.symbol_pool().make(&n.value);
-            if let Some(entry) = self.lookup_local(sym, false) {
-                // Check whether the local has the expected function type.
-                let sym_ty = entry.type_.clone();
-                let (arg_types, args) = self.translate_exp_list(args, false);
-                let fun_t = Type::Fun(arg_types, Box::new(expected_type.clone()));
-                let sym_ty = self.check_type(loc, &sym_ty, &fun_t, "in expression");
-                let local_id = self.new_node_id_with_type_loc(&sym_ty, &self.to_loc(&n.loc));
-                let local_var = ExpData::LocalVar(local_id, sym);
-                let id = self.new_node_id_with_type_loc(expected_type, loc);
-                return ExpData::Invoke(id, local_var.into_exp(), args);
-            }
-        }
-        // Next treat this as a call to a global function.
-        let (module_name, name) = self.parent.module_access_to_parts(maccess);
+    // fn translate_fun_call(
+    //     &mut self,
+    //     expected_type: &Type,
+    //     loc: &Loc,
+    //     maccess: &Spanned<EA::ModuleAccess_>,
+    //     generics: Option<&[EA::Type]>,
+    //     args: &[&EA::Exp],
+    // ) -> ExpData {
+    //     // First check for builtin functions.
+    //     if let EA::ModuleAccess_::Name(n) = &maccess.value {
+    //         if n.value.as_str() == "update_field" {
+    //             return self.translate_update_field(expected_type, loc, generics, args);
+    //         }
+    //     }
+    //     // First check whether this is an Invoke on a function value.
+    //     if let EA::ModuleAccess_::Name(n) = &maccess.value {
+    //         let sym = self.symbol_pool().make(&n.value);
+    //         if let Some(entry) = self.lookup_local(sym, false) {
+    //             // Check whether the local has the expected function type.
+    //             let sym_ty = entry.type_.clone();
+    //             let (arg_types, args) = self.translate_exp_list(args, false);
+    //             let fun_t = Type::Fun(arg_types, Box::new(expected_type.clone()));
+    //             let sym_ty = self.check_type(loc, &sym_ty, &fun_t, "in expression");
+    //             let local_id = self.new_node_id_with_type_loc(&sym_ty, &self.to_loc(&n.loc));
+    //             let local_var = ExpData::LocalVar(local_id, sym);
+    //             let id = self.new_node_id_with_type_loc(expected_type, loc);
+    //             return ExpData::Invoke(id, local_var.into_exp(), args);
+    //         }
+    //     }
+    //     // Next treat this as a call to a global function.
+    //     let (module_name, name) = self.parent.module_access_to_parts(maccess);
 
-        // Ignore assert statement.
-        if name == self.parent.parent.assert_symbol() {
-            return ExpData::Call(
-                self.new_node_id_with_type_loc(expected_type, &self.to_loc(&maccess.loc)),
-                Operation::NoOp,
-                vec![],
-            );
-        }
+    //     // Ignore assert statement.
+    //     if name == self.parent.parent.assert_symbol() {
+    //         return ExpData::Call(
+    //             self.new_node_id_with_type_loc(expected_type, &self.to_loc(&maccess.loc)),
+    //             Operation::NoOp,
+    //             vec![],
+    //         );
+    //     }
 
-        let is_old = module_name.is_none() && name == self.parent.parent.old_symbol();
-        if is_old {
-            match self.old_status {
-                OldExpStatus::NotSupported => {
-                    self.error(loc, "`old(..)` expression not allowed in this context");
-                }
-                OldExpStatus::InsideOld => {
-                    self.error(loc, "`old(..old(..)..)` not allowed");
-                }
-                OldExpStatus::OutsideOld => {
-                    self.old_status = OldExpStatus::InsideOld;
-                }
-            }
-        }
-        let result = self.translate_call(loc, &module_name, name, generics, args, expected_type);
-        if is_old && self.old_status == OldExpStatus::InsideOld {
-            self.old_status = OldExpStatus::OutsideOld;
-        }
-        result
-    }
+    //     let is_old = module_name.is_none() && name == self.parent.parent.old_symbol();
+    //     if is_old {
+    //         match self.old_status {
+    //             OldExpStatus::NotSupported => {
+    //                 self.error(loc, "`old(..)` expression not allowed in this context");
+    //             }
+    //             OldExpStatus::InsideOld => {
+    //                 self.error(loc, "`old(..old(..)..)` not allowed");
+    //             }
+    //             OldExpStatus::OutsideOld => {
+    //                 self.old_status = OldExpStatus::InsideOld;
+    //             }
+    //         }
+    //     }
+    //     let result = self.translate_call(loc, &module_name, name, generics, args, expected_type);
+    //     if is_old && self.old_status == OldExpStatus::InsideOld {
+    //         self.old_status = OldExpStatus::OutsideOld;
+    //     }
+    //     result
+    // }
 
     /// Translates an expression without any known type expectation. This creates a fresh type
     /// variable and passes this in as expected type, then returns a pair of this type and the
@@ -1069,101 +1063,101 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
         ExpData::Block(id, decls, last.into_exp())
     }
 
-    /// Translates a name. Reports an error if the name is not found.
-    fn translate_name(
-        &mut self,
-        loc: &Loc,
-        maccess: &EA::ModuleAccess,
-        type_args: Option<&[EA::Type]>,
-        expected_type: &Type,
-    ) -> ExpData {
-        let global_var_sym = match &maccess.value {
-            EA::ModuleAccess_::ModuleAccess(..) => self.parent.module_access_to_qualified(maccess),
-            EA::ModuleAccess_::Name(name) => {
-                // First try to resolve simple name as local.
-                let sym = self.symbol_pool().make(name.value.as_str());
-                if let Some(exp) = self.resolve_local(
-                    loc,
-                    sym,
-                    self.old_status == OldExpStatus::InsideOld,
-                    expected_type,
-                ) {
-                    return exp;
-                }
+    // /// Translates a name. Reports an error if the name is not found.
+    // fn translate_name(
+    //     &mut self,
+    //     loc: &Loc,
+    //     maccess: &EA::ModuleAccess,
+    //     type_args: Option<&[EA::Type]>,
+    //     expected_type: &Type,
+    // ) -> ExpData {
+    //     let global_var_sym = match &maccess.value {
+    //         EA::ModuleAccess_::ModuleAccess(..) => self.parent.module_access_to_qualified(maccess),
+    //         EA::ModuleAccess_::Name(name) => {
+    //             // First try to resolve simple name as local.
+    //             let sym = self.symbol_pool().make(name.value.as_str());
+    //             if let Some(exp) = self.resolve_local(
+    //                 loc,
+    //                 sym,
+    //                 self.old_status == OldExpStatus::InsideOld,
+    //                 expected_type,
+    //             ) {
+    //                 return exp;
+    //             }
 
-                // If not found, try to resolve as builtin constant.
-                let builtin_sym = self.parent.parent.builtin_qualified_symbol(&name.value);
-                if let Some(entry) = self.parent.parent.const_table.get(&builtin_sym).cloned() {
-                    return self.translate_constant(loc, entry, expected_type);
-                }
-                // If not found, treat as global var in this module.
-                self.parent.qualified_by_module(sym)
-            }
-            EA::ModuleAccess_::Variant(_, _) => unimplemented!("translating variants"),
-        };
-        if let Some(entry) = self.parent.parent.const_table.get(&global_var_sym).cloned() {
-            return self.translate_constant(loc, entry, expected_type);
-        }
+    //             // If not found, try to resolve as builtin constant.
+    //             let builtin_sym = self.parent.parent.builtin_qualified_symbol(&name.value);
+    //             if let Some(entry) = self.parent.parent.const_table.get(&builtin_sym).cloned() {
+    //                 return self.translate_constant(loc, entry, expected_type);
+    //             }
+    //             // If not found, treat as global var in this module.
+    //             self.parent.qualified_by_module(sym)
+    //         }
+    //         EA::ModuleAccess_::Variant(_, _) => unimplemented!("translating variants"),
+    //     };
+    //     if let Some(entry) = self.parent.parent.const_table.get(&global_var_sym).cloned() {
+    //         return self.translate_constant(loc, entry, expected_type);
+    //     }
 
-        if let Some(entry) = self.parent.parent.spec_var_table.get(&global_var_sym) {
-            let type_args = type_args.unwrap_or(&[]);
-            if entry.type_params.len() != type_args.len() {
-                self.error(
-                    loc,
-                    &format!(
-                        "generic count mismatch (expected {} but found {})",
-                        entry.type_params.len(),
-                        type_args.len()
-                    ),
-                );
-                return self.new_error_exp();
-            }
-            let ty = entry.type_.clone();
-            let module_id = entry.module_id;
-            let instantiation = self.translate_types(type_args);
-            let ty = ty.instantiate(&instantiation);
-            let ty = self.check_type(loc, &ty, expected_type, "in spec var expression");
-            // Create expression global<GhostMem>(@0).v which backs up the ghost variable.
-            let ghost_mem_id = DatatypeId::new(
-                self.parent
-                    .parent
-                    .env
-                    .ghost_memory_name(global_var_sym.symbol),
-            );
-            let ghost_mem_ty = Type::Datatype(module_id, ghost_mem_id, instantiation.clone());
-            let zero_addr = ExpData::Value(
-                self.new_node_id_with_type_loc(&Type::Primitive(PrimitiveType::Address), loc),
-                Value::Address(BigUint::zero()),
-            );
-            let global_id = self.new_node_id_with_type_loc(&ghost_mem_ty, loc);
-            self.set_node_instantiation(global_id, vec![ghost_mem_ty]);
-            let global_access = ExpData::Call(
-                global_id,
-                Operation::Global(None),
-                vec![zero_addr.into_exp()],
-            );
-            let select_id = self.new_node_id_with_type_loc(&ty, loc);
-            self.set_node_instantiation(select_id, instantiation);
-            return ExpData::Call(
-                select_id,
-                Operation::Select(
-                    module_id,
-                    ghost_mem_id,
-                    FieldId::new(self.symbol_pool().make("v")),
-                ),
-                vec![global_access.into_exp()],
-            );
-        }
+    //     if let Some(entry) = self.parent.parent.spec_var_table.get(&global_var_sym) {
+    //         let type_args = type_args.unwrap_or(&[]);
+    //         if entry.type_params.len() != type_args.len() {
+    //             self.error(
+    //                 loc,
+    //                 &format!(
+    //                     "generic count mismatch (expected {} but found {})",
+    //                     entry.type_params.len(),
+    //                     type_args.len()
+    //                 ),
+    //             );
+    //             return self.new_error_exp();
+    //         }
+    //         let ty = entry.type_.clone();
+    //         let module_id = entry.module_id;
+    //         let instantiation = self.translate_types(type_args);
+    //         let ty = ty.instantiate(&instantiation);
+    //         let ty = self.check_type(loc, &ty, expected_type, "in spec var expression");
+    //         // Create expression global<GhostMem>(@0).v which backs up the ghost variable.
+    //         let ghost_mem_id = DatatypeId::new(
+    //             self.parent
+    //                 .parent
+    //                 .env
+    //                 .ghost_memory_name(global_var_sym.symbol),
+    //         );
+    //         let ghost_mem_ty = Type::Datatype(module_id, ghost_mem_id, instantiation.clone());
+    //         let zero_addr = ExpData::Value(
+    //             self.new_node_id_with_type_loc(&Type::Primitive(PrimitiveType::Address), loc),
+    //             Value::Address(BigUint::zero()),
+    //         );
+    //         let global_id = self.new_node_id_with_type_loc(&ghost_mem_ty, loc);
+    //         self.set_node_instantiation(global_id, vec![ghost_mem_ty]);
+    //         let global_access = ExpData::Call(
+    //             global_id,
+    //             Operation::Global(None),
+    //             vec![zero_addr.into_exp()],
+    //         );
+    //         let select_id = self.new_node_id_with_type_loc(&ty, loc);
+    //         self.set_node_instantiation(select_id, instantiation);
+    //         return ExpData::Call(
+    //             select_id,
+    //             Operation::Select(
+    //                 module_id,
+    //                 ghost_mem_id,
+    //                 FieldId::new(self.symbol_pool().make("v")),
+    //             ),
+    //             vec![global_access.into_exp()],
+    //         );
+    //     }
 
-        self.error(
-            loc,
-            &format!(
-                "undeclared `{}`",
-                global_var_sym.display(self.symbol_pool())
-            ),
-        );
-        self.new_error_exp()
-    }
+    //     self.error(
+    //         loc,
+    //         &format!(
+    //             "undeclared `{}`",
+    //             global_var_sym.display(self.symbol_pool())
+    //         ),
+    //     );
+    //     self.new_error_exp()
+    // }
 
     /// Creates an expression for a constant, checking the expected type.
     fn translate_constant(
@@ -1407,230 +1401,230 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
         }
     }
 
-    /// Translates a call, performing overload resolution. Reports an error if the function cannot be found.
-    /// This is used to resolve both calls to user spec functions and builtin operators.
-    fn translate_call(
-        &mut self,
-        loc: &Loc,
-        module: &Option<ModuleName>,
-        name: Symbol,
-        generics: Option<&[EA::Type]>,
-        args: &[&EA::Exp],
-        expected_type: &Type,
-    ) -> ExpData {
-        // Translate generic arguments, if any.
-        let generics = generics.as_ref().map(|ts| self.translate_types(ts));
-        // Translate arguments. Skip any lambda expressions; they are resolved after the overload
-        // is identified to avoid restrictions with type inference.
-        let (arg_types, mut translated_args) = self.translate_exp_list(args, true);
-        let args_have_errors = arg_types.iter().any(|t| t == &Type::Error);
-        // Lookup candidates.
-        let cand_modules = if let Some(m) = module {
-            vec![m.clone()]
-        } else {
-            // For an unqualified name, resolve it both in this and in the builtin pseudo module.
-            vec![
-                self.parent.module_name.clone(),
-                self.parent.parent.builtin_module(),
-            ]
-        };
-        let mut cands = vec![];
-        for module_name in cand_modules {
-            let full_name = QualifiedSymbol {
-                module_name,
-                symbol: name,
-            };
-            if let Some(list) = self.parent.parent.spec_fun_table.get(&full_name) {
-                cands.extend_from_slice(list);
-            }
-        }
-        if cands.is_empty() {
-            let display = self.display_call_target(module, name);
-            self.error(loc, &format!("no function named `{}` found", display));
-            return self.new_error_exp();
-        }
-        // Partition candidates in those which matched and which have been outruled.
-        let mut outruled = vec![];
-        let mut matching = vec![];
-        for cand in &cands {
-            if cand.arg_types.len() != translated_args.len() {
-                outruled.push((
-                    cand,
-                    format!(
-                        "argument count mismatch (expected {} but found {})",
-                        cand.arg_types.len(),
-                        translated_args.len()
-                    ),
-                ));
-                continue;
-            }
-            let (instantiation, diag) =
-                self.make_instantiation(cand.type_params.len(), vec![], generics.clone());
-            if let Some(msg) = diag {
-                outruled.push((cand, msg));
-                continue;
-            }
-            // Clone the current substitution, then unify arguments against parameter types.
-            let mut subs = self.subs.clone();
-            let mut success = true;
-            for (i, arg_ty) in arg_types.iter().enumerate() {
-                let instantiated = cand.arg_types[i].instantiate(&instantiation);
-                if let Err(err) = subs.unify(Variance::Allow, arg_ty, &instantiated) {
-                    outruled.push((
-                        cand,
-                        format!(
-                            "{} for argument {}",
-                            err.message(&self.type_display_context()),
-                            i + 1
-                        ),
-                    ));
-                    success = false;
-                    break;
-                }
-            }
-            if success {
-                matching.push((cand, subs, instantiation));
-            }
-        }
-        // Deliver results, reporting errors if there are no or ambiguous matches.
-        match matching.len() {
-            0 => {
-                // Only report error if args had no errors.
-                if !args_have_errors {
-                    let display = self.display_call_target(module, name);
-                    let notes = outruled
-                        .iter()
-                        .map(|(cand, msg)| {
-                            format!(
-                                "outruled candidate `{}` ({})",
-                                self.display_call_cand(module, name, cand),
-                                msg
-                            )
-                        })
-                        .collect_vec();
-                    self.error_with_notes(
-                        loc,
-                        &format!("no matching declaration of `{}`", display),
-                        notes,
-                    );
-                }
-                self.new_error_exp()
-            }
-            1 => {
-                let (cand, subs, instantiation) = matching.remove(0);
-                // Commit the candidate substitution to this expression build.
-                self.subs = subs;
-                // Now translate lambda-based arguments passing expected type to aid type inference.
-                for i in 0..translated_args.len() {
-                    let e = args[i];
-                    if matches!(e.value, EA::Exp_::Lambda(..)) {
-                        let expected_type = self.subs.specialize(&arg_types[i]);
-                        translated_args[i] = self.translate_exp(e, &expected_type).into_exp();
-                    }
-                }
-                // Check result type against expected type.
-                let ty = self.check_type(
-                    loc,
-                    &cand.result_type.instantiate(&instantiation),
-                    expected_type,
-                    "in expression",
-                );
-                // calls to built-in functions might have additional requirements on the types
-                match cand.oper {
-                    Operation::Exists(_) | Operation::Global(_) => {
-                        let ty_inst = &instantiation[0];
-                        if !matches!(ty_inst, Type::Datatype(..)) {
-                            self.error(
-                                loc,
-                                &format!(
-                                    "The type argument to `exists` and `global` must be a struct \
-                                    type but {} is not a struct type.",
-                                    ty_inst.display(&self.type_display_context())
-                                ),
-                            );
-                            return self.new_error_exp();
-                        }
-                    }
-                    _ => (),
-                };
+    // /// Translates a call, performing overload resolution. Reports an error if the function cannot be found.
+    // /// This is used to resolve both calls to user spec functions and builtin operators.
+    // fn translate_call(
+    //     &mut self,
+    //     loc: &Loc,
+    //     module: &Option<ModuleName>,
+    //     name: Symbol,
+    //     generics: Option<&[EA::Type]>,
+    //     args: &[&EA::Exp],
+    //     expected_type: &Type,
+    // ) -> ExpData {
+    //     // Translate generic arguments, if any.
+    //     let generics = generics.as_ref().map(|ts| self.translate_types(ts));
+    //     // Translate arguments. Skip any lambda expressions; they are resolved after the overload
+    //     // is identified to avoid restrictions with type inference.
+    //     let (arg_types, mut translated_args) = self.translate_exp_list(args, true);
+    //     let args_have_errors = arg_types.iter().any(|t| t == &Type::Error);
+    //     // Lookup candidates.
+    //     let cand_modules = if let Some(m) = module {
+    //         vec![m.clone()]
+    //     } else {
+    //         // For an unqualified name, resolve it both in this and in the builtin pseudo module.
+    //         vec![
+    //             self.parent.module_name.clone(),
+    //             self.parent.parent.builtin_module(),
+    //         ]
+    //     };
+    //     let mut cands = vec![];
+    //     for module_name in cand_modules {
+    //         let full_name = QualifiedSymbol {
+    //             module_name,
+    //             symbol: name,
+    //         };
+    //         if let Some(list) = self.parent.parent.spec_fun_table.get(&full_name) {
+    //             cands.extend_from_slice(list);
+    //         }
+    //     }
+    //     if cands.is_empty() {
+    //         let display = self.display_call_target(module, name);
+    //         self.error(loc, &format!("no function named `{}` found", display));
+    //         return self.new_error_exp();
+    //     }
+    //     // Partition candidates in those which matched and which have been outruled.
+    //     let mut outruled = vec![];
+    //     let mut matching = vec![];
+    //     for cand in &cands {
+    //         if cand.arg_types.len() != translated_args.len() {
+    //             outruled.push((
+    //                 cand,
+    //                 format!(
+    //                     "argument count mismatch (expected {} but found {})",
+    //                     cand.arg_types.len(),
+    //                     translated_args.len()
+    //                 ),
+    //             ));
+    //             continue;
+    //         }
+    //         let (instantiation, diag) =
+    //             self.make_instantiation(cand.type_params.len(), vec![], generics.clone());
+    //         if let Some(msg) = diag {
+    //             outruled.push((cand, msg));
+    //             continue;
+    //         }
+    //         // Clone the current substitution, then unify arguments against parameter types.
+    //         let mut subs = self.subs.clone();
+    //         let mut success = true;
+    //         for (i, arg_ty) in arg_types.iter().enumerate() {
+    //             let instantiated = cand.arg_types[i].instantiate(&instantiation);
+    //             if let Err(err) = subs.unify(Variance::Allow, arg_ty, &instantiated) {
+    //                 outruled.push((
+    //                     cand,
+    //                     format!(
+    //                         "{} for argument {}",
+    //                         err.message(&self.type_display_context()),
+    //                         i + 1
+    //                     ),
+    //                 ));
+    //                 success = false;
+    //                 break;
+    //             }
+    //         }
+    //         if success {
+    //             matching.push((cand, subs, instantiation));
+    //         }
+    //     }
+    //     // Deliver results, reporting errors if there are no or ambiguous matches.
+    //     match matching.len() {
+    //         0 => {
+    //             // Only report error if args had no errors.
+    //             if !args_have_errors {
+    //                 let display = self.display_call_target(module, name);
+    //                 let notes = outruled
+    //                     .iter()
+    //                     .map(|(cand, msg)| {
+    //                         format!(
+    //                             "outruled candidate `{}` ({})",
+    //                             self.display_call_cand(module, name, cand),
+    //                             msg
+    //                         )
+    //                     })
+    //                     .collect_vec();
+    //                 self.error_with_notes(
+    //                     loc,
+    //                     &format!("no matching declaration of `{}`", display),
+    //                     notes,
+    //                 );
+    //             }
+    //             self.new_error_exp()
+    //         }
+    //         1 => {
+    //             let (cand, subs, instantiation) = matching.remove(0);
+    //             // Commit the candidate substitution to this expression build.
+    //             self.subs = subs;
+    //             // Now translate lambda-based arguments passing expected type to aid type inference.
+    //             for i in 0..translated_args.len() {
+    //                 let e = args[i];
+    //                 if matches!(e.value, EA::Exp_::Lambda(..)) {
+    //                     let expected_type = self.subs.specialize(&arg_types[i]);
+    //                     translated_args[i] = self.translate_exp(e, &expected_type).into_exp();
+    //                 }
+    //             }
+    //             // Check result type against expected type.
+    //             let ty = self.check_type(
+    //                 loc,
+    //                 &cand.result_type.instantiate(&instantiation),
+    //                 expected_type,
+    //                 "in expression",
+    //             );
+    //             // calls to built-in functions might have additional requirements on the types
+    //             match cand.oper {
+    //                 Operation::Exists(_) | Operation::Global(_) => {
+    //                     let ty_inst = &instantiation[0];
+    //                     if !matches!(ty_inst, Type::Datatype(..)) {
+    //                         self.error(
+    //                             loc,
+    //                             &format!(
+    //                                 "The type argument to `exists` and `global` must be a struct \
+    //                                 type but {} is not a struct type.",
+    //                                 ty_inst.display(&self.type_display_context())
+    //                             ),
+    //                         );
+    //                         return self.new_error_exp();
+    //                     }
+    //                 }
+    //                 _ => (),
+    //             };
 
-                // Construct result.
-                let id = self.new_node_id_with_type_loc(&ty, loc);
-                self.set_node_instantiation(id, instantiation);
+    //             // Construct result.
+    //             let id = self.new_node_id_with_type_loc(&ty, loc);
+    //             self.set_node_instantiation(id, instantiation);
 
-                if let Operation::Function(module_id, spec_fun_id, None) = cand.oper {
-                    if !self.translating_fun_as_spec_fun {
-                        // Record the usage of spec function in specs, used later
-                        // in spec build.
-                        self.parent
-                            .parent
-                            .add_used_spec_fun(module_id.qualified(spec_fun_id));
-                    }
-                    let module_name = match module {
-                        Some(m) => m,
-                        _ => &self.parent.module_name,
-                    }
-                    .clone();
-                    let qsym = QualifiedSymbol {
-                        module_name,
-                        symbol: name,
-                    };
-                    // If the spec function called is from a Move function,
-                    // error if it is not pure.
-                    if let Some(entry) = self.parent.parent.fun_table.get(&qsym) {
-                        if !entry.is_pure {
-                            if self.translating_fun_as_spec_fun {
-                                // The Move function is calling another impure Move function,
-                                // so it should be considered impure.
-                                if module_id.to_usize() < self.parent.module_id.to_usize() {
-                                    self.error(loc, "Move function calls impure Move function");
-                                    return self.new_error_exp();
-                                }
-                            } else {
-                                let display = self.display_call_target(module, name);
-                                let notes = vec![format!(
-                                    "impure function `{}`",
-                                    self.display_call_cand(module, name, cand),
-                                )];
-                                self.parent.parent.env.error_with_notes(
-                                    loc,
-                                    &format!(
-                                        "calling impure function `{}` is not allowed",
-                                        display
-                                    ),
-                                    notes,
-                                );
-                                return self.new_error_exp();
-                            }
-                        }
-                    }
-                    self.called_spec_funs.insert((module_id, spec_fun_id));
-                }
-                ExpData::Call(id, cand.oper.clone(), translated_args)
-            }
-            _ => {
-                // Only report error if args had no errors.
-                if !args_have_errors {
-                    let display = self.display_call_target(module, name);
-                    let notes = matching
-                        .iter()
-                        .map(|(cand, _, _)| {
-                            format!(
-                                "matching candidate `{}`",
-                                self.display_call_cand(module, name, cand)
-                            )
-                        })
-                        .collect_vec();
-                    self.parent.parent.env.error_with_notes(
-                        loc,
-                        &format!("ambiguous application of `{}`", display),
-                        notes,
-                    );
-                }
-                self.new_error_exp()
-            }
-        }
-    }
+    //             if let Operation::Function(module_id, spec_fun_id, None) = cand.oper {
+    //                 if !self.translating_fun_as_spec_fun {
+    //                     // Record the usage of spec function in specs, used later
+    //                     // in spec build.
+    //                     self.parent
+    //                         .parent
+    //                         .add_used_spec_fun(module_id.qualified(spec_fun_id));
+    //                 }
+    //                 let module_name = match module {
+    //                     Some(m) => m,
+    //                     _ => &self.parent.module_name,
+    //                 }
+    //                 .clone();
+    //                 let qsym = QualifiedSymbol {
+    //                     module_name,
+    //                     symbol: name,
+    //                 };
+    //                 // If the spec function called is from a Move function,
+    //                 // error if it is not pure.
+    //                 if let Some(entry) = self.parent.parent.fun_table.get(&qsym) {
+    //                     if !entry.is_pure {
+    //                         if self.translating_fun_as_spec_fun {
+    //                             // The Move function is calling another impure Move function,
+    //                             // so it should be considered impure.
+    //                             if module_id.to_usize() < self.parent.module_id.to_usize() {
+    //                                 self.error(loc, "Move function calls impure Move function");
+    //                                 return self.new_error_exp();
+    //                             }
+    //                         } else {
+    //                             let display = self.display_call_target(module, name);
+    //                             let notes = vec![format!(
+    //                                 "impure function `{}`",
+    //                                 self.display_call_cand(module, name, cand),
+    //                             )];
+    //                             self.parent.parent.env.error_with_notes(
+    //                                 loc,
+    //                                 &format!(
+    //                                     "calling impure function `{}` is not allowed",
+    //                                     display
+    //                                 ),
+    //                                 notes,
+    //                             );
+    //                             return self.new_error_exp();
+    //                         }
+    //                     }
+    //                 }
+    //                 self.called_spec_funs.insert((module_id, spec_fun_id));
+    //             }
+    //             ExpData::Call(id, cand.oper.clone(), translated_args)
+    //         }
+    //         _ => {
+    //             // Only report error if args had no errors.
+    //             if !args_have_errors {
+    //                 let display = self.display_call_target(module, name);
+    //                 let notes = matching
+    //                     .iter()
+    //                     .map(|(cand, _, _)| {
+    //                         format!(
+    //                             "matching candidate `{}`",
+    //                             self.display_call_cand(module, name, cand)
+    //                         )
+    //                     })
+    //                     .collect_vec();
+    //                 self.parent.parent.env.error_with_notes(
+    //                     loc,
+    //                     &format!("ambiguous application of `{}`", display),
+    //                     notes,
+    //                 );
+    //             }
+    //             self.new_error_exp()
+    //         }
+    //     }
+    // }
 
     /// Translate a list of expressions and deliver them together with their types.
     fn translate_exp_list(

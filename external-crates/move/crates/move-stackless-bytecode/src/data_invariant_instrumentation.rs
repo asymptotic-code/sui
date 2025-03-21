@@ -46,7 +46,7 @@ impl FunctionTargetProcessor for DataInvariantInstrumentationProcessor {
         data: FunctionData,
         _scc_opt: Option<&[FunctionEnv]>,
     ) -> FunctionData {
-        if fun_env.is_native() || fun_env.is_intrinsic() {
+        if fun_env.is_native() {
             // Nothing to do.
             return data;
         }
