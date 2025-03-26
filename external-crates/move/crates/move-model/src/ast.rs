@@ -458,39 +458,6 @@ impl ExpData {
         vars
     }
 
-    // /// Returns the used memory of this expression.
-    // pub fn used_memory(
-    //     &self,
-    //     env: &GlobalEnv,
-    // ) -> BTreeSet<(QualifiedInstId<DatatypeId>, Option<MemoryLabel>)> {
-    //     let mut result = BTreeSet::new();
-    //     let mut visitor = |e: &ExpData| {
-    //         use ExpData::*;
-    //         use Operation::*;
-    //         match e {
-    //             Call(id, Exists(label), _) | Call(id, Global(label), _) => {
-    //                 let inst = &env.get_node_instantiation(*id);
-    //                 let (mid, sid, sinst) = inst[0].require_datatype();
-    //                 result.insert((mid.qualified_inst(sid, sinst.to_owned()), label.to_owned()));
-    //             }
-    //             Call(id, Function(mid, fid, labels), _) => {
-    //                 let inst = &env.get_node_instantiation(*id);
-    //                 let module = env.get_module(*mid);
-    //                 let fun = module.get_spec_fun(*fid);
-    //                 for (i, mem) in fun.used_memory.iter().enumerate() {
-    //                     result.insert((
-    //                         mem.to_owned().instantiate(inst),
-    //                         labels.as_ref().map(|l| l[i]),
-    //                     ));
-    //                 }
-    //             }
-    //             _ => {}
-    //         }
-    //     };
-    //     self.visit(&mut visitor);
-    //     result
-    // }
-
     /// Returns the temporaries used in this expression. Result is ordered by occurrence.
     pub fn used_temporaries(&self, env: &GlobalEnv) -> Vec<(TempIndex, Type)> {
         let mut temps = vec![];
@@ -906,38 +873,6 @@ impl fmt::Display for Value {
 
 //// =================================================================================================
 ///// # Purity of Expressions
-//
-//impl Operation {
-//    /// Determines whether this operation depends on global memory
-//    pub fn uses_memory<F>(&self, check_pure: &F) -> bool
-//    where
-//        F: Fn(ModuleId, SpecFunId) -> bool,
-//    {
-//        use Operation::*;
-//        match self {
-//            Exists(_) | Global(_) => false,
-//            Function(mid, fid, _) => check_pure(*mid, *fid),
-//            _ => true,
-//        }
-//    }
-//}
-//
-// impl ExpData {
-//     /// Determines whether this expression depends on global memory
-//     pub fn uses_memory<F>(&self, check_pure: &F) -> bool
-//     where
-//         F: Fn(ModuleId, SpecFunId) -> bool,
-//     {
-//         use ExpData::*;
-//         let mut no_use = true;
-//         self.visit(&mut |exp: &ExpData| {
-//             if let Call(_, oper, _) = exp {
-//                 no_use = no_use && oper.uses_memory(check_pure);
-//             }
-//         });
-//         no_use
-//     }
-// }
 
 impl ExpData {
     /// Checks whether the expression is pure, i.e. does not depend on memory or mutable
@@ -955,13 +890,6 @@ impl ExpData {
                 }
                 Call(_, oper, _) => match oper {
                     Exists(..) | Global(..) => is_pure = false,
-                    // Function(mid, fid, _) => {
-                    //     let module = env.get_module(*mid);
-                    //     let fun = module.get_spec_fun(*fid);
-                    //     if !fun.used_memory.is_empty() {
-                    //         is_pure = false;
-                    //     }
-                    // }
                     _ => {}
                 },
                 _ => {}
@@ -1256,17 +1184,6 @@ impl<'a> fmt::Display for OperationDisplay<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         use Operation::*;
         match self.oper {
-            // Function(mid, fid, labels_opt) => {
-            //     write!(f, "{}", self.fun_str(mid, fid))?;
-            //     if let Some(labels) = labels_opt {
-            //         write!(
-            //             f,
-            //             "[{}]",
-            //             labels.iter().map(|l| format!("{}", l)).join(", ")
-            //         )?;
-            //     }
-            //     Ok(())
-            // }
             Global(label_opt) => {
                 write!(f, "global")?;
                 if let Some(label) = label_opt {
@@ -1310,16 +1227,6 @@ impl<'a> fmt::Display for OperationDisplay<'a> {
 }
 
 impl<'a> OperationDisplay<'a> {
-    // fn fun_str(&self, mid: &ModuleId, fid: &SpecFunId) -> String {
-    //     let module_env = self.env.get_module(*mid);
-    //     let fun = module_env.get_spec_fun(*fid);
-    //     format!(
-    //         "{}::{}",
-    //         module_env.get_name().display(self.env.symbol_pool()),
-    //         fun.name.display(self.env.symbol_pool()),
-    //     )
-    // }
-
     fn struct_str(&self, mid: &ModuleId, sid: &DatatypeId) -> String {
         let module_env = self.env.get_module(*mid);
         let struct_env = module_env.get_struct(*sid);
