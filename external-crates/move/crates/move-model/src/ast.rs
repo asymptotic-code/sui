@@ -632,7 +632,6 @@ impl ExpData {
             if let ExpData::Call(_, oper, _) = e {
                 use Operation::*;
                 match oper {
-                    // Function(mid, ..) | Pack(mid, ..) | Select(mid, ..) | UpdateField(mid, ..) => {
                     Pack(mid, ..) | Select(mid, ..) | UpdateField(mid, ..) => {
                         usage.insert(*mid);
                     }
@@ -871,8 +870,8 @@ impl fmt::Display for Value {
     }
 }
 
-//// =================================================================================================
-///// # Purity of Expressions
+// =================================================================================================
+/// # Purity of Expressions
 
 impl ExpData {
     /// Checks whether the expression is pure, i.e. does not depend on memory or mutable
