@@ -13,7 +13,6 @@ use itertools::Itertools;
 
 use move_model::{
     ast::{self, Exp, ExpData, TempIndex, Value},
-    exp_generator::ExpGenerator,
     model::{
         DatatypeId, FunId, FunctionEnv, GlobalEnv, Loc, ModuleId, QualifiedId, QualifiedInstId,
     },
@@ -22,6 +21,7 @@ use move_model::{
 };
 
 use crate::{
+    exp_generator::ExpGenerator,
     function_data_builder::FunctionDataBuilder,
     function_target::{FunctionData, FunctionTarget},
     function_target_pipeline::{
