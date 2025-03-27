@@ -17,7 +17,7 @@ use move_core_types::runtime_value::MoveValue;
 use move_ir_types::location::Spanned;
 
 use crate::{
-    ast::{Exp, ExpData, LocalVarDecl, ModuleName, Operation, QualifiedSymbol, QuantKind, Value},
+    ast::Value,
     builder::{
         model_builder::{ConstEntry, DatatypeData, LocalVarEntry},
         module_builder::ModuleBuilder,
@@ -291,13 +291,6 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
             symbol_pool: self.symbol_pool(),
             reverse_datatype_table: &self.parent.parent.reverse_datatype_table,
         }
-    }
-
-    /// Creates an error expression.
-    pub fn new_error_exp(&mut self) -> ExpData {
-        let id =
-            self.new_node_id_with_type_loc(&Type::Error, &self.parent.parent.env.internal_loc());
-        ExpData::Invalid(id)
     }
 
     /// Enters a new scope in the locals table.
