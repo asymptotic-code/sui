@@ -380,7 +380,6 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
         let entry = LocalVarEntry {
             loc: loc.clone(),
             type_,
-            operation: None,
             temp_index,
         };
         if let Some(old) = self
