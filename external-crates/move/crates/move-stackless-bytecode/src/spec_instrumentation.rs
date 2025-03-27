@@ -18,7 +18,6 @@ use move_model::{
         DatatypeId, FunId, FunctionEnv, GlobalEnv, Loc, ModuleId, QualifiedId, QualifiedInstId,
     },
     pragmas::{ABORTS_IF_IS_PARTIAL_PRAGMA, EMITS_IS_PARTIAL_PRAGMA, EMITS_IS_STRICT_PRAGMA},
-    spec_translator::{SpecTranslator, TranslatedSpec},
     ty::{Type, TypeDisplayContext, BOOL_TYPE, NUM_TYPE},
 };
 
@@ -35,6 +34,7 @@ use crate::{
         AbortAction, AssignKind, AttrId, BorrowEdge, BorrowNode, Bytecode, HavocKind, Label,
         Operation, PropKind,
     },
+    spec_translator::{SpecTranslator, TranslatedSpec},
     usage_analysis, verification_analysis,
 };
 

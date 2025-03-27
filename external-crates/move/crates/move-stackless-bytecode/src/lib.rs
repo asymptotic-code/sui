@@ -42,6 +42,7 @@ pub mod pipeline_factory;
 pub mod reaching_def_analysis;
 pub mod spec_global_variable_analysis;
 pub mod spec_instrumentation;
+pub mod spec_translator;
 pub mod stackless_bytecode;
 pub mod stackless_bytecode_generator;
 pub mod stackless_control_flow_graph;

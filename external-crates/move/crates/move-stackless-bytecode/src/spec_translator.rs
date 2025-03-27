@@ -10,6 +10,9 @@ use itertools::Itertools;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
+    };
+
+use move_model::{
     ast::{
         Condition, ConditionKind, Exp, ExpData, GlobalInvariant, LocalVarDecl, MemoryLabel,
         Operation, TempIndex, TraceKind,
