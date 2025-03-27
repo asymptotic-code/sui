@@ -360,15 +360,14 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
         loc: &Loc,
         name: Symbol,
         type_: Type,
-        operation: Option<Operation>,
         temp_index: Option<usize>,
     ) {
-        self.internal_define_local(loc, name, type_, operation, temp_index)
+        self.internal_define_local(loc, name, type_, temp_index)
     }
 
     /// Defines a let local.
     pub fn define_let_local(&mut self, loc: &Loc, name: Symbol, type_: Type) {
-        self.internal_define_local(loc, name, type_, None, None)
+        self.internal_define_local(loc, name, type_, None)
     }
 
     fn internal_define_local(
@@ -376,13 +375,12 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
         loc: &Loc,
         name: Symbol,
         type_: Type,
-        operation: Option<Operation>,
         temp_index: Option<usize>,
     ) {
         let entry = LocalVarEntry {
             loc: loc.clone(),
             type_,
-            operation,
+            operation: None,
             temp_index,
         };
         if let Some(old) = self
@@ -449,7 +447,6 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
                     &self.to_loc(&v.0.loc),
                     sym,
                     ty.clone(),
-                    None,
                     // If this is for a proper Move function (not spec function), add the
                     // index so we can resolve this to a `Temporary` expression instead of
                     // a `LocalVar`.
