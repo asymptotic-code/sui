@@ -223,3 +223,9 @@ impl<'a> fmt::Display for QualifiedSymbolDisplay<'a> {
         Ok(())
     }
 }
+
+impl fmt::Display for GlobalId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        write!(f, "@{}", self.as_usize())
+    }
+}

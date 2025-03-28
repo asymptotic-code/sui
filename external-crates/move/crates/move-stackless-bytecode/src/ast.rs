@@ -24,7 +24,7 @@ use once_cell::sync::Lazy;
 use move_binary_format::file_format::CodeOffset;
 
 use move_model::{
-    ast::{Attribute, AttributeValue, Value},
+    ast::{QualifiedSymbol, Value},
     model::{
         DatatypeId, EnvDisplay, FieldId, FunId, FunctionVisibility, GlobalEnv, GlobalId, Loc,
         ModuleId, NodeId, QualifiedId, QualifiedInstId, TypeParameter,
@@ -33,9 +33,7 @@ use move_model::{
     symbol::{Symbol, SymbolPool},
     ty::{Type, TypeDisplayContext},
 };
-use crate::{
-    exp_rewriter::ExpRewriterFunctions,
-};
+use crate::exp_rewriter::ExpRewriterFunctions;
 
 const MAX_ADDR_STRING: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
@@ -1061,48 +1059,42 @@ impl<'a> OperationDisplay<'a> {
     }
 }
 
-impl fmt::Display for MemoryLabel {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
-        write!(f, "@{}", self.as_usize())
-    }
-}
-
-impl<'a> fmt::Display for EnvDisplay<'a, Condition> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match &self.val.kind {
-            ConditionKind::LetPre(name) => write!(
-                f,
-                "let {} = {};",
-                name.display(self.env.symbol_pool()),
-                self.val.exp.display(self.env)
-            )?,
-            ConditionKind::LetPost(name) => write!(
-                f,
-                "let post {} = {};",
-                name.display(self.env.symbol_pool()),
-                self.val.exp.display(self.env)
-            )?,
-            ConditionKind::Emits => {
-                let exps = self.val.all_exps().collect_vec();
-                write!(
-                    f,
-                    "emit {} to {}",
-                    exps[0].display(self.env),
-                    exps[1].display(self.env)
-                )?;
-                if exps.len() > 2 {
-                    write!(f, "if {}", exps[2].display(self.env))?;
-                }
-                write!(f, ";")?
-            }
-            ConditionKind::Update => write!(
-                f,
-                "update {} = {};",
-                self.val.additional_exps[0].display(self.env),
-                self.val.exp.display(self.env)
-            )?,
-            _ => write!(f, "{} {};", self.val.kind, self.val.exp.display(self.env))?,
-        }
-        Ok(())
-    }
-}
+// impl<'a> fmt::Display for EnvDisplay<'a, Condition> {
+//     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+//         match &self.val.kind {
+//             ConditionKind::LetPre(name) => write!(
+//                 f,
+//                 "let {} = {};",
+//                 name.display(self.env.symbol_pool()),
+//                 self.val.exp.display(self.env)
+//             )?,
+//             ConditionKind::LetPost(name) => write!(
+//                 f,
+//                 "let post {} = {};",
+//                 name.display(self.env.symbol_pool()),
+//                 self.val.exp.display(self.env)
+//             )?,
+//             ConditionKind::Emits => {
+//                 let exps = self.val.all_exps().collect_vec();
+//                 write!(
+//                     f,
+//                     "emit {} to {}",
+//                     exps[0].display(self.env),
+//                     exps[1].display(self.env)
+//                 )?;
+//                 if exps.len() > 2 {
+//                     write!(f, "if {}", exps[2].display(self.env))?;
+//                 }
+//                 write!(f, ";")?
+//             }
+//             ConditionKind::Update => write!(
+//                 f,
+//                 "update {} = {};",
+//                 self.val.additional_exps[0].display(self.env),
+//                 self.val.exp.display(self.env)
+//             )?,
+//             _ => write!(f, "{} {};", self.val.kind, self.val.exp.display(self.env))?,
+//         }
+//         Ok(())
+//     }
+// }
