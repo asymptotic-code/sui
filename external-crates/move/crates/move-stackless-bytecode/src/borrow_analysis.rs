@@ -114,7 +114,9 @@ impl BorrowInfo {
         trees: &mut Vec<Vec<WriteBackAction>>,
     ) {
         match node {
-            BorrowNode::LocalRoot(..) | BorrowNode::GlobalRoot(..) => {
+            BorrowNode::LocalRoot(..)
+            | BorrowNode::GlobalRoot(..)
+            | BorrowNode::SpecGlobalRoot(..) => {
                 trees.push(order);
             }
             BorrowNode::Reference(index) => {
@@ -653,6 +655,16 @@ impl TransferFunctions for BorrowAnalysis<'_> {
                             id: *sid,
                             inst: inst.to_owned(),
                         });
+                        state.add_node(dest_node.clone());
+                        state.add_edge(src_node, dest_node, BorrowEdge::Direct);
+                    }
+                    Function(mid, fid, tys)
+                        if mid.qualified(*fid)
+                            == self.func_target.global_env().global_borrow_mut_qid()
+                            && livevar_annotation_at.after.contains(&dests[0]) =>
+                    {
+                        let dest_node = self.borrow_node(dests[0]);
+                        let src_node = BorrowNode::SpecGlobalRoot(tys.clone());
                         state.add_node(dest_node.clone());
                         state.add_edge(src_node, dest_node, BorrowEdge::Direct);
                     }

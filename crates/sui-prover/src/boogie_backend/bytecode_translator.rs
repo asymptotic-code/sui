@@ -60,7 +60,7 @@ use crate::boogie_backend::{
         boogie_debug_track_abort, boogie_debug_track_local, boogie_debug_track_return,
         boogie_declare_global, boogie_enum_field_name, boogie_enum_name,
         boogie_enum_variant_ctor_name, boogie_equality_for_type, boogie_field_sel,
-        boogie_field_update, boogie_function_bv_name, boogie_function_name,
+        boogie_field_update, boogie_function_bv_name, boogie_function_name, boogie_inst_suffix,
         boogie_make_vec_from_strings, boogie_modifies_memory_name, boogie_num_literal,
         boogie_num_type_base, boogie_num_type_string_capital, boogie_reflection_type_info,
         boogie_reflection_type_name, boogie_resource_memory_name, boogie_spec_global_var_name,
@@ -330,9 +330,7 @@ impl<'env> BoogieTranslator<'env> {
             }
 
             for ref fun_env in module_env.get_functions() {
-                if fun_env.is_native()
-                    || intrinsic_fun_ids.contains(&fun_env.get_qualified_id())
-                {
+                if fun_env.is_native() || intrinsic_fun_ids.contains(&fun_env.get_qualified_id()) {
                     continue;
                 }
 
@@ -2202,6 +2200,18 @@ impl<'env> FunctionTranslator<'env> {
                             }
                         }
 
+                        if callee_env.get_qualified_id() == self.parent.env.global_borrow_mut_qid()
+                        {
+                            emitln!(
+                                self.writer(),
+                                "{} := $Mutation($SpecGlobal(\"{}\"), EmptyVec(), {});",
+                                str_local(dests[0]),
+                                boogie_inst_suffix(self.parent.env, inst),
+                                boogie_spec_global_var_name(self.parent.env, inst),
+                            );
+                            processed = true;
+                        }
+
                         if callee_env.get_qualified_id() == self.parent.env.ensures_qid() {
                             emitln!(
                                 self.writer(),
@@ -3466,6 +3476,15 @@ impl<'env> FunctionTranslator<'env> {
                     memory_name,
                     memory_name,
                     src_str,
+                    src_str
+                );
+            }
+            SpecGlobalRoot(tys) => {
+                assert!(matches!(edge, BorrowEdge::Direct));
+                emitln!(
+                    writer,
+                    "{} := $Dereference({});",
+                    boogie_spec_global_var_name(self.parent.env, tys),
                     src_str
                 );
             }
