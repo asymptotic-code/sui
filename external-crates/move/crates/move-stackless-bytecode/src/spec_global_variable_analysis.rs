@@ -381,6 +381,26 @@ impl FunctionTargetProcessor for SpecGlobalVariableAnalysisProcessor {
                 })
                 .collect();
         } else {
+            for bc in &data.code {
+                if let Bytecode::Call(attr_id, _, Operation::Function(module_id, fun_id, _), _, _) =
+                    bc
+                {
+                    let callee_id = module_id.qualified(*fun_id);
+                    if callee_id == func_env.module_env.env.declare_global_qid()
+                        || callee_id == func_env.module_env.env.declare_global_mut_qid()
+                    {
+                        let loc = FunctionTarget::new(func_env, &data).get_bytecode_loc(*attr_id);
+                        let diag = Diagnostic::new(Severity::Error)
+                            .with_code("E0014")
+                            .with_message(
+                                "unexpected ghost variable declaration. Declare ghost variables in #[spec] functions.",
+                            )
+                            .with_labels(vec![Label::primary(loc.file_id(), loc.span())]);
+                        func_env.module_env.env.add_diag(diag);
+                    }
+                }
+            }
+
             set_info(func_env, &mut data, info);
         }
 
