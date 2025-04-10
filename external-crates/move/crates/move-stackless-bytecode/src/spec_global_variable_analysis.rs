@@ -32,8 +32,8 @@ impl SpecGlobalVariableInfo {
         &self.mut_vars
     }
 
-    pub fn all_vars(&self) -> impl Iterator<Item = Vec<Type>> + '_ {
-        self.imm_vars.union(&self.mut_vars).cloned()
+    pub fn all_vars(&self) -> impl Iterator<Item = &Vec<Type>> + '_ {
+        self.imm_vars.union(&self.mut_vars)
     }
 
     pub fn union(&self, other: &Self) -> Self {
@@ -326,17 +326,17 @@ impl FunctionTargetProcessor for SpecGlobalVariableAnalysisProcessor {
 
                 if spec_info.all_vars().contains(&var) {
                     // check mutability
-                    if info.mut_vars().contains(&var) && !spec_info.mut_vars().contains(&var) {
+                    if info.mut_vars().contains(var) && !spec_info.mut_vars().contains(var) {
                         // if the variable is declared as immutable in spec but used as mutable
                         let primary_labels = info
                             .mut_vars_locs
-                            .get(&var)
+                            .get(var)
                             .unwrap()
                             .iter()
                             .map(|loc| Label::primary(loc.file_id(), loc.span()))
                             .collect();
                         let spec_var_loc =
-                            spec_info.imm_vars_locs.get(&var).unwrap().first().unwrap();
+                            spec_info.imm_vars_locs.get(var).unwrap().first().unwrap();
                         let secondary_label =
                             Label::secondary(spec_var_loc.file_id(), spec_var_loc.span());
                         let diag = Diagnostic::new(Severity::Error)
@@ -354,8 +354,8 @@ impl FunctionTargetProcessor for SpecGlobalVariableAnalysisProcessor {
                     continue;
                 }
 
-                let imm_locs = info.imm_vars_locs.get(&var).into_iter().flatten();
-                let mut_locs = info.mut_vars_locs.get(&var).into_iter().flatten();
+                let imm_locs = info.imm_vars_locs.get(var).into_iter().flatten();
+                let mut_locs = info.mut_vars_locs.get(var).into_iter().flatten();
                 let all_locs = imm_locs.chain(mut_locs).collect::<BTreeSet<_>>();
 
                 if let Some(spec_var_ty) = spec_vars.get(var_name) {

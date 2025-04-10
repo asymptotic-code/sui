@@ -731,12 +731,17 @@ impl<'env> BoogieTranslator<'env> {
             .unwrap_or(empty_set);
 
         assert!(
-            ghost_global_type_instances.is_subset(&ghost_declare_global_type_instances),
+            ghost_global_type_instances.is_subset(
+                &ghost_declare_global_type_instances
+                    .iter()
+                    .map(|x| (*x).clone())
+                    .collect()
+            ),
             "missing type instances for function {}",
             ghost_global_fun_env.get_full_name_str(),
         );
 
-        for type_inst in &ghost_declare_global_type_instances {
+        for type_inst in ghost_declare_global_type_instances {
             self.generate_ghost_global_var_declaration(type_inst);
         }
 

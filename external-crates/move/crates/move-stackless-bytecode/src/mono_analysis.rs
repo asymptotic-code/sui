@@ -205,7 +205,7 @@ impl MonoAnalysisProcessor {
             .collect::<BTreeSet<_>>()
             .iter()
             .for_each(|tys| {
-                for ty in tys {
+                for ty in *tys {
                     analyzer.add_type_root(ty);
                 }
             });
@@ -250,7 +250,7 @@ impl Analyzer<'_> {
 
                     let info = spec_global_variable_analysis::get_info(&target.data);
                     for tys in info.all_vars() {
-                        for ty in &tys {
+                        for ty in tys {
                             self.add_type_root(ty)
                         }
                     }
