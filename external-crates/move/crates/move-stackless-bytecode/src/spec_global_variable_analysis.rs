@@ -212,6 +212,14 @@ pub fn collect_spec_global_variable_info(
                 return Some(SpecGlobalVariableInfo::singleton_imm(type_inst, &loc));
             }
 
+            if callee_id == fun_target.func_env.module_env.env.global_set_qid() {
+                return Some(SpecGlobalVariableInfo::singleton_mut(type_inst, &loc));
+            }
+
+            if callee_id == fun_target.func_env.module_env.env.global_borrow_mut_qid() {
+                return Some(SpecGlobalVariableInfo::singleton_mut(type_inst, &loc));
+            }
+
             if callee_id == fun_target.func_env.module_env.env.log_ghost_qid() {
                 return Some(SpecGlobalVariableInfo::singleton_imm(type_inst, &loc));
             }
