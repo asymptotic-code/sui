@@ -703,22 +703,21 @@ impl TransferFunctions for BorrowAnalysis<'_> {
                         {
                             vec![targs.clone()]
                         } else {
-                            let data = match self.targets.get_spec_by_fun(&mid.qualified(*fid)) {
-                                Some(spec_qid)
-                                    if spec_qid
-                                        != &self.func_target.func_env.get_qualified_id() =>
-                                {
-                                    self.targets
-                                        .get_data(spec_qid, &FunctionVariant::Baseline)
-                                        .expect(&format!(
-                                            "spec function not found: {}",
-                                            self.func_target
-                                                .global_env()
-                                                .get_function(*spec_qid)
-                                                .get_full_name_str()
-                                        ))
-                                }
-                                _ => self.func_target.data,
+                            let data = match self.targets.get_callee_spec_qid(
+                                &self.func_target.func_env.get_qualified_id(),
+                                &mid.qualified(*fid),
+                            ) {
+                                Some(spec_qid) => self
+                                    .targets
+                                    .get_data(spec_qid, &FunctionVariant::Baseline)
+                                    .expect(&format!(
+                                        "spec function not found: {}",
+                                        self.func_target
+                                            .global_env()
+                                            .get_function(*spec_qid)
+                                            .get_full_name_str()
+                                    )),
+                                None => self.func_target.data,
                             };
                             spec_global_variable_analysis::get_info(data)
                                 .instantiate(targs)

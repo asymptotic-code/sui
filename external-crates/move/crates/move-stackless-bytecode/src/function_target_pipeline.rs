@@ -280,6 +280,22 @@ impl FunctionTargetsHolder {
         self.datatype_invs.get_by_right(id)
     }
 
+    /// Return the specification of the callee function if the specification can
+    /// be used instead of the callee by the caller. This is the case if and
+    /// only if
+    /// * a specification exists for the callee, and
+    /// * the caller is not the specification.
+    pub fn get_callee_spec_qid(
+        &self,
+        caller_qid: &QualifiedId<FunId>,
+        callee_qid: &QualifiedId<FunId>,
+    ) -> Option<&QualifiedId<FunId>> {
+        match self.get_spec_by_fun(callee_qid) {
+            Some(spec_qid) if spec_qid != caller_qid => Some(spec_qid),
+            _ => None,
+        }
+    }
+
     /// Adds a new function target. The target will be initialized from the Move byte code.
     pub fn add_target(&mut self, func_env: &FunctionEnv<'_>) {
         let generator = StacklessBytecodeGenerator::new(func_env);
@@ -612,15 +628,9 @@ impl FunctionTargetPipeline {
             let src_idx = nodes.get(&fun_id).unwrap();
             let fun_env = env.get_function(fun_id);
             for callee in fun_env.get_called_functions() {
-                let dst_qid = if let Some(spec_id) = targets.get_spec_by_fun(&callee) {
-                    if spec_id != &fun_env.get_qualified_id() {
-                        spec_id
-                    } else {
-                        &callee
-                    }
-                } else {
-                    &callee
-                };
+                let dst_qid = targets
+                    .get_callee_spec_qid(&fun_env.get_qualified_id(), &callee)
+                    .unwrap_or(&callee);
                 let dst_idx = nodes
                     .get(dst_qid)
                     .expect("callee is not in function targets");
