@@ -612,8 +612,17 @@ impl FunctionTargetPipeline {
             let src_idx = nodes.get(&fun_id).unwrap();
             let fun_env = env.get_function(fun_id);
             for callee in fun_env.get_called_functions() {
+                let dst_qid = if let Some(spec_id) = targets.get_spec_by_fun(&callee) {
+                    if spec_id != &fun_env.get_qualified_id() {
+                        spec_id
+                    } else {
+                        &callee
+                    }
+                } else {
+                    &callee
+                };
                 let dst_idx = nodes
-                    .get(&callee)
+                    .get(dst_qid)
                     .expect("callee is not in function targets");
                 graph.add_edge(*src_idx, *dst_idx, ());
             }
