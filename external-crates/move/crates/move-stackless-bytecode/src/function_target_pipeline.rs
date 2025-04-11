@@ -652,7 +652,8 @@ impl FunctionTargetPipeline {
         targets: &mut FunctionTargetsHolder,
         hook_before_pipeline: H1,
         hook_after_each_processor: H2,
-    ) where
+    ) -> Result<(), &Box<dyn FunctionTargetProcessor>>
+    where
         H1: Fn(&FunctionTargetsHolder),
         H2: Fn(usize, &dyn FunctionTargetProcessor, &FunctionTargetsHolder),
     {
@@ -694,11 +695,19 @@ impl FunctionTargetPipeline {
                 processor.finalize(env, targets);
             }
             hook_after_each_processor(step_count + 1, processor.as_ref(), targets);
+            if env.has_errors() {
+                return Err(processor);
+            }
         }
+        Ok(())
     }
 
     /// Run the pipeline on all functions in the targets holder, with no hooks in effect
-    pub fn run(&self, env: &GlobalEnv, targets: &mut FunctionTargetsHolder) {
+    pub fn run(
+        &self,
+        env: &GlobalEnv,
+        targets: &mut FunctionTargetsHolder,
+    ) -> Result<(), &Box<dyn FunctionTargetProcessor>> {
         self.run_with_hook(env, targets, |_| {}, |_, _, _| {})
     }
 
@@ -711,7 +720,7 @@ impl FunctionTargetPipeline {
         targets: &mut FunctionTargetsHolder,
         dump_base_name: &str,
         dump_cfg: bool,
-    ) {
+    ) -> Result<(), &Box<dyn FunctionTargetProcessor>> {
         self.run_with_hook(
             env,
             targets,
@@ -735,7 +744,7 @@ impl FunctionTargetPipeline {
                     Self::dump_cfg(env, holders, dump_base_name, step_count, &suffix);
                 }
             },
-        );
+        )
     }
 
     fn print_targets(env: &GlobalEnv, name: &str, targets: &FunctionTargetsHolder) -> String {
