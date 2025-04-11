@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// The environment extension computed by this analysis.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpecGlobalVariableInfo {
     imm_vars: BTreeSet<Vec<Type>>,
     mut_vars: BTreeSet<Vec<Type>>,
@@ -185,15 +185,6 @@ pub fn get_info(data: &FunctionData) -> &SpecGlobalVariableInfo {
     data.annotations.get::<SpecGlobalVariableInfo>().unwrap()
 }
 
-fn set_info(env: &FunctionEnv, data: &mut FunctionData, info: SpecGlobalVariableInfo) {
-    assert!(
-        !data.annotations.has::<SpecGlobalVariableInfo>(),
-        "spec global variable info already set: function={}",
-        env.get_full_name_str(),
-    );
-    data.annotations.set::<SpecGlobalVariableInfo>(info, true);
-}
-
 pub fn collect_spec_global_variable_info(
     targets: &FunctionTargetsHolder,
     fun_target: &FunctionTarget,
@@ -304,10 +295,8 @@ impl FunctionTargetProcessor for SpecGlobalVariableAnalysisProcessor {
         targets: &mut FunctionTargetsHolder,
         func_env: &FunctionEnv,
         mut data: FunctionData,
-        _scc_opt: Option<&[FunctionEnv]>,
+        scc_opt: Option<&[FunctionEnv]>,
     ) -> FunctionData {
-        // assert!(scc_opt.is_none(), "recursive functions not supported");
-
         let info = collect_spec_global_variable_info(
             targets,
             &FunctionTarget::new(func_env, &data),
@@ -440,7 +429,7 @@ impl FunctionTargetProcessor for SpecGlobalVariableAnalysisProcessor {
                 }
             }
 
-            set_info(func_env, &mut data, info);
+            data.annotations.set_with_fixedpoint_check(info, scc_opt.is_some());
         }
 
         data
@@ -474,7 +463,7 @@ impl FunctionTargetProcessor for SpecGlobalVariableAnalysisProcessor {
             });
             let info = SpecGlobalVariableInfo::info_union(infos_iter);
 
-            set_info(&spec_env, spec_data, info);
+            spec_data.annotations.set::<SpecGlobalVariableInfo>(info, true);
         }
     }
 
