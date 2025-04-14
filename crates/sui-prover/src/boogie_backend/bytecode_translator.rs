@@ -245,8 +245,6 @@ impl<'env> BoogieTranslator<'env> {
 
         self.translate_ghost_global(&mono_info);
 
-        self.add_type(&Type::Primitive(PrimitiveType::Bool));
-
         // let singleton_function_id = FunId::new(self.env.symbol_pool().make("singleton"));
         let reverse_function_id = FunId::new(self.env.symbol_pool().make("reverse"));
         let append_function_id = FunId::new(self.env.symbol_pool().make("append"));
@@ -779,10 +777,11 @@ impl<'env> BoogieTranslator<'env> {
     }
 
     fn add_type(&self, ty: &Type) {
+        let val_ty = ty.skip_reference();
         let overwritten = self
             .types
             .borrow_mut()
-            .insert(ty.clone(), boogie_type(self.env, ty));
+            .insert(val_ty.clone(), boogie_type_suffix(self.env, val_ty));
         match overwritten {
             bimap::Overwritten::Neither | bimap::Overwritten::Pair { .. } => {}
             _ => panic!("type already exists"),
@@ -841,13 +840,6 @@ impl<'env> StructTranslator<'env> {
         let writer = self.parent.writer;
         let struct_env = self.struct_env;
         let env = struct_env.module_env.env;
-
-        // Record datatype
-        self.parent.add_type(&Type::Datatype(
-            struct_env.module_env.get_id(),
-            struct_env.get_id(),
-            self.type_inst.to_owned(),
-        ));
 
         if struct_env.is_native() {
             return;
@@ -1079,13 +1071,6 @@ impl<'env> EnumTranslator<'env> {
         let writer = self.parent.writer;
         let enum_env = self.enum_env;
         let env = enum_env.module_env.env;
-
-        // Record datatype
-        self.parent.add_type(&Type::Datatype(
-            enum_env.module_env.get_id(),
-            enum_env.get_id(),
-            self.type_inst.to_owned(),
-        ));
 
         let qid = enum_env
             .get_qualified_id()
@@ -3356,11 +3341,13 @@ impl<'env> FunctionTranslator<'env> {
                     TraceGhost(ghost_type, value_type) => {
                         let instantiated_ghost_type = ghost_type.instantiate(self.type_inst);
                         let instantiated_value_type = value_type.instantiate(self.type_inst);
+                        self.parent.add_type(&instantiated_ghost_type);
+                        self.parent.add_type(&instantiated_value_type);
                         emitln!(
                             self.writer(),
                             "assume {{:print \"$track_ghost({},{}):\", {}}} true;",
-                            boogie_type(self.parent.env, &instantiated_ghost_type),
-                            boogie_type(self.parent.env, &instantiated_value_type),
+                            boogie_type_suffix(self.parent.env, &instantiated_ghost_type),
+                            boogie_type_suffix(self.parent.env, &instantiated_value_type),
                             boogie_spec_global_var_name(
                                 self.parent.env,
                                 &vec![instantiated_ghost_type, instantiated_value_type]
@@ -3680,6 +3667,7 @@ impl<'env> FunctionTranslator<'env> {
 
     /// Generates an update of the debug information about temporary.
     fn track_local(&self, origin_idx: TempIndex, idx: TempIndex, bv_flag: bool) {
+        self.parent.add_type(&self.get_local_type(idx));
         emitln!(
             self.writer(),
             &boogie_debug_track_local(
@@ -3694,6 +3682,7 @@ impl<'env> FunctionTranslator<'env> {
 
     /// Generates an update of the debug information about the return value at given location.
     fn track_return(&self, return_idx: usize, idx: TempIndex, bv_flag: bool) {
+        self.parent.add_type(&self.get_local_type(idx));
         emitln!(
             self.writer(),
             &boogie_debug_track_return(
