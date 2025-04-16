@@ -4,7 +4,7 @@ expression: output
 ---
 exiting with bytecode transformation errors
 error: ghost use while borrow_mut: foo::GhostStruct
-   ┌─ tests/inputs/ghost_borrow_mut/borrow_mut_get_fail.move:15:4
+   ┌─ tests/inputs/ghost_borrow_mut/borrow_mut_call_fail.move:18:3
    │
-15 │   *ghost::global<GhostStruct, bool>();
-   │    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+18 │   foo(ghost_ref);
+   │   ^^^^^^^^^^^^^^

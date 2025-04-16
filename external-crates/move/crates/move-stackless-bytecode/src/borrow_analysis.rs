@@ -697,27 +697,35 @@ impl TransferFunctions for BorrowAnalysis<'_> {
                             .global_env()
                             .get_function_qid(mid.qualified(*fid));
 
-                        let spec_vars = if mid.qualified(*fid)
+                        let spec_vars = if callee_env.get_qualified_id()
                             == self.func_target.global_env().global_qid()
-                            || mid.qualified(*fid) == self.func_target.global_env().global_set_qid()
+                            || callee_env.get_qualified_id()
+                                == self.func_target.global_env().global_set_qid()
                         {
                             vec![targs.clone()]
                         } else {
-                            let data = match self.targets.get_callee_spec_qid(
-                                &self.func_target.func_env.get_qualified_id(),
-                                &mid.qualified(*fid),
-                            ) {
-                                Some(spec_qid) => self
-                                    .targets
-                                    .get_data(spec_qid, &FunctionVariant::Baseline)
+                            let callee_qid = callee_env.get_qualified_id();
+                            let fun_qid_with_info = self
+                                .targets
+                                .get_callee_spec_qid(
+                                    &self.func_target.func_env.get_qualified_id(),
+                                    &callee_qid,
+                                )
+                                .unwrap_or(&callee_qid);
+                            let data = if fun_qid_with_info
+                                != &self.func_target.func_env.get_qualified_id()
+                            {
+                                self.targets
+                                    .get_data(fun_qid_with_info, &FunctionVariant::Baseline)
                                     .expect(&format!(
                                         "spec function not found: {}",
                                         self.func_target
                                             .global_env()
-                                            .get_function(*spec_qid)
+                                            .get_function(*fun_qid_with_info)
                                             .get_full_name_str()
-                                    )),
-                                None => self.func_target.data,
+                                    ))
+                            } else {
+                                self.func_target.data
                             };
                             spec_global_variable_analysis::get_info(data)
                                 .instantiate(targs)
@@ -728,13 +736,18 @@ impl TransferFunctions for BorrowAnalysis<'_> {
                         };
                         for var in spec_vars {
                             if state
-                                .get_children(&BorrowNode::SpecGlobalRoot(var))
+                                .get_children(&BorrowNode::SpecGlobalRoot(var.clone()))
                                 .iter()
                                 .any(|node| state.is_in_use(node))
                             {
                                 self.func_target.global_env().error(
                                     &self.func_target.get_bytecode_loc(*attr_id),
-                                    "ghost use while borrow_mut",
+                                    &format!(
+                                        "ghost use while borrow_mut: {}",
+                                        (&var[0]).display(
+                                            &self.func_target.func_env.get_named_type_display_ctx()
+                                        )
+                                    ),
                                 );
                             }
                         }

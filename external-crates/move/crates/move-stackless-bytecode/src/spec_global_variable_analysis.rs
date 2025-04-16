@@ -1,3 +1,4 @@
+use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use codespan_reporting::diagnostic::{Diagnostic, Label, Severity};
@@ -429,7 +430,8 @@ impl FunctionTargetProcessor for SpecGlobalVariableAnalysisProcessor {
                 }
             }
 
-            data.annotations.set_with_fixedpoint_check(info, scc_opt.is_some());
+            data.annotations
+                .set_with_fixedpoint_check(info, scc_opt.is_some());
         }
 
         data
@@ -463,8 +465,42 @@ impl FunctionTargetProcessor for SpecGlobalVariableAnalysisProcessor {
             });
             let info = SpecGlobalVariableInfo::info_union(infos_iter);
 
-            spec_data.annotations.set::<SpecGlobalVariableInfo>(info, true);
+            spec_data
+                .annotations
+                .set::<SpecGlobalVariableInfo>(info, true);
         }
+    }
+
+    fn dump_result(
+        &self,
+        f: &mut fmt::Formatter,
+        env: &GlobalEnv,
+        targets: &FunctionTargetsHolder,
+    ) -> fmt::Result {
+        writeln!(f, "\n\n==== spec global variable analysis summaries ====\n")?;
+        for ref module in env.get_modules() {
+            for ref fun in module.get_functions() {
+                for (_, ref target) in targets.get_targets(fun) {
+                    let info = get_info(target.data);
+                    writeln!(f, "fun {}", fun.get_full_name_str())?;
+                    for var in info.mut_vars() {
+                        writeln!(
+                            f,
+                            "  mutable {}",
+                            var[0].display(&fun.get_named_type_display_ctx())
+                        )?;
+                    }
+                    for var in info.imm_vars() {
+                        writeln!(
+                            f,
+                            "  immutable {}",
+                            var[0].display(&fun.get_named_type_display_ctx())
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn name(&self) -> String {
