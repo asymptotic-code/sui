@@ -1,0 +1,34 @@
+---
+source: crates/move-compiler/tests/move_check_testsuite.rs
+assertion_line: 253
+info:
+  flavor: core
+  edition: legacy
+  lint: false
+---
+error[E01002]: unexpected token
+  ┌─ tests/move_check/typing/spec_block_fail.move:3:10
+  │
+3 │         (spec {}: u64);
+  │          ^^^^
+  │          │
+  │          Unexpected 'spec'
+  │          Expected an expression term
+
+error[E01002]: unexpected token
+  ┌─ tests/move_check/typing/spec_block_fail.move:4:10
+  │
+4 │         (spec {}: &u64);
+  │          ^^^^
+  │          │
+  │          Unexpected 'spec'
+  │          Expected an expression term
+
+error[E01002]: unexpected token
+  ┌─ tests/move_check/typing/spec_block_fail.move:5:10
+  │
+5 │         (spec {}: (u64, u64));
+  │          ^^^^
+  │          │
+  │          Unexpected 'spec'
+  │          Expected an expression term

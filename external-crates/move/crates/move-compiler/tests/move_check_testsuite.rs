@@ -31,6 +31,7 @@ const KEEP_TMP: &str = "KEEP";
 const TEST_EXT: &str = "unit_test";
 const UNUSED_EXT: &str = "unused";
 const MIGRATION_EXT: &str = "migration";
+const SPEC_EXT: &str = "spec";
 const IDE_EXT: &str = "ide";
 
 const LINTER_DIR: &str = "linter";

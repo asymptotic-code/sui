@@ -2,8 +2,7 @@
 // Copyright (c) The Move Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-mod package_lock;
-
+pub mod package_lock;
 pub mod compilation;
 pub mod lock_file;
 pub mod migration;
@@ -15,8 +14,7 @@ use anyhow::{anyhow, Result};
 use clap::*;
 use lock_file::LockFile;
 use move_compiler::{
-    editions::{Edition, Flavor},
-    Flags,
+    editions::{Edition, Flavor}, Flags
 };
 use move_core_types::account_address::AccountAddress;
 use move_model_2::source_model;
@@ -53,6 +51,9 @@ pub struct BuildConfig {
     /// along with any code in the 'tests' directory.
     #[clap(name = "test-mode", long = "test", global = true)]
     pub test_mode: bool,
+
+    #[clap(name = "verify-mode", long = "verify", global = true)]
+    pub verify_mode: bool,
 
     /// Generate documentation for packages
     #[clap(name = "generate-docs", long = "doc", global = true)]
@@ -329,6 +330,7 @@ impl BuildConfig {
             Flags::empty()
         };
         flags
+            .set_verify(self.verify_mode)
             .set_warnings_are_errors(self.warnings_are_errors)
             .set_json_errors(self.json_errors)
             .set_silence_warnings(self.silence_warnings)

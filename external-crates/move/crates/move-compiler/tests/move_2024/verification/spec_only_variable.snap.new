@@ -1,0 +1,13 @@
+---
+source: crates/move-compiler/tests/move_check_testsuite.rs
+assertion_line: 253
+info:
+  flavor: core
+  edition: 2024.alpha
+  lint: false
+---
+error[E03009]: unbound variable
+  ┌─ tests/move_2024/verification/spec_only_variable.move:7:17
+  │
+7 │         let y = x_spec;
+  │                 ^^^^^^ Unbound variable 'x_spec'

@@ -1,0 +1,59 @@
+---
+source: crates/move-compiler/tests/move_check_testsuite.rs
+assertion_line: 253
+info:
+  flavor: core
+  edition: legacy
+  lint: false
+---
+warning[W09002]: unused variable
+  ┌─ tests/move_check/parser/spec_parsing_inside_fun.move:2:22
+  │
+2 │     fun specs_in_fun(x: u64, n: u64) {
+  │                      ^ Unused parameter 'x'. Consider removing or prefixing with an underscore: '_x'
+  │
+  = This warning can be suppressed with '#[allow(unused_variable)]' applied to the 'module' or module member ('const', 'fun', or 'struct')
+
+warning[W09002]: unused variable
+  ┌─ tests/move_check/parser/spec_parsing_inside_fun.move:2:30
+  │
+2 │     fun specs_in_fun(x: u64, n: u64) {
+  │                              ^ Unused parameter 'n'. Consider removing or prefixing with an underscore: '_n'
+  │
+  = This warning can be suppressed with '#[allow(unused_variable)]' applied to the 'module' or module member ('const', 'fun', or 'struct')
+
+error[E01002]: unexpected token
+  ┌─ tests/move_check/parser/spec_parsing_inside_fun.move:4:9
+  │
+4 │         spec {
+  │         ^^^^
+  │         │
+  │         Unexpected 'spec'
+  │         Expected an expression term
+
+error[E01002]: unexpected token
+  ┌─ tests/move_check/parser/spec_parsing_inside_fun.move:9:17
+  │
+9 │         while ({spec {assert x < 42;}; n < 64}) {
+  │                 ^^^^
+  │                 │
+  │                 Unexpected 'spec'
+  │                 Expected an expression term
+
+error[E01002]: unexpected token
+  ┌─ tests/move_check/parser/spec_parsing_inside_fun.move:9:36
+  │
+9 │         while ({spec {assert x < 42;}; n < 64}) {
+  │                                    ^
+  │                                    │
+  │                                    Unexpected ';'
+  │                                    Expected ')'
+
+error[E01002]: unexpected token
+  ┌─ tests/move_check/parser/spec_parsing_inside_fun.move:9:38
+  │
+9 │         while ({spec {assert x < 42;}; n < 64}) {
+  │                                      ^
+  │                                      │
+  │                                      Unexpected ';'
+  │                                      Expected a module member: 'use', 'friend', 'const', 'fun', or 'struct'

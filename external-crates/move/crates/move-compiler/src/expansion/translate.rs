@@ -854,10 +854,6 @@ fn module(
     module_def: P::ModuleDefinition,
 ) {
     assert!(context.address.is_none());
-    if module_def.is_spec_module {
-        context.spec_deprecated(module_def.name.0.loc, /* is_error */ false);
-        return;
-    }
     let (mident, mod_) = module_(context, package_name, module_address, module_def);
     if let Err((mident, old_loc)) = module_map.add(mident, mod_) {
         duplicate_module(context, module_map, mident, old_loc)
@@ -897,7 +893,6 @@ fn module_(
         attributes,
         loc,
         address,
-        is_spec_module: _,
         name,
         members,
         definition_mode: _,
@@ -1214,12 +1209,6 @@ fn unique_attributes(
                 E::AttributeName_::Known(known)
             }
         };
-        if matches!(
-            name_,
-            E::AttributeName_::Known(KnownAttribute::Verification(_))
-        ) {
-            context.spec_deprecated(loc, /* is_error */ false)
-        }
         if let Err((_, old_loc)) = attr_map.add(sp(nloc, name_), sp(loc, attr_)) {
             let msg = format!("Duplicate attribute '{}' attached to the same item", name_);
             context.add_diag(diag!(
@@ -2617,6 +2606,7 @@ fn exp(context: &mut Context, pe: Box<P::Exp>) -> Box<E::Exp> {
         PE::Call(pn, sp!(rloc, prs)) => {
             let en_opt = context.name_access_chain_to_module_access(Access::ApplyPositional, pn);
             let ers = sp(rloc, exps(context, prs));
+
             bind_access_result!(
                 en_opt =>
                     Some(access_result!(name, ptys_opt, is_macro))
@@ -2809,10 +2799,6 @@ fn exp(context: &mut Context, pe: Box<P::Exp>) -> Box<E::Exp> {
         }
         PE::Cast(e, ty) => exp_cast(context, /* in_parens */ false, e, ty),
         PE::Annotate(e, ty) => EE::Annotate(exp(context, e), type_(context, ty)),
-        PE::Spec(_) => {
-            context.spec_deprecated(loc, /* is_error */ false);
-            EE::Unit { trailing: false }
-        }
         PE::UnresolvedError => EE::UnresolvedError,
     };
     Box::new(sp(loc, e_))
@@ -2851,8 +2837,7 @@ fn exp_cast(context: &mut Context, in_parens: bool, plhs: Box<P::Exp>, pty: P::T
             | PE::UnaryExp(_, _)
             | PE::BinopExp(_, _, _)
             | PE::Cast(_, _)
-            | PE::Match(_, _)
-            | PE::Spec(_) => true,
+            | PE::Match(_, _) => true,
 
             PE::DotCall(lhs, _, _, _, _, _)
             | PE::Dot(lhs, _, _)

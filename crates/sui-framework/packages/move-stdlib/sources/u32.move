@@ -104,3 +104,8 @@ public macro fun do<$R: drop>($stop: u32, $f: |u32| -> $R) {
 public macro fun do_eq<$R: drop>($stop: u32, $f: |u32| -> $R) {
     std::macros::do_eq!($stop, $f)
 }
+
+#[spec_only]
+public use fun std::integer::from_u32 as u32.to_int;
+#[spec_only]
+public use fun std::real::from_u32 as u32.to_real;

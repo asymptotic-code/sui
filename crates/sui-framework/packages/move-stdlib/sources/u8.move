@@ -94,3 +94,8 @@ public macro fun do<$R: drop>($stop: u8, $f: |u8| -> $R) {
 public macro fun do_eq<$R: drop>($stop: u8, $f: |u8| -> $R) {
     std::macros::do_eq!($stop, $f)
 }
+
+#[spec_only]
+public use fun std::integer::from_u8 as u8.to_int;
+#[spec_only]
+public use fun std::real::from_u8 as u8.to_real;
