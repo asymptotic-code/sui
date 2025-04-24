@@ -1013,22 +1013,23 @@ fn check_event_emit(context: &mut Context, loc: Loc, mcall: &ModuleCall) {
         debug_assert!(false, "ICE arity should have been expanded for errors");
         return;
     };
-    let is_defined_in_current_module = matches!(first_ty.value.type_name(), Some(sp!(_, TypeName_::ModuleType(m, _))) if m == current_module);
-    if !is_defined_in_current_module {
-        let msg = format!(
-            "Invalid event. The function '{}::{}' must be called with a type defined in the current module",
-            module, name
-        );
-        let ty_msg = format!(
-            "The type {} is not declared in the current module",
-            error_format(first_ty, &Subst::empty()),
-        );
-        context.add_diag(diag!(
-            EVENT_EMIT_CALL_DIAG,
-            (loc, msg),
-            (first_ty.loc, ty_msg)
-        ));
-    }
+    // let is_defined_in_current_module = matches!(first_ty.value.type_name(), Some(sp!(_, TypeName_::ModuleType(m, _))) if m == current_module);
+
+    // if !is_defined_in_current_module {
+    //     let msg = format!(
+    //         "Invalid event. The function '{}::{}' must be called with a type defined in the current module",
+    //         module, name
+    //     );
+    //     let ty_msg = format!(
+    //         "The type {} is not declared in the current module",
+    //         error_format(first_ty, &Subst::empty()),
+    //     );
+    //     context.add_diag(diag!(
+    //         EVENT_EMIT_CALL_DIAG,
+    //         (loc, msg),
+    //         (first_ty.loc, ty_msg)
+    //     ));
+    // }
 }
 
 fn check_private_transfer(context: &mut Context, loc: Loc, mcall: &ModuleCall) {
