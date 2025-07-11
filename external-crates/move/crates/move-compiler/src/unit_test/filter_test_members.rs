@@ -76,6 +76,10 @@ impl FilterContext for Context<'_> {
             .any(|attr| matches!(attr.1, AttributeKind_::Test | AttributeKind_::RandTest));
         has_test_attr && (!self.is_source_def || !self.env.keep_testing_functions())
     }
+
+    fn should_remove_sequence_item(&self, item: &P::SequenceItem) -> bool {
+        false
+    }
 }
 
 //***************************************************************************

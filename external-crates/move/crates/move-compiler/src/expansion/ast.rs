@@ -546,11 +546,6 @@ impl Attributes {
         };
         modes.contains_(&ModeAttribute::TEST.into())
     }
-
-    pub fn is_spec_or_spec_only(&self) -> bool {
-        self.contains_key_(&known_attributes::VerificationAttribute::Spec.into())
-            || self.contains_key_(&known_attributes::VerificationAttribute::SpecOnly.into())
-    }
 }
 
 impl Default for UseFuns {
