@@ -1081,13 +1081,14 @@ impl<'env, 'outer> Context<'env, 'outer> {
 
     fn is_spec_context(&self) -> bool {
         self.current_module().as_ref().is_some_and(|m| {
-            let minfo = self.module_info(m);
-            let is_spec_only = minfo.attributes.is_spec_or_spec_only();
-            is_spec_only
-                || self.current_function.as_ref().is_some_and(|f| {
-                    let finfo = minfo.functions.get(f).unwrap();
-                    finfo.attributes.is_spec_or_spec_only()
-                })
+            // let minfo = self.module_info(m);
+            // let is_spec_only = minfo.attributes.is_spec_or_spec_only();
+            // is_spec_only
+            //     || self.current_function.as_ref().is_some_and(|f| {
+            //         let finfo = minfo.functions.get(f).unwrap();
+            //         finfo.attributes.is_spec_or_spec_only()
+            //     })
+            false
         })
     }
 
