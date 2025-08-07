@@ -758,3 +758,89 @@ fun test_calculate_fungible_staked_sui_withdraw_amount(
     let min_out = if (expected_out > 2) expected_out - 2 else 0;
     assert!(principal_amount + rewards_amount >= min_out, 0);
 }
+
+// === specifications ===
+
+#[spec_only]
+use prover::prover::{requires, ensures};
+
+#[spec_only]
+use prover::ghost;
+
+#[spec_only]
+use sui_system::helpers::{can_add_u64};
+
+
+#[spec(prove, no_opaque)]
+public fun staked_sui_amount_spec(staked_sui: &StakedSui): u64 {
+    staked_sui_amount(staked_sui)
+}
+
+#[spec(prove, no_opaque)]
+public fun is_preactive_spec(pool: &StakingPool): bool {
+    is_preactive(pool)
+}
+
+#[spec(prove, no_opaque)]
+public fun is_inactive_spec(pool: &StakingPool): bool {
+    is_inactive(pool)
+}
+
+#[spec(prove)]
+public fun split_fungible_staked_sui_spec(
+    fungible_staked_sui: &mut FungibleStakedSui,
+    split_amount: u64,
+    ctx: &mut TxContext,
+): FungibleStakedSui {
+    requires(split_amount <= fungible_staked_sui_value(fungible_staked_sui));
+    split_fungible_staked_sui(fungible_staked_sui, split_amount, ctx)
+}
+
+#[spec(prove)]
+public fun join_fungible_staked_sui_spec(self: &mut FungibleStakedSui, other: FungibleStakedSui) {
+    requires(self.pool_id() == other.pool_id());
+    requires(can_add_u64(self.value(), other.value()));
+    join_fungible_staked_sui(self, other);
+}
+
+#[spec(prove)]
+public fun split_spec(self: &mut StakedSui, split_amount: u64, ctx: &mut TxContext): StakedSui {
+    requires(split_amount <= self.principal.value());
+    requires(split_amount >= MIN_STAKING_THRESHOLD);
+    requires(self.principal.value() - split_amount >= MIN_STAKING_THRESHOLD);
+    split(self, split_amount, ctx)
+}
+
+#[spec(prove, no_opaque)]
+public fun is_equal_staking_metadata_spec(self: &StakedSui, other: &StakedSui): bool {
+    is_equal_staking_metadata(self, other)
+}
+
+#[spec(prove)]
+public fun pool_token_exchange_rate_at_epoch_spec(
+    pool: &StakingPool,
+    epoch: u64,
+): PoolTokenExchangeRate {
+    requires(! pool.is_preactive());
+    requires(*pool.activation_epoch.borrow() > 0); // visible? add to invariant?
+    pool_token_exchange_rate_at_epoch(pool, epoch)
+}
+
+#[spec(prove)]
+public fun split_staked_sui_spec(stake: &mut StakedSui, split_amount: u64, ctx: &mut TxContext) {
+    use specs::transfer_spec::{SpecTransferAddress,SpecTransferAddressExists};
+    ghost::declare_global_mut<SpecTransferAddressExists, bool>();
+    ghost::declare_global_mut<SpecTransferAddress, address>();
+    // preconditions from the call to split:
+    requires(split_amount <= stake.principal.value());
+    requires(split_amount >= MIN_STAKING_THRESHOLD);
+    requires(stake.principal.value() - split_amount >= MIN_STAKING_THRESHOLD);
+    split_staked_sui(stake, split_amount, ctx);
+}
+
+#[spec(prove)]
+public fun join_staked_sui_spec(self: &mut StakedSui, other: StakedSui) {
+    requires(is_equal_staking_metadata(self, &other));
+    requires(can_add_u64(self.principal.value(), other.principal.value())); // or the join overflows
+    join_staked_sui(self, other);
+}
