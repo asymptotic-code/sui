@@ -816,13 +816,22 @@ public fun is_equal_staking_metadata_spec(self: &StakedSui, other: &StakedSui): 
     is_equal_staking_metadata(self, other)
 }
 
+#[spec_only]
+/// function needed to make the requirements of `pool_token_exchange_rate_at_epoch_spec`
+/// expressible outside this module.
+public fun activation_epoch_is_positive(pool: &StakingPool): bool {
+    pool.activation_epoch.is_some() &&
+    *pool.activation_epoch.borrow() > 0
+}
+
 #[spec(prove)]
 public fun pool_token_exchange_rate_at_epoch_spec(
     pool: &StakingPool,
     epoch: u64,
 ): PoolTokenExchangeRate {
     requires(! pool.is_preactive());
-    requires(*pool.activation_epoch.borrow() > 0); // visible? add to invariant?
+    // requires(*pool.activation_epoch.borrow() > 0); // visible? add to invariant?
+    requires(activation_epoch_is_positive(pool));
     pool_token_exchange_rate_at_epoch(pool, epoch)
 }
 
