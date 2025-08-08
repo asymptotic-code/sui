@@ -1013,7 +1013,6 @@ public fun is_preactive_spec(self: &Validator): bool {
 #[spec(prove)]
 public fun pool_token_exchange_rate_at_epoch_spec(self: &Validator, epoch: u64): PoolTokenExchangeRate {
     requires(! self.is_preactive());
-    // requires(* self.staking_pool.activation_epoch().borrow() > 0); // visible? add to invariant?
     requires(staking_pool::activation_epoch_is_positive(&self.staking_pool));
     pool_token_exchange_rate_at_epoch(self, epoch)
 }
