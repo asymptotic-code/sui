@@ -246,18 +246,16 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
 
         // Check regular dependencies - flag ALL Sui dependencies, not just local ones
         for (dep_name, dep) in dependencies {
+            println!("Found dependency: {} package {}", dep_name, package_name);
             if sui_packages.contains(&dep_name.as_str()) {
                 match dep {
                     PM::Dependency::Internal(internal_dep) => {
-                        // Flag all internal Sui dependencies except overrides
-                        if !internal_dep.dep_override {
-                            let dep_type = match &internal_dep.kind {
-                                PM::DependencyKind::Local(_) => "local",
-                                PM::DependencyKind::Git(_) => "git",
-                                PM::DependencyKind::OnChain(_) => "on-chain",
-                            };
-                            found_explicit_sui_deps.push((dep_name.as_str(), dep_type));
-                        }
+                        let dep_type = match &internal_dep.kind {
+                            PM::DependencyKind::Local(_) => "local",
+                            PM::DependencyKind::Git(_) => "git",
+                            PM::DependencyKind::OnChain(_) => "on-chain",
+                        };
+                        found_explicit_sui_deps.push((dep_name.as_str(), dep_type));
                     }
                     PM::Dependency::External(_) => {
                         found_explicit_sui_deps.push((dep_name.as_str(), "external"));
