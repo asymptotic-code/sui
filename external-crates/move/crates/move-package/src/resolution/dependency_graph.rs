@@ -239,7 +239,6 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
         package_name: PM::PackageName,
         dependencies: &PM::Dependencies,
         dev_dependencies: &PM::Dependencies,
-        is_root: bool,
     ) -> Result<()> {
         let sui_packages = ["Sui", "SuiSystem", "Prover", "SuiProver", "DeepBook", "MoveStdlib", "SuiSpecs"];
 
@@ -290,17 +289,15 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
         }
 
         if !found_explicit_sui_deps.is_empty() {
-            let package_type = if is_root { "root package" } else { "internal package" };
             let dep_names: Vec<String> = found_explicit_sui_deps
                 .iter()
                 .map(|(name, _dep_type)| name.to_string())
                 .collect();
             
             eprintln!("{}", format!(
-                "[{}] Found explicit Sui dependencies in {} - {}: {}. \
+                "[{}] Found explicit Sui dependencies in {}: {}. \
                 Consider using implicit dependencies instead for better prover compatibility.",
                 "warning".bold().yellow(),
-                package_type,
                 package_name,
                 dep_names.join(", ")
             ));
@@ -331,7 +328,6 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
             root_manifest.package.name,
             &root_manifest.dependencies,
             &root_manifest.dev_dependencies,
-            true,
         )?;
 
         // compute digests eagerly as even if we can't reuse existing lock file, they need to become
@@ -632,13 +628,6 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
                 // resolve name and version
                 let manifest =
                     parse_source_manifest(parse_move_manifest_string(manifest_string.clone())?)?;
-
-                // self.warn_explicit_sui_dependencies(
-                //     manifest.package.name,
-                //     &manifest.dependencies,
-                //     &manifest.dev_dependencies,
-                //     false,
-                // )?;
 
                 let resolved_pkg_id = custom_resolve_pkg_id(&manifest)
                     .with_context(|| format!("Resolving package name for '{}'", dep_pkg_name))?;
