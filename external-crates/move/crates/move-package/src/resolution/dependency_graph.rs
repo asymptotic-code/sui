@@ -241,12 +241,16 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
         dev_dependencies: &PM::Dependencies,
         is_root: bool,
     ) -> Result<()> {
-        let sui_packages = ["Sui", "SuiSystem", "Prover", "SuiProver"];
+        let sui_packages = ["Sui", "SuiSystem", "Prover", "SuiProver", "DeepBook", "MoveStdlib"];
+
+        if sui_packages.contains(&package_name.as_str()) {
+            return Ok(());
+        }
+
         let mut found_explicit_sui_deps = Vec::new();
 
         // Check regular dependencies - flag ALL Sui dependencies, not just local ones
         for (dep_name, dep) in dependencies {
-            println!("Found dependency: {} package {}", dep_name, package_name);
             if sui_packages.contains(&dep_name.as_str()) {
                 match dep {
                     PM::Dependency::Internal(internal_dep) => {
@@ -263,9 +267,6 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
                 }
             }
         }
-
-        println!("Found {} explicit Sui dependencies in package {}", 
-            found_explicit_sui_deps.len(), package_name);
 
         // Check dev dependencies - same logic as above
         for (dep_name, dep) in dev_dependencies {
@@ -295,15 +296,14 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
                 .map(|(name, _dep_type)| name.to_string())
                 .collect();
             
-            writeln!(
-                &mut self.progress_output,
+            eprintln!("{}", format!(
                 "[{}] Found explicit Sui dependencies in {} - {}: {}. \
                 Consider using implicit dependencies instead for better prover compatibility.",
                 "warning".bold().yellow(),
                 package_type,
                 package_name,
                 dep_names.join(", ")
-            )?;
+            ));
         }
 
         Ok(())
