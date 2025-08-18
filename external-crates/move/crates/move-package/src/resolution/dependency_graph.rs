@@ -241,7 +241,7 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
         dev_dependencies: &PM::Dependencies,
         is_root: bool,
     ) -> Result<()> {
-        let sui_packages = ["Sui", "SuiSystem"];
+        let sui_packages = ["Sui", "SuiSystem", "Prover", "SuiProver"];
         let mut found_explicit_sui_deps = Vec::new();
 
         // Check regular dependencies - flag ALL Sui dependencies, not just local ones
@@ -263,6 +263,9 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
                 }
             }
         }
+
+        println!("Found {} explicit Sui dependencies in package {}", 
+            found_explicit_sui_deps.len(), package_name);
 
         // Check dev dependencies - same logic as above
         for (dep_name, dep) in dev_dependencies {
