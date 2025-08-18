@@ -241,7 +241,7 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
         dev_dependencies: &PM::Dependencies,
         is_root: bool,
     ) -> Result<()> {
-        let sui_packages = ["Sui", "SuiSystem", "Prover", "SuiProver", "DeepBook", "MoveStdlib"];
+        let sui_packages = ["Sui", "SuiSystem", "Prover", "SuiProver", "DeepBook", "MoveStdlib", "SuiSpecs"];
 
         if sui_packages.contains(&package_name.as_str()) {
             return Ok(());
@@ -633,12 +633,12 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
                 let manifest =
                     parse_source_manifest(parse_move_manifest_string(manifest_string.clone())?)?;
 
-                self.warn_explicit_sui_dependencies(
-                    manifest.package.name,
-                    &manifest.dependencies,
-                    &manifest.dev_dependencies,
-                    false,
-                )?;
+                // self.warn_explicit_sui_dependencies(
+                //     manifest.package.name,
+                //     &manifest.dependencies,
+                //     &manifest.dev_dependencies,
+                //     false,
+                // )?;
 
                 let resolved_pkg_id = custom_resolve_pkg_id(&manifest)
                     .with_context(|| format!("Resolving package name for '{}'", dep_pkg_name))?;
