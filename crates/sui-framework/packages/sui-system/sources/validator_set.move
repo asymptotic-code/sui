@@ -785,6 +785,8 @@ fun get_candidate_or_active_validator_mut(self: &mut ValidatorSet, validator_add
 fun find_validator(validators: &vector<Validator>, validator_address: address): Option<u64> {
     let length = validators.length();
     let mut i = 0;
+    invariant!(|| ensures( length == validators.length() && i <= length &&
+                 ! exists_validator_in_range_sf(validators, 0, i, validator_address)));
     while (i < length) {
         let v = &validators[i];
         if (v.sui_address() == validator_address) {
@@ -1420,4 +1422,94 @@ fun get_candidate_or_active_validator(self: &ValidatorSet, validator_address: ad
         return wrapper.get_inner_validator_ref()
     };
     get_validator(&self.active_validators, validator_address)
+}
+
+// === specifications ===
+
+use prover::prover::{requires,ensures,invariant};
+
+#[spec_only]
+/// This "native" function is defined more fully in `prelude_extra.bpl`
+/// but is the same as `find_validator`.  There is probably no need to refer to it outside of the
+/// specification of `find_validator`.
+public native fun find_validator_sf(validators: &vector<Validator>, validator_address: address): Option<u64>;
+
+#[spec_only]
+/// This "native" function is defined more fully in `prelude_extra.bpl`
+/// "exists i: u64, lb <= i < hb with v[i].sui_address() = a"
+public native fun exists_validator_in_range_sf(validators: &vector<Validator>, lb: u64, hb: u64, validator_address: address): bool;
+
+#[spec_only]
+/// Is there a validator in validators that has the given address?
+public fun exists_validator_sf(validators: &vector<Validator>, validator_address: address): bool {
+    exists_validator_in_range_sf(validators, 0, validators.length(), validator_address)
+}
+
+#[spec(prove)]
+fun find_validator_spec(validators: &vector<Validator>, validator_address: address): Option<u64> {
+    let r = find_validator(validators, validator_address);
+    if (exists_validator_sf(validators, validator_address)) {
+        ensures(r.is_some());
+        let i = *r.borrow();
+        ensures( i < validators.length() && validators[i].sui_address() == validator_address);
+        ensures(find_validator_sf(validators, validator_address).is_some());
+        ensures(i == *find_validator_sf(validators, validator_address).borrow());
+        ensures(r == find_validator_sf(validators, validator_address));
+    } else {
+        ensures(r.is_none())
+    };
+    r
+}
+
+#[spec(prove)]
+public fun validator_total_stake_amount_spec(self: &ValidatorSet, validator_address: address): u64 {
+    requires(exists_validator_sf(&self.active_validators, validator_address));
+    validator_total_stake_amount(self, validator_address)
+}
+
+#[spec(prove)]
+public fun validator_stake_amount_spec(self: &ValidatorSet, validator_address: address): u64 {
+    requires(exists_validator_sf(&self.active_validators, validator_address));
+    validator_stake_amount(self, validator_address)
+}
+
+#[spec(prove)] // not a public function, but this spec is useful in proofs
+fun get_validator_ref_spec(
+    validators: &vector<Validator>,
+    validator_address: address,
+): &Validator {
+    requires(exists_validator_sf(validators, validator_address));
+    let r = get_validator_ref(validators, validator_address);
+    ensures(r.sui_address() == validator_address);
+    r
+}
+
+#[spec(prove)]
+public fun validator_voting_power_spec(self: &ValidatorSet, validator_address: address): u64 {
+    requires(exists_validator_sf(&self.active_validators, validator_address));
+    validator_voting_power(self, validator_address)
+}
+
+#[spec(prove)]
+public fun validator_staking_pool_id_spec(self: &ValidatorSet, validator_address: address): ID {
+    requires(exists_validator_sf(&self.active_validators, validator_address));
+    validator_staking_pool_id(self, validator_address)
+}
+
+#[spec(prove, skip)]
+public fun validator_address_by_pool_id_spec(self: &mut ValidatorSet, pool_id: &ID): address {
+    requires(self.staking_pool_mappings.contains(*pool_id) ||
+        (self.inactive_validators.contains(*pool_id) &&
+            self.inactive_validators[*pool_id].version() == 1));
+    validator_address_by_pool_id(self, pool_id)
+}
+
+#[spec(prove, no_opaque)]
+public fun is_validator_candidate_spec(self: &ValidatorSet, addr: address): bool {
+    is_validator_candidate(self, addr)
+}
+
+#[spec(prove, no_opaque)]
+public fun is_inactive_validator_spec(self: &ValidatorSet, staking_pool_id: ID): bool {
+    is_inactive_validator(self, staking_pool_id)
 }
