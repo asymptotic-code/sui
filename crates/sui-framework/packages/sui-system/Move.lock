@@ -2,25 +2,16 @@
 
 [move]
 version = 3
-manifest_digest = "6F0DE69ABABB50F9E478F492F1AFC330895CDEEBBE3BA097A41A528D4C2815F0"
-deps_digest = "060AD7E57DFB13104F21BE5F5C3759D03F0553FC3229247D9A7A6B45F50D03A3"
+manifest_digest = "68AEB9354EE1D616F6D2293EC721FE3D7E810FEC4FE34197676ECFA3DA72CAE3"
+deps_digest = "3C4103934B1E040BB6B23F1D610B4EF9F2F1166A50A104EADCF77467C004C600"
 dependencies = [
   { id = "MoveStdlib", name = "MoveStdlib" },
   { id = "Sui", name = "Sui" },
-  { id = "SuiProver", name = "SuiProver" },
 ]
 
 [[move.package]]
 id = "MoveStdlib"
 source = { local = "../move-stdlib" }
-
-[[move.package]]
-id = "Prover"
-source = { git = "https://github.com/asymptotic-code/sui-prover.git", rev = "main", subdir = "packages/prover" }
-
-dependencies = [
-  { id = "MoveStdlib", name = "MoveStdlib" },
-]
 
 [[move.package]]
 id = "Sui"
@@ -30,19 +21,7 @@ dependencies = [
   { id = "MoveStdlib", name = "MoveStdlib" },
 ]
 
-[[move.package]]
-id = "SuiProver"
-source = { git = "https://github.com/asymptotic-code/sui-prover.git", rev = "main", subdir = "packages/sui-prover" }
-
-dependencies = [
-  { id = "SuiSpecs", name = "SuiSpecs" },
-]
-
-[[move.package]]
-id = "SuiSpecs"
-source = { git = "https://github.com/asymptotic-code/sui-prover.git", rev = "main", subdir = "packages/sui-framework-specs" }
-
-dependencies = [
-  { id = "Prover", name = "Prover" },
-  { id = "Sui", name = "Sui" },
-]
+[move.toolchain-version]
+compiler-version = "1.54.0"
+edition = "2024.beta"
+flavor = "sui"
