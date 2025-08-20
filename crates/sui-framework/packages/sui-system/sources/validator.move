@@ -996,41 +996,12 @@ public(package) fun new_for_testing(
     validator
 }
 
-// === specifications and proofs ===
+// === specs utils ===
 
 #[spec_only]
-use prover::prover::{requires, ensures};
+use sui_system::staking_pool::activation_epoch;
 
-#[spec(prove, no_opaque)]
-public fun is_preactive_spec(self: &Validator): bool {
-    is_preactive(self)
-}
-
-#[spec(prove)]
-public fun pool_token_exchange_rate_at_epoch_spec(self: &Validator, epoch: u64): PoolTokenExchangeRate {
-    requires(! self.is_preactive());
-    requires(staking_pool::activation_epoch_is_positive(&self.staking_pool));
-    pool_token_exchange_rate_at_epoch(self, epoch)
-}
-
-#[spec(prove, no_opaque)]
-public fun staking_pool_id_spec(self: &Validator): ID {
-    staking_pool_id(self)
-}
-
-#[spec(prove)]
-public fun is_duplicate_spec(self: &Validator, other: &Validator): bool {
-    is_duplicate(self, other)
-}
-
-#[spec(prove)]
-public fun validate_metadata_spec(metadata: &ValidatorMetadata) {
-    validate_metadata(metadata);
-}
-//
-
-// "aborts if metadata is not valid" -- how to capture?
-#[spec]
-public fun validate_metadata_bcs_spec(metadata: vector<u8>) {
-    validate_metadata_bcs(metadata);
+#[spec_only]
+public fun pool_activation_epoch(self: &Validator): Option<u64> {
+    activation_epoch(&self.staking_pool)
 }

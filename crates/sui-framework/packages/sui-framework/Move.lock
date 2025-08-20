@@ -2,18 +2,9 @@
 
 [move]
 version = 3
-manifest_digest = "06FD8F5C2B5CB25BBFF27D5AF3EEEC284C453E7190F2FA22CEC3FB4270B4B5D4"
-deps_digest = "3C4103934B1E040BB6B23F1D610B4EF9F2F1166A50A104EADCF77467C004C600"
-
-dependencies = [
-  { id = "MoveStdlib", name = "MoveStdlib" },
-]
+manifest_digest = "CD04B0AFFBEA9E38D757D76D077FCB8D9F7E69A99F98F542A4F6D5DBBB6B84A0"
+deps_digest = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
 
 [[move.package]]
 id = "MoveStdlib"
 source = { local = "../move-stdlib" }
-
-[move.toolchain-version]
-compiler-version = "1.30.0"
-edition = "2024.beta"
-flavor = "sui"

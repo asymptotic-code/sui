@@ -1,4 +1,4 @@
-module sui_system::helpers;
+module sui_system_specs::helpers;
 
 #[spec_only]
 use std::{u64,u32,u16,u8};

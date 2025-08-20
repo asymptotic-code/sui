@@ -70,23 +70,9 @@ public fun total_balance(self: &StorageFund): u64 {
     self.total_object_storage_rebates.value() + self.non_refundable_balance.value()
 }
 
-// === specifications ===
+// === specs utils ===
 
 #[spec_only]
-use prover::prover::requires;
-
-#[spec_only]
-use sui_system::helpers::can_add_u64;
-
-#[spec(prove, no_opaque)]
-public fun total_object_storage_rebates_spec(self: &StorageFund): u64 {
-    total_object_storage_rebates(self)
-}
-
-// This precondition is not useful to a caller; it mentions fields that are not caller-visible
-#[spec(prove)]
-public fun total_balance_spec(self: &StorageFund): u64 {
-    requires(can_add_u64(self.total_object_storage_rebates.value(),
-                         self.non_refundable_balance.value()));
-    total_balance(self)
+public fun non_refundable_balance(self: &StorageFund): u64 {
+    self.non_refundable_balance.value()
 }

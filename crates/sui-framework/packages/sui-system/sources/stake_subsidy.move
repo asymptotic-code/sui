@@ -89,19 +89,3 @@ public(package) fun get_distribution_counter(self: &StakeSubsidy): u64 {
 public(package) fun set_distribution_counter(self: &mut StakeSubsidy, distribution_counter: u64) {
     self.distribution_counter = distribution_counter;
 }
-
-// === specifications ===
-
-// This invariant is needed to prove no abort in some of the non-public functions,
-// so can be skipped for now.
-
-// #[spec_only]
-// fun StakeSubsidy_inv(x: &StakeSubsidy): bool {
-//     x.stake_subsidy_decrease_rate <= BASIS_POINT_DENOMINATOR as u16 &&
-//     x.stake_subsidy_period_length > 0
-// }
-
-#[spec(prove, no_opaque)]
-public fun current_epoch_subsidy_amount_spec(self: &StakeSubsidy): u64 {
-    current_epoch_subsidy_amount(self)
-}
