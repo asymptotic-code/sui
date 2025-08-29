@@ -935,6 +935,9 @@ fn attribute(k: &KA::KnownAttribute) -> Attribute {
         KA::KnownAttribute::Verification(KA::VerificationAttribute::SpecOnly { .. }) => {
             Attribute::Name(KA::VerificationAttribute::SPEC_ONLY.into())
         }
+        KA::KnownAttribute::Verification(KA::VerificationAttribute::SpecLimited { .. }) => {
+            Attribute::Name(KA::VerificationAttribute::SPEC_LIMITED.into())
+        }
         // --- name-only ---
         KA::KnownAttribute::BytecodeInstruction(_) => {
             Attribute::Name(KA::BytecodeInstructionAttribute::BYTECODE_INSTRUCTION.into())

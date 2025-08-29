@@ -51,6 +51,7 @@ pub enum AttributeKind_ {
     Test,
     Spec,
     SpecOnly,
+    SpecLimited,
 }
 
 pub type AttributeKind = Spanned<AttributeKind_>;
@@ -192,6 +193,9 @@ pub enum VerificationAttribute {
     SpecOnly {
         inv_target: Option<ModuleAccess>,
     },
+    SpecLimited {
+        abort_check: bool,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -227,6 +231,7 @@ impl AttributeKind_ {
             AttributeKind_::Test => TestingAttribute::TEST,
             AttributeKind_::Spec => VerificationAttribute::SPEC,
             AttributeKind_::SpecOnly => VerificationAttribute::SPEC_ONLY,
+            AttributeKind_::SpecLimited => VerificationAttribute::SPEC_LIMITED,
         }
     }
 }
@@ -281,6 +286,7 @@ impl KnownAttribute {
 impl VerificationAttribute {
     pub const SPEC: &'static str = "spec";
     pub const SPEC_ONLY: &'static str = "spec_only";
+    pub const SPEC_LIMITED: &'static str = "spec_limited";
 
 
     // Spec arguments
@@ -294,10 +300,14 @@ impl VerificationAttribute {
     // Spec only arguments
     pub const INV_TARGET_NAME: &'static str = "inv_target";
 
+    // Spec limited arguments
+    pub const ABORT_CHECK_NAME: &'static str = "abort_check";
+
     pub const fn name(&self) -> &str {
         match self {
             Self::Spec { .. } => Self::SPEC,
             Self::SpecOnly { .. } => Self::SPEC_ONLY,
+            Self::SpecLimited { .. } => Self::SPEC_LIMITED,
         }
     }
 
@@ -319,7 +329,8 @@ impl VerificationAttribute {
 
         match self {
             Self::Spec { .. } => &FUNCTION_POSITIONS,
-            Self::SpecOnly { .. } => &VERIFY_ONLY_POSITIONS
+            Self::SpecOnly { .. } => &VERIFY_ONLY_POSITIONS,
+            Self::SpecLimited { .. } => &FUNCTION_POSITIONS,
         }
     }
 
@@ -327,6 +338,7 @@ impl VerificationAttribute {
         match self {
             Self::Spec { .. } => AttributeKind_::Spec,
             Self::SpecOnly { .. } => AttributeKind_::SpecOnly,
+            Self::SpecLimited { .. } => AttributeKind_::SpecLimited,
         }
     }
 }
@@ -974,6 +986,9 @@ impl AstDebug for VerificationAttribute {
                 } else {
                     w.write("spec_only()");
                 } 
+            },
+            VerificationAttribute::SpecLimited { abort_check } => {
+                w.write(format!("spec_limited(abort_check={})", abort_check));
             }
         }
     }

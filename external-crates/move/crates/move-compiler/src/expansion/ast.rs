@@ -549,7 +549,8 @@ impl Attributes {
 
      pub fn is_spec_or_spec_only(&self) -> bool {
         self.get_(&known_attributes::AttributeKind_::Spec).is_some() || 
-        self.get_(&known_attributes::AttributeKind_::SpecOnly).is_some() 
+        self.get_(&known_attributes::AttributeKind_::SpecOnly).is_some() ||
+        self.get_(&known_attributes::AttributeKind_::SpecLimited).is_some() 
     }
 }
 

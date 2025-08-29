@@ -239,6 +239,9 @@ pub enum Attribute_ {
     SpecOnly {
         inv_target: Option<NameAccessChain>,
     },
+    SpecLimited {
+        abort_check: bool,
+    }
 }
 
 pub type Attribute = Spanned<Attribute_>;
@@ -891,6 +894,7 @@ impl Attribute_ {
             Attribute_::RandomTest => AK::RandTest.name(),
             Attribute_::Spec { .. } => AK::Spec.name(),
             Attribute_::SpecOnly { .. } => AK::SpecOnly.name(),
+            Attribute_::SpecLimited { .. } => AK::SpecLimited.name(),
         }
     }
 
@@ -1793,6 +1797,13 @@ impl AstDebug for Attribute_ {
                 } else {
                     w.write("spec_only()");
                 } 
+            },
+            A::SpecLimited { abort_check } => {
+                if *abort_check {
+                    w.write("spec_limited(abort_check=true)");
+                } else {
+                    w.write("spec_limited()");
+                }
             },
         }
     }

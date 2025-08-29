@@ -77,7 +77,7 @@ impl FilterContext for Context<'_> {
 
         let has_verify_attr = flattened_attrs
             .iter()
-            .any(|attr| matches!(attr.1, AttributeKind_::Spec | AttributeKind_::SpecOnly));
+            .any(|attr| matches!(attr.1, AttributeKind_::Spec | AttributeKind_::SpecOnly | AttributeKind_::SpecLimited));
         
         (has_verify_attr && !self.env.verify_mode()) || 
             (has_test_attr && (!self.is_source_def || !self.env.keep_testing_functions()))
@@ -251,6 +251,7 @@ fn test_attribute_kinds(attrs: &P::Attributes) -> Vec<(Loc, known_attributes::At
             | P::Attribute_::LintAllow { .. } => None,
             P::Attribute_::Spec { .. } => Some((attr.loc, known_attributes::AttributeKind_::Spec)),
             P::Attribute_::SpecOnly { .. } => Some((attr.loc, known_attributes::AttributeKind_::SpecOnly)),
+            P::Attribute_::SpecLimited { .. } => Some((attr.loc, known_attributes::AttributeKind_::SpecLimited)),
             // -- testing attributes
             P::Attribute_::Test => Some((attr.loc, known_attributes::AttributeKind_::Test)),
             P::Attribute_::RandomTest => {

@@ -180,10 +180,13 @@ fn no_conflicts(
         | KA::Syntax(..) => vec![],
         KA::Verification(ver_attr) => match ver_attr {
             crate::shared::known_attributes::VerificationAttribute::Spec { .. } => {
-                matching_kinds(attr_map, &[K::SpecOnly])
+                matching_kinds(attr_map, &[K::SpecOnly, K::SpecLimited])
             }
             crate::shared::known_attributes::VerificationAttribute::SpecOnly { .. } => {
-                matching_kinds(attr_map, &[K::Spec])
+                matching_kinds(attr_map, &[K::Spec, K::SpecLimited])
+            }
+            crate::shared::known_attributes::VerificationAttribute::SpecLimited { .. } => {
+                matching_kinds(attr_map, &[K::Spec, K::SpecOnly])
             }
         },
         KA::Testing(test_attr) => match test_attr {
@@ -330,6 +333,9 @@ fn attribute(
                     .flatten()
                     .map(|result| result.access),
              } ),
+        PA::SpecLimited { abort_check } => {
+            KA::Verification(A::VerificationAttribute::SpecLimited { abort_check })
+        }
     };
     Some(sp(loc, attr_))
 }

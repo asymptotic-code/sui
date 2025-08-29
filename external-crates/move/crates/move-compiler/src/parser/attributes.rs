@@ -66,6 +66,7 @@ pub(crate) fn to_known_attributes(
         KA::VerificationAttribute::SPEC => parse_spec(context, attribute),
         // -- verification attributes -=-------
         KA::VerificationAttribute::SPEC_ONLY => parse_spec_only(context, attribute),
+        KA::VerificationAttribute::SPEC_LIMITED => parse_spec_limited(context, attribute),
         ref name => {
             let msg = format!(
                 "Unknown attribute '{name}'. Custom attributes must be wrapped in '{ext}', \
@@ -693,6 +694,84 @@ fn parse_spec_only(context: &mut Context, attribute: ParsedAttribute) -> Vec<Att
                 &format!(
                     "either '#[{fail}]' or #[{fail}(<arg>, ...)]'",
                     fail = KA::VerificationAttribute::SPEC_ONLY,
+                ),
+            );
+            context.add_diag(diag!(Declarations::InvalidAttribute, (loc, msg)));
+            vec![]
+        }
+    }
+}
+
+fn parse_spec_limited_parametized(context: &mut Context, loc: &Loc, inner_attrs: &Spanned<Vec<ParsedAttribute>>) -> Vec<Attribute> {
+    let sp!(inner_loc, attrs) = inner_attrs;
+
+    let mut abort_check: bool = false;
+
+    let mut visited = BTreeSet::new();
+
+    for inner_attr in attrs.into_iter() {
+        match &inner_attr.value {
+            ParsedAttribute_::Name(kind) => {
+                let prop = kind.value.to_string();
+                if !visited.insert(prop.clone()) {
+                    let msg = format!(
+                        "Duplicate {} parameter '{}'",
+                        KA::VerificationAttribute::SPEC_LIMITED,
+                        prop
+                    );
+                    context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                    return vec![];
+                }
+                if prop == KA::VerificationAttribute::ABORT_CHECK_NAME {
+                    abort_check = true;
+                } else {
+                    let msg = format!(
+                        "Unknown {} name parameter '{}'. Expected: {}",
+                        KA::VerificationAttribute::SPEC_LIMITED,
+                        prop,
+                        KA::VerificationAttribute::ABORT_CHECK_NAME
+                    );
+                    context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                    return vec![];
+                }
+            }
+            ParsedAttribute_::Parameterized(_, _) | ParsedAttribute_::Assigned(_,_) => {
+                let msg = make_attribute_format_error(
+                    &inner_attr.value,
+                    &format!(
+                        "Internal parameterized or assigned attributes are not allowed for {}",
+                        KA::VerificationAttribute::SPEC_LIMITED
+                    ),
+                );
+                context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                return vec![];
+            }
+        }
+    }
+
+    vec![sp(*loc, Attribute_::SpecLimited { abort_check })]
+}
+
+fn parse_spec_limited(context: &mut Context, attribute: ParsedAttribute) -> Vec<Attribute> {
+   use ParsedAttribute_ as PA;
+    let sp!(loc, attr) = attribute;
+    match attr {
+        // Valid: a bare identifier is required.
+        PA::Name(_) => {
+            vec![sp(loc, Attribute_::SpecLimited { 
+                abort_check: false,
+            })]
+        }
+        PA::Parameterized(_, inner_attrs) => {
+            parse_spec_limited_parametized(context, &loc, &inner_attrs)
+        }
+        // Invalid: any assignment use is not allowed.
+        PA::Assigned(_, _) => {
+            let msg = make_attribute_format_error(
+                &attr,
+                &format!(
+                    "either '#[{fail}]' or #[{fail}(<arg>, ...)]'",
+                    fail = KA::VerificationAttribute::SPEC_LIMITED,
                 ),
             );
             context.add_diag(diag!(Declarations::InvalidAttribute, (loc, msg)));
