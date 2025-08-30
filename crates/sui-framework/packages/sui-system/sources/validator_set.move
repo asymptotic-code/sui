@@ -1361,9 +1361,11 @@ fun emit_validator_epoch_events(
 
 /// Sum up the total stake of a given list of validator addresses.
 public fun sum_voting_power_by_addresses(vs: &vector<Validator>, addresses: &vector<address>): u64 {
-    let mut sum = 0;
+    let mut sum = 0u64;
     let mut i = 0;
     let length = addresses.length();
+    invariant!(|| ensures(i <= length && length == addresses.length() &&
+        sum.to_int() == sum_voting_power_by_addresses_range_sf(vs, addresses, 0, i)));
     while (i < length) {
         let validator = get_validator_ref(vs, addresses[i]);
         sum = sum + validator.voting_power();
@@ -1426,7 +1428,12 @@ fun get_candidate_or_active_validator(self: &ValidatorSet, validator_address: ad
 
 // === specifications ===
 
+#[spec_only]
 use prover::prover::{requires,ensures,invariant};
+#[spec_only]
+use std::integer::Integer;
+#[spec_only]
+use std::u64;
 
 #[spec_only]
 /// This "native" function is defined more fully in `prelude_extra.bpl`
@@ -1436,7 +1443,7 @@ public native fun find_validator_sf(validators: &vector<Validator>, validator_ad
 
 #[spec_only]
 /// This "native" function is defined more fully in `prelude_extra.bpl`
-/// "exists i: u64, lb <= i < hb with v[i].sui_address() = a"
+/// "exists i: u64 ::  lb <= i && i < hb && v[i].sui_address() = a"
 public native fun exists_validator_in_range_sf(validators: &vector<Validator>, lb: u64, hb: u64, validator_address: address): bool;
 
 #[spec_only]
@@ -1444,6 +1451,28 @@ public native fun exists_validator_in_range_sf(validators: &vector<Validator>, l
 public fun exists_validator_sf(validators: &vector<Validator>, validator_address: address): bool {
     exists_validator_in_range_sf(validators, 0, validators.length(), validator_address)
 }
+
+#[spec_only]
+/// Add up the voting powers of all the validators at the addresses given in the
+/// list of addresses.  Addresses that are included multiple times will be added in
+/// that many times.  Only addresses `validator_address[i]` for `from <= i < to`
+/// are considered.
+/// Returns an Integer, so that overflow is not an issue.
+public native fun sum_voting_power_by_addresses_range_sf(vs: &vector<Validator>, addresses: &vector<address>,
+    from: u64, to: u64): Integer;
+
+#[spec_only]
+/// Add up the voting powers of all the validators at the addresses given in the
+/// list of addresses.  Addresses that are included multiple times will be added in
+/// that many times. Returns an Integer, so that overflow is not an issue.
+public fun sum_voting_power_by_addresses_sf(vs: &vector<Validator>, addresses: &vector<address>): Integer {
+    sum_voting_power_by_addresses_range_sf(vs, addresses, 0, addresses.length())
+}
+
+#[spec_only]
+/// forall i: u64 :: 0 <= i < addresses.length() ==> exists_validator_sf(vs, addresses[i])
+public native fun all_addresses_exist_sf(vs: &vector<Validator>, addresses: &vector<address>): bool;
+
 
 #[spec(prove)]
 fun find_validator_spec(validators: &vector<Validator>, validator_address: address): Option<u64> {
@@ -1455,6 +1484,7 @@ fun find_validator_spec(validators: &vector<Validator>, validator_address: addre
         ensures(find_validator_sf(validators, validator_address).is_some());
         ensures(i == *find_validator_sf(validators, validator_address).borrow());
         ensures(r == find_validator_sf(validators, validator_address));
+        ensures(r == std::option::some(i));
     } else {
         ensures(r.is_none())
     };
@@ -1481,6 +1511,9 @@ fun get_validator_ref_spec(
     requires(exists_validator_sf(validators, validator_address));
     let r = get_validator_ref(validators, validator_address);
     ensures(r.sui_address() == validator_address);
+    let f = find_validator(validators, validator_address);
+    ensures(f.is_some());
+    ensures(r == &validators[*f.borrow()]);
     r
 }
 
@@ -1512,4 +1545,13 @@ public fun is_validator_candidate_spec(self: &ValidatorSet, addr: address): bool
 #[spec(prove, no_opaque)]
 public fun is_inactive_validator_spec(self: &ValidatorSet, staking_pool_id: ID): bool {
     is_inactive_validator(self, staking_pool_id)
+}
+
+#[spec(prove)]
+public fun sum_voting_power_by_addresses_spec(vs: &vector<Validator>, addresses: &vector<address>): u64 {
+    requires(all_addresses_exist_sf(vs, addresses));
+    requires(sum_voting_power_by_addresses_sf(vs, addresses).lte(u64::max_value!().to_int()));
+    let r = sum_voting_power_by_addresses(vs, addresses);
+    ensures(r.to_int() == sum_voting_power_by_addresses_sf(vs, addresses));
+    r
 }
