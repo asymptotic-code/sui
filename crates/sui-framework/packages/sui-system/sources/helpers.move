@@ -7,25 +7,25 @@ use prover::prover::{ensures, invariant};
 
 #[spec_only]
 /// x+y will not abort (u64)
-fun can_add_u64(x: u64, y: u64): bool {
+public fun can_add_u64(x: u64, y: u64): bool {
     x.to_int().add(y.to_int()).lte(u64::max_value!().to_int())
 }
 
 #[spec_only]
 /// x+y will not abort (u32)
-fun can_add_u32(x: u32, y: u32): bool {
+public fun can_add_u32(x: u32, y: u32): bool {
     x.to_int().add(y.to_int()).lte(u32::max_value!().to_int())
 }
 
 #[spec_only]
 /// x-y will not abort
-fun can_sub_u64(x: u64, y: u64): bool {
+public fun can_sub_u64(x: u64, y: u64): bool {
     y <= x
 }
 
 #[spec_only]
 /// x-y will not abort
-fun can_sub_u32(x: u32, y: u32): bool {
+public fun can_sub_u32(x: u32, y: u32): bool {
     y <= x
 }
 
