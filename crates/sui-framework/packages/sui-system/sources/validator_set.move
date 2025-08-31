@@ -634,6 +634,10 @@ public fun derive_reference_gas_price(self: &ValidatorSet): u64 {
     let num_validators = vs.length();
     let mut entries = vector[];
     let mut i = 0;
+    invariant!(|| {
+        ensures(i <= num_validators);
+        ensures(derive_reference_gas_price_inv(&entries, &self.active_validators, i));
+    });
     while (i < num_validators) {
         let v = &vs[i];
         entries.push_back(
@@ -642,12 +646,15 @@ public fun derive_reference_gas_price(self: &ValidatorSet): u64 {
         i = i + 1;
     };
     // Build a priority queue that will pop entries with gas price from the highest to the lowest.
-    let mut pq = pq::new(entries);
-    let mut sum = 0;
+    let mut pq = local_pq_new(entries); // changed for proof
+    let mut sum = 0u64;
     let threshold = voting_power::total_voting_power() - voting_power::quorum_threshold();
     let mut result = 0;
+    invariant!(||
+        ensures(sum.to_int().add(sum_pq_validator_voting_power(&pq)) ==
+                sum_all_vec_validator_voting_power(&self.active_validators)));
     while (sum < threshold) {
-        let (gas_price, voting_power) = pq.pop_max();
+        let (gas_price, voting_power) = local_pop_max(&mut pq); // changed for proof
         result = gas_price;
         sum = sum + voting_power;
     };
@@ -1429,7 +1436,7 @@ fun get_candidate_or_active_validator(self: &ValidatorSet, validator_address: ad
 // === specifications ===
 
 #[spec_only]
-use prover::prover::{requires,ensures,invariant};
+use prover::prover::{requires,ensures,invariant, old};
 #[spec_only]
 use std::integer::Integer;
 #[spec_only]
@@ -1468,6 +1475,30 @@ public native fun sum_voting_power_by_addresses_range_sf(vs: &vector<Validator>,
 public fun sum_voting_power_by_addresses_sf(vs: &vector<Validator>, addresses: &vector<address>): Integer {
     sum_voting_power_by_addresses_range_sf(vs, addresses, 0, addresses.length())
 }
+
+#[spec_only]
+/// sum of the all voting powers of the validators in a vector, in a range of indices
+native fun sum_vec_validator_voting_power(vs: &vector<Validator>, lb: u64, ub: u64): Integer;
+
+#[spec_only]
+/// sum of all the voting powers of the validators in a priority queue
+native fun sum_pq_validator_voting_power(q: &pq::PriorityQueue<u64>): Integer;
+
+/// used in an invariant;
+/// entries.length() == i && forall j: u64 :: 0 <= j && j < i ==> entries[j] == (vs[i].gas_price(), vs[i].voting_power())
+native fun derive_reference_gas_price_inv(entries: &vector<pq::Entry<u64>>,
+                                          vs: &vector<Validator>, i: u64): bool;
+
+#[spec_only]
+// forall validators: vector<Validator> ::
+//   (forall j: u64 :: 0 <= j && j < validators.length() ==>
+//      entries[j] == (validators[i].gas_price(), validators[i].voting_power()))
+//   ==> sum_vec_validator_voting_power(validators) == sum_pq_validator_voting_power(q)
+native fun local_pq_new_postcondition(vs: &vector<pq::Entry<u64>>, q: &pq::PriorityQueue<u64>): bool;
+
+/// Number of entries in a priority queue
+// q.entries.length(), but that's not speakable outside the priority_queue module.
+public native fun pq_count(q: & pq::PriorityQueue<u64>): u64;
 
 #[spec_only]
 /// forall i: u64 :: 0 <= i < addresses.length() ==> exists_validator_sf(vs, addresses[i])
@@ -1554,4 +1585,48 @@ public fun sum_voting_power_by_addresses_spec(vs: &vector<Validator>, addresses:
     let r = sum_voting_power_by_addresses(vs, addresses);
     ensures(r.to_int() == sum_voting_power_by_addresses_sf(vs, addresses));
     r
+}
+
+#[spec_only]
+fun sum_all_vec_validator_voting_power(vs: &vector<Validator>): Integer {
+    sum_vec_validator_voting_power(vs, 0, vs.length())
+}
+
+/// pq::pop_max(), but for a specific instance, and with a specification
+fun local_pop_max(q: &mut pq::PriorityQueue<u64>): (u64, u64) {
+    q.pop_max()
+}
+
+/// pq::new<u64>, here so we can add a specification
+fun local_pq_new(vs: vector<pq::Entry<u64>>):  pq::PriorityQueue<u64> {
+    pq::new(vs)
+}
+
+#[spec]
+fun local_pop_max_spec(q: &mut pq::PriorityQueue<u64>): (u64, u64) {
+    requires(pq_count(q) > 0);
+    let in_sum = sum_pq_validator_voting_power(q);
+    let (pri, val) = local_pop_max(q);
+    ensures(val.to_int().add(sum_pq_validator_voting_power(q)) == in_sum);
+    (pri, val)
+}
+
+#[spec]
+fun local_pq_new_spec(vs: vector<pq::Entry<u64>>):  pq::PriorityQueue<u64> {
+    requires(vs.length() < u64::max_value!() - 1);
+    let in_vs = old!(&vs);
+    let r = local_pq_new(vs); // this consumes vs
+    ensures(local_pq_new_postcondition(in_vs, &r));
+    r
+}
+
+#[spec(prove)]
+public fun derive_reference_gas_price_spec(self: &ValidatorSet): u64 {
+    requires(self.active_validators.length()< u64::max_value!() - 1);
+    // required so that the loop does not pop from an empty queue:
+    let threshold = voting_power::total_voting_power() - voting_power::quorum_threshold();
+    requires(sum_all_vec_validator_voting_power(&self.active_validators).gte(threshold.to_int()));
+    // required for no overflow in the additions
+    requires(sum_all_vec_validator_voting_power(&self.active_validators).lte(u64::max_value!().to_int()));
+    derive_reference_gas_price(self)
 }

@@ -91,3 +91,85 @@ axiom (forall vs: Vec($3_validator_Validator), addresses: Vec(int), a: int, x: i
 axiom (forall vs: Vec($3_validator_Validator), addresses: Vec(int), a: int, b: int, c: int, d: int ::
   { sum_voting_power_by_addresses_range_sf(vs, addresses, a, d), sum_voting_power_by_addresses_range_sf(vs, addresses, b, c) }
   $IsValid'vec'$3_validator_Validator''(vs) && 0 <= a && a <= b && b <= c && c <= d && d <= LenVec(addresses)  ==> sum_voting_power_by_addresses_range_sf(vs, addresses, b, c) <= sum_voting_power_by_addresses_range_sf(vs, addresses, a, d)) ;
+
+// 1.c. for validator_set::derive_reference_gas_price
+
+// native fun sum_vec_validator_voting_power(vs: &vector<Validator>, lb: u64, ub: u64): Integer;
+procedure {:inline 1} $3_validator_set_sum_vec_validator_voting_power(
+  vs: Vec ($3_validator_Validator),
+  lb: int,
+  ub: int)
+  returns (r: int) {
+  r := sum_vec_validator_voting_power(vs, lb, ub);
+  }
+
+// to be defined axiomatically
+function sum_vec_validator_voting_power(vs: Vec ($3_validator_Validator), lb: int, ub: int): int;
+
+// // this block of axioms may be needed by callers, but not for the internal proofs
+// the sum over an empty range is zero
+// axiom (forall v: Vec ($3_validator_Validator), from: int, to: int :: { sum_vec_validator_voting_power(v, from, to)}
+//    (from >= to ==> sum_vec_validator_voting_power(v, from, to) == 0));
+
+// the sum of a range can be split in two
+// axiom (forall v: Vec ($3_validator_Validator), a: int, b: int, c: int, d: int ::
+//   { sum_vec_validator_voting_power(v, a, b), sum_vec_validator_voting_power(v, c, d) }
+//   0 <= a && a <= b && b == c && c <= d && d <= LenVec(v)  ==> sum_vec_validator_voting_power(v, a, b) + sum_vec_validator_voting_power(v, c, d) ==  sum_vec_validator_voting_power(v, a, d)) ;
+
+// // the sum over a singleton range is the vector element there
+// axiom (forall v: Vec ($3_validator_Validator), a: int, b: int ::
+//   { sum_vec_validator_voting_power(v, a, b) }
+//   0 <= a && a + 1 == b && b <= LenVec(v)  ==> sum_vec_validator_voting_power(v, a, b) == ReadVec(v, a)->$voting_power);
+
+// for vectors of Validator, nested ranges have sums bounded by the larger
+// axiom (forall v: Vec ($3_validator_Validator), a: int, b: int, c: int, d: int ::
+//   { sum_vec_validator_voting_power(v, a, d), sum_vec_validator_voting_power(v, b, c) }
+//   $IsValid'vec'$3_validator_Validator''(v) && 0 <= a && a <= b && b <= c && c <= d && d <= LenVec(v)  ==> sum_vec_validator_voting_power(v, b, c) <= sum_vec_validator_voting_power(v, a, d)) ;
+
+// for vectors of Validator, vector sums are non-negative
+// axiom (forall v: Vec ($3_validator_Validator), a: int, b: int ::
+//   { sum_vec_validator_voting_power(v, a, b) }
+//   $IsValid'vec'$3_validator_Validator''(v) && 0 <= a && a <= b && b <= LenVec(v)  ==> sum_vec_validator_voting_power(v, a, b) >= 0);
+// // end block
+
+// native fun sum_pq_validator_voting_power(vs: &vector<Validator>): Integer;
+procedure {:inline 1} $3_validator_set_sum_pq_validator_voting_power(q: $2_priority_queue_PriorityQueue'u64')
+  returns (r: int) {
+  r := sum_pq_validator_voting_power(q);
+  }
+
+function sum_pq_validator_voting_power(q: $2_priority_queue_PriorityQueue'u64'): int;
+
+//  sum_pq_validator_voting_power is non-negative
+axiom (forall q: $2_priority_queue_PriorityQueue'u64' ::
+ { sum_pq_validator_voting_power(q) }
+ $IsValid'$2_priority_queue_PriorityQueue'u64''(q) ==> sum_pq_validator_voting_power(q) >= 0);
+
+// if the sum is positive, the queue is not empty
+axiom (forall q: $2_priority_queue_PriorityQueue'u64' ::
+ { sum_pq_validator_voting_power(q) }
+ ($IsValid'$2_priority_queue_PriorityQueue'u64''(q) && sum_pq_validator_voting_power(q) >0)
+ ==> LenVec(q->$entries) > 0);
+
+/// Number of entries in a priority queue
+// q.entries.length(), but that's not speakable outside the priority_queue module.
+// public native fun pq_count(q: & pq::PriorityQueue): u64;
+procedure {:inline 1} $3_validator_set_pq_count(q: $2_priority_queue_PriorityQueue'u64') returns (c: int) {
+  c := LenVec(q->$entries);
+  }
+
+// native fun derive_reference_gas_price_inv(entries: &vector<priority_queue::Entry<u64>>,
+//                                           vs: &vector<Validator>, i: u64): bool;
+procedure {:inline 1} $3_validator_set_derive_reference_gas_price_inv(entries: Vec ($2_priority_queue_Entry'u64'), vs: Vec($3_validator_Validator), i: int) returns (r: bool) {
+  r := LenVec(entries) == i && (forall j: int :: 0 <= j && j < i ==> ReadVec(entries,j) == $2_priority_queue_Entry'u64'(ReadVec(vs,j)->$gas_price, ReadVec(vs,j)->$voting_power));
+  }
+
+// native fun local_pq_new_postcondition(vs: &vector<pq::Entry<u64>>, q: &pq::PriorityQueue<u64>): bool;
+procedure {:inline 1} $3_validator_set_local_pq_new_postcondition
+   (entries: Vec($2_priority_queue_Entry'u64'),
+    q: $2_priority_queue_PriorityQueue'u64') returns (r: bool) {
+  r := (forall vs:  Vec($3_validator_Validator) ::
+   (forall j: int :: InRangeVec(vs, j) ==>
+      ReadVec(entries, j) == ($2_priority_queue_Entry'u64'(ReadVec(vs,j)->$gas_price, ReadVec(vs,j)->$voting_power)))
+    ==> sum_vec_validator_voting_power(vs, 0, LenVec(vs)) == sum_pq_validator_voting_power(q));
+    }
