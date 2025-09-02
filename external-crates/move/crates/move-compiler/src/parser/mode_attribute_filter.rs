@@ -59,6 +59,7 @@ impl FilterContext for Context<'_> {
         if self.env.verify_mode() { // modes contains VERIFY_ONLY
             allowed_modes.insert(VerificationAttribute::SPEC.into());
             allowed_modes.insert(VerificationAttribute::SPEC_ONLY.into());
+            allowed_modes.insert(VerificationAttribute::SPEC_LIMITED.into());
         }
 
         // If the compiler mode intersects with these modes, we should keep this
