@@ -1,8 +1,8 @@
 // Special "spec functions"
 
-// 1. for validator_set
+// 1. for module validator_set
 
-// 1.a. find_validator.  The reatment here of an Option return is modelled on `vec_map::get_idx_opt`
+// 1.a. find_validator.  The treatment here of an Option return is modelled on `vec_map::get_idx_opt`
 
 procedure {:inline 1} $3_validator_set_find_validator_sf(v: Vec($3_validator_Validator), a: int)
   returns ($ret0: $1_option_Option'u64') {
@@ -173,3 +173,47 @@ procedure {:inline 1} $3_validator_set_local_pq_new_postcondition
       ReadVec(entries, j) == ($2_priority_queue_Entry'u64'(ReadVec(vs,j)->$gas_price, ReadVec(vs,j)->$voting_power)))
     ==> sum_vec_validator_voting_power(vs, 0, LenVec(vs)) == sum_pq_validator_voting_power(q));
     }
+
+// 1.d. for validator_set::find_validator_from_table_vec
+//
+// Just like what is done for find_validator, except:
+//   Vec($3_validator_Validator) ->  $2_table_vec_TableVec'$3_validator_Validator'
+//   LenVec -> LenTable
+//   ReadVec(v,i) -> GetTable(v->$contents->$contents, $EncodeKey'u64'(i))
+
+procedure {:inline 1} $3_validator_set_find_validator_from_table_sf(v: $2_table_vec_TableVec'$3_validator_Validator', a: int)
+  returns ($ret0: $1_option_Option'u64') {
+  var r: int;
+  r := find_validator_from_table_sf(v, a);
+  if (r >= 0) {
+     $ret0 := $1_option_Option'u64'(MakeVec1(r));
+  } else {
+     $ret0 := $1_option_Option'u64'(EmptyVec());
+  }
+}
+
+function find_validator_from_table_sf(v: $2_table_vec_TableVec'$3_validator_Validator', a: int): int;
+
+// callable from Move
+procedure {:inline 1} $3_validator_set_exists_validator_in_table_in_range_sf(v: $2_table_vec_TableVec'$3_validator_Validator', lb: int, hb: int, a: int)
+  returns (e: bool) {
+  e := exists_validator_in_table_in_range_sf(v, lb, hb, a);
+}
+
+// callable from Boogie
+function {:inline} exists_validator_in_table_in_range_sf(v: $2_table_vec_TableVec'$3_validator_Validator', lb: int, hb: int, a: int): bool {
+ (exists i: int :: $IsValid'u64'(i) && 0 <= i && i < LenTable(v->$contents->$contents) && lb <= i && i < hb &&
+    ContainsTable(v->$contents->$contents, $EncodeKey'u64'(i)) &&
+    validator_sui_address(GetTable(v->$contents->$contents, $EncodeKey'u64'(i))) == a)}
+
+// if a validator with the given sui_address exists, the smallest index of a location is returned,
+// otherwise -1.  In move, this is turned into an Option<u64>
+axiom (forall v: $2_table_vec_TableVec'$3_validator_Validator', a: int ::
+  { find_validator_from_table_sf(v, a) }
+  (var r :=  find_validator_from_table_sf(v, a);
+  if (exists_validator_in_table_in_range_sf(v, 0, LenTable(v->$contents->$contents), a))
+  then $IsValid'u64'(r) && 0 <= r &&  r < LenTable(v->$contents->$contents) &&
+       ContainsTable(v->$contents->$contents, $EncodeKey'u64'(r)) &&
+       validator_sui_address(GetTable(v->$contents->$contents, $EncodeKey'u64'(r))) == a &&
+       (! exists_validator_in_table_in_range_sf(v, 0, r, a))
+  else r == -1));

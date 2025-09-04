@@ -810,6 +810,10 @@ fun find_validator(validators: &vector<Validator>, validator_address: address): 
 fun find_validator_from_table_vec(validators: &TableVec<Validator>, validator_address: address): Option<u64> {
     let length = validators.length();
     let mut i = 0;
+    invariant!(|| {
+        ensures(length == validators.length());
+        ensures(i <= length);
+        ensures(! exists_validator_in_table_in_range_sf(validators, 0, i, validator_address)) } );
     while (i < length) {
         let v = &validators[i];
         if (v.sui_address() == validator_address) {
@@ -1509,13 +1513,7 @@ public native fun all_addresses_exist_sf(vs: &vector<Validator>, addresses: &vec
 fun find_validator_spec(validators: &vector<Validator>, validator_address: address): Option<u64> {
     let r = find_validator(validators, validator_address);
     if (exists_validator_sf(validators, validator_address)) {
-        ensures(r.is_some());
-        let i = *r.borrow();
-        ensures( i < validators.length() && validators[i].sui_address() == validator_address);
-        ensures(find_validator_sf(validators, validator_address).is_some());
-        ensures(i == *find_validator_sf(validators, validator_address).borrow());
         ensures(r == find_validator_sf(validators, validator_address));
-        ensures(r == std::option::some(i));
     } else {
         ensures(r.is_none())
     };
@@ -1629,4 +1627,41 @@ public fun derive_reference_gas_price_spec(self: &ValidatorSet): u64 {
     // required for no overflow in the additions
     requires(sum_all_vec_validator_voting_power(&self.active_validators).lte(u64::max_value!().to_int()));
     derive_reference_gas_price(self)
+}
+
+#[spec_only]
+/// This "native" function is defined more fully in `prelude_extra.bpl`
+/// but is the same as `find_validator`.  There is probably no need to refer to it outside of the
+/// specification of `find_validator`.
+public native fun find_validator_from_table_sf(validators: &TableVec<Validator>, validator_address: address): Option<u64>;
+
+#[spec_only]
+/// This "native" function is defined more fully in `prelude_extra.bpl`
+/// "exists i: u64 ::  lb <= i && i < hb && v[i].sui_address() = a"
+public native fun exists_validator_in_table_in_range_sf(validators: &TableVec<Validator>, lb: u64, hb: u64, validator_address: address): bool;
+
+#[spec_only]
+/// Is there a validator in validators that has the given address?
+public fun exists_validator_in_table_sf(validators: &TableVec<Validator>, validator_address: address): bool {
+    exists_validator_in_table_in_range_sf(validators, 0, validators.length(), validator_address)
+}
+
+#[spec(prove,skip)] // sui-prover issue #167
+fun find_validator_from_table_vec_spec(validators: &TableVec<Validator>, validator_address: address): Option<u64> {
+    let r = find_validator_from_table_vec(validators, validator_address);
+    if (exists_validator_in_table_sf(validators, validator_address)) {
+        ensures(r == find_validator_from_table_sf(validators, validator_address));
+    } else {
+        ensures(r.is_none())
+    };
+    r
+}
+
+#[spec(prove)]
+public fun get_pending_validator_ref_spec(
+    self: &ValidatorSet,
+    validator_address: address,
+): &Validator {
+    requires(exists_validator_in_table_sf(&self.pending_active_validators, validator_address));
+    get_pending_validator_ref(self, validator_address)
 }
