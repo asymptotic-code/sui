@@ -47,3 +47,53 @@ public fun destroy_some_spec<Element>(t: Option<Element>): Element {
 //         true
 //     }
 // }
+
+// specs for Versioned
+
+use sui::versioned::{Self,Versioned,VersionChangeCap};
+
+#[spec(target=sui::versioned::create)]
+public fun create_spec<T: store>(init_version: u64, init_value: T, ctx: &mut TxContext): Versioned {
+    let r = versioned::create(init_version, init_value, ctx);
+    //ensures(versioned_has_version_of_type<T>(&r));
+    r
+}
+
+#[spec(target=sui::versioned::load_value)]
+public fun load_value_spec<T: store>(self: &Versioned): &T {
+    // requires(versioned_has_version_of_type<T>(self)); // can fail if the type T is incorrect
+    versioned::load_value(self)
+}
+
+// Actually, can fail if the type T is incorrect
+#[spec(target=sui::versioned::load_value_mut)]
+public fun load_value_mut_spec<T: store>(self: &mut Versioned): &mut T {
+    // requires(versioned_has_version_of_type<T>(self));
+    versioned::load_value_mut(self)
+}
+
+// Actually, can fail if the type T is incorrect
+#[spec(target=sui::versioned::remove_value_for_upgrade)]
+public fun remove_value_for_upgrade_spec<T: store>(self: &mut Versioned): (T, VersionChangeCap) {
+    // requires(versioned_has_version_of_type<T>(self));
+    versioned::remove_value_for_upgrade(self)
+}
+
+#[spec(target=sui::versioned::upgrade)]
+public fun upgrade_spec<T: store>(
+    self: &mut Versioned,
+    new_version: u64,
+    new_value: T,
+    cap: VersionChangeCap) {
+        // requires(versioned_has_version_of_type<T>(self)); // can fail if the type T is incorrect
+        // requires self and cap have the same id; not expressible here
+        requires(self.version() < new_version); // or EInvalidUpgrade
+        versioned::upgrade(self, new_version, new_value, cap)
+    }
+
+// Actually, can fail if the type T is incorrect
+#[spec(target=sui::versioned::destroy)]
+public fun destroy_spec<T: store>(self: Versioned): T {
+    // requires(versioned_has_version_of_type<T>(self));
+    versioned::destroy(self)
+}

@@ -1558,7 +1558,7 @@ public fun validator_staking_pool_id_spec(self: &ValidatorSet, validator_address
     validator_staking_pool_id(self, validator_address)
 }
 
-#[spec(prove, skip)]
+#[spec(prove)]
 public fun validator_address_by_pool_id_spec(self: &mut ValidatorSet, pool_id: &ID): address {
     requires(self.staking_pool_mappings.contains(*pool_id) ||
         (self.inactive_validators.contains(*pool_id) &&
