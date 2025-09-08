@@ -792,7 +792,7 @@ fun get_candidate_or_active_validator_mut(self: &mut ValidatorSet, validator_add
 fun find_validator(validators: &vector<Validator>, validator_address: address): Option<u64> {
     let length = validators.length();
     let mut i = 0;
-    invariant!(|| ensures( length == validators.length() && i <= length &&
+    invariant!(|| ensures(i <= length &&
                  ! exists_validator_in_range_sf(validators, 0, i, validator_address)));
     while (i < length) {
         let v = &validators[i];
@@ -1512,11 +1512,7 @@ public native fun all_addresses_exist_sf(vs: &vector<Validator>, addresses: &vec
 #[spec(prove)]
 fun find_validator_spec(validators: &vector<Validator>, validator_address: address): Option<u64> {
     let r = find_validator(validators, validator_address);
-    if (exists_validator_sf(validators, validator_address)) {
-        ensures(r == find_validator_sf(validators, validator_address));
-    } else {
-        ensures(r.is_none())
-    };
+    ensures(r == find_validator_sf(validators, validator_address));
     r
 }
 
