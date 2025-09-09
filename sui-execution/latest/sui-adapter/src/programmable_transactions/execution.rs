@@ -182,6 +182,8 @@ mod checked {
         // We record what objects were contained in at the start of the transaction
         // for expensive invariant checks
         let wrapped_object_containers = object_runtime.wrapped_object_containers();
+        // We record the generated object IDs for expensive invariant checks
+        let generated_object_ids = object_runtime.generated_object_ids();
 
         // apply changes
         let finished = context.finish::<Mode>();
@@ -189,6 +191,7 @@ mod checked {
         state_view.save_loaded_runtime_objects(loaded_runtime_objects);
         state_view.save_wrapped_object_containers(wrapped_object_containers);
         state_view.record_execution_results(finished?);
+        state_view.record_generated_object_ids(generated_object_ids);
         Ok(mode_results)
     }
 
@@ -201,6 +204,16 @@ mod checked {
         trace_builder_opt: &mut Option<MoveTraceBuilder>,
     ) -> Result<(), ExecutionError> {
         let mut argument_updates = Mode::empty_arguments();
+
+        let kind = match &command {
+            Command::MakeMoveVec(_, _) => CommandKind::MakeMoveVec,
+            Command::TransferObjects(_, _) => CommandKind::TransferObjects,
+            Command::SplitCoins(_, _) => CommandKind::SplitCoins,
+            Command::MergeCoins(_, _) => CommandKind::MergeCoins,
+            Command::MoveCall(_) => CommandKind::MoveCall,
+            Command::Publish(_, _) => CommandKind::Publish,
+            Command::Upgrade(_, _, _, _) => CommandKind::Upgrade,
+        };
         let results = match command {
             Command::MakeMoveVec(tag_opt, args) if args.is_empty() => {
                 let Some(tag) = tag_opt else {
@@ -494,7 +507,7 @@ mod checked {
         };
 
         Mode::finish_command(context, mode_results, argument_updates, &results)?;
-        context.push_command_results(results)?;
+        context.push_command_results(kind, results)?;
         Ok(())
     }
 
@@ -1410,7 +1423,7 @@ mod checked {
     /// each value
     fn build_move_args<Mode: ExecutionMode>(
         context: &mut ExecutionContext<'_, '_, '_>,
-        module_id: &ModuleId,
+        _module_id: &ModuleId,
         function: &IdentStr,
         function_kind: FunctionKind,
         signature: &LoadedFunctionInstantiation,
@@ -1444,11 +1457,6 @@ mod checked {
         // check the types and remember which are by mutable ref
         let mut by_mut_ref = vec![];
         let mut serialized_args = Vec::with_capacity(num_args);
-        let command_kind = CommandKind::MoveCall {
-            package: (*module_id.address()).into(),
-            module: module_id.name(),
-            function,
-        };
         // an init function can have one or two arguments, with the last one always being of type
         // &mut TxContext and the additional (first) one representing a one time witness type (see
         // one_time_witness verifier pass for additional explanation)
@@ -1490,7 +1498,7 @@ mod checked {
                 }
                 Type::Reference(inner) => (context.borrow_arg(idx, arg, param_ty)?, inner),
                 t => {
-                    let value = context.by_value_arg(command_kind, idx, arg)?;
+                    let value = context.by_value_arg(CommandKind::MoveCall, idx, arg)?;
                     (value, t)
                 }
             };

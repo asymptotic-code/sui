@@ -30,6 +30,7 @@ const concepts = [
 						items: [
 							'concepts/object-ownership/address-owned',
 							'concepts/object-ownership/immutable',
+							'concepts/object-ownership/party',
 							'concepts/object-ownership/shared',
 							'concepts/object-ownership/wrapped',
 						],
@@ -94,8 +95,20 @@ const concepts = [
 			},
 			'concepts/grpc-overview',
 			'concepts/graphql-rpc',
+			'concepts/archival-store',
 			'concepts/gaming'
 		],
+	},
+	{ 
+		type: 'category',
+		label: 'Custom Indexing Framework',
+		link: {
+			type: 'doc',
+			id: 'concepts/custom-indexing-framework',
+		},
+		items: [
+			'concepts/custom-indexer/pipeline-architecture'
+		]
 	},
 	{
 		type: 'category',
@@ -187,4 +200,4 @@ const concepts = [
 	},
 	'concepts/research-papers',
 ];
-module.exports = concepts;
+export default concepts;

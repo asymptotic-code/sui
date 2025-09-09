@@ -21,7 +21,6 @@ use move_trace_format::format::MoveTraceBuilder;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashSet},
-    path::PathBuf,
     sync::Arc,
 };
 use sui_execution::Executor;
@@ -40,7 +39,7 @@ use sui_types::{
     supported_protocol_versions::ProtocolConfig,
     transaction::{CheckedInputObjects, TransactionDataAPI},
 };
-use tracing::{debug, trace};
+use tracing::{debug, debug_span, trace};
 
 // Executor for the replay. Created and used by `ReplayTransaction`.
 pub struct ReplayExecutor {
@@ -76,7 +75,7 @@ pub fn execute_transaction_to_effects(
     ),
     anyhow::Error,
 > {
-    debug!("Start execution");
+    debug!(op = "execute_tx", phase = "start", "execution");
     // TODO: Hook up...
     let config_certificate_deny_set: HashSet<TransactionDigest> = HashSet::new();
 
@@ -89,10 +88,13 @@ pub fn execute_transaction_to_effects(
         object_cache,
     } = txn;
 
+    let epoch = expected_effects.executed_epoch();
+    let _span = debug_span!("execute_tx", %digest, epoch, checkpoint).entered();
     let input_objects = get_input_objects_for_replay(&txn_data, &digest, &object_cache)?;
     let protocol_config = &executor.protocol_config;
-    let epoch = expected_effects.executed_epoch();
-    let epoch_data = epoch_store.epoch_info(epoch)?;
+    let epoch_data = epoch_store
+        .epoch_info(epoch)?
+        .ok_or_else(|| anyhow::anyhow!(format!("Epoch {} not found", epoch)))?;
     let epoch_start_timestamp = epoch_data.start_timestamp;
     let gas_status = if txn_data.kind().is_system_tx() {
         SuiGasStatus::new_unmetered()
@@ -146,7 +148,7 @@ pub fn execute_transaction_to_effects(
         store: _,
     } = store;
     let object_cache = object_cache.into_inner();
-    debug!("End execution");
+    debug!(op = "execute_tx", phase = "end", "execution");
     Ok((
         result,
         TxnContextAndEffects {
@@ -160,12 +162,9 @@ pub fn execute_transaction_to_effects(
 }
 
 impl ReplayExecutor {
-    pub fn new(
-        protocol_config: ProtocolConfig,
-        enable_profiler: Option<PathBuf>,
-    ) -> Result<Self, anyhow::Error> {
+    pub fn new(protocol_config: ProtocolConfig) -> Result<Self, anyhow::Error> {
         let silent = true; // disable Move debug API
-        let executor = sui_execution::executor(&protocol_config, silent, enable_profiler)
+        let executor = sui_execution::executor(&protocol_config, silent)
             .context("Filed to create executor. ProtocolConfig inconsistency?")?;
 
         let registry = prometheus::Registry::new();
@@ -216,7 +215,8 @@ impl ReplayStore<'_> {
             .map_err(|e| SuiError::Storage(e.to_string()))
             .ok()?
             .into_iter()
-            .next()?;
+            .next()?
+            .map(|(obj, _version)| obj);
         // add it to the cache
         if let Some(obj) = &object {
             self.object_cache
@@ -248,9 +248,7 @@ impl BackingPackageStore for ReplayStore<'_> {
         // If the package is not in the cache, fetch it from the store
         let object_key = ObjectKey {
             object_id: *package_id,
-            // we could have used `VersionQuery::ImmutableOrLatest`
-            // but we would have to track system packages separately
-            // which we may want to consider
+            // Using AtCheckpoint to get the package version at the time of execution
             version_query: VersionQuery::AtCheckpoint(self.checkpoint),
         };
         let package = self
@@ -262,13 +260,17 @@ impl BackingPackageStore for ReplayStore<'_> {
             "Expected one package object for {}",
             package_id
         );
-        let package = package.into_iter().next().unwrap().unwrap();
-        self.object_cache
-            .borrow_mut()
-            .entry(*package_id)
-            .or_default()
-            .insert(package.version().value(), package.clone());
-        Ok(Some(PackageObject::new(package)))
+        let maybe = package.into_iter().next().and_then(|o| o);
+        if let Some((package, _version)) = maybe {
+            self.object_cache
+                .borrow_mut()
+                .entry(*package_id)
+                .or_default()
+                .insert(package.version().value(), package.clone());
+            Ok(Some(PackageObject::new(package)))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -288,7 +290,8 @@ impl sui_types::storage::ObjectStore for ReplayStore<'_> {
                 .map_err(|e| SuiError::Storage(e.to_string()))
                 .ok()?
                 .into_iter()
-                .next()?,
+                .next()?
+                .map(|(obj, _version)| obj),
         };
         object
     }
@@ -324,7 +327,11 @@ impl ChildObjectResolver for ReplayStore<'_> {
             .get_objects(&[object_key])
             .map_err(|e| SuiError::Storage(e.to_string()))?;
         debug_assert!(object.len() == 1, "Expected one object for {}", child,);
-        let object = object.into_iter().next().unwrap();
+        let object = object
+            .into_iter()
+            .next()
+            .unwrap()
+            .map(|(obj, _version)| obj);
         Ok(object)
     }
 

@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{ops::RangeInclusive, sync::Arc};
+use std::{ops::Deref, ops::Range, sync::Arc};
 
 use anyhow::Context as _;
 use async_graphql::{
@@ -9,13 +9,14 @@ use async_graphql::{
     dataloader::DataLoader,
     Context, Object,
 };
-use diesel::{prelude::QueryableByName, sql_types::BigInt};
+use diesel::{sql_types::BigInt, QueryableByName};
 use fastcrypto::encoding::{Base58, Encoding};
 use sui_indexer_alt_reader::{
     kv_loader::{KvLoader, TransactionContents as NativeTransactionContents},
     pg_reader::PgReader,
     tx_digests::TxDigestKey,
 };
+use sui_pg_db::query::Query;
 use sui_sql_macro::query;
 use sui_types::{
     base_types::SuiAddress as NativeSuiAddress,
@@ -23,21 +24,26 @@ use sui_types::{
     transaction::{TransactionDataAPI, TransactionExpiration},
 };
 
-use crate::{
-    api::scalars::{base64::Base64, cursor::JsonCursor, digest::Digest},
-    error::RpcError,
-    pagination::Page,
-    scope::Scope,
-    task::watermark::Watermarks,
-};
-
 use super::{
     address::Address,
+    checkpoint::filter::checkpoint_bounds,
     epoch::Epoch,
     gas_input::GasInput,
     transaction::filter::TransactionFilter,
     transaction_effects::{EffectsContents, TransactionEffects},
+    transaction_kind::TransactionKind,
     user_signature::UserSignature,
+};
+
+use crate::{
+    api::{
+        scalars::{base64::Base64, cursor::JsonCursor, digest::Digest, sui_address::SuiAddress},
+        types::lookups::tx_bounds,
+    },
+    error::RpcError,
+    pagination::Page,
+    scope::Scope,
+    task::watermark::Watermarks,
 };
 
 pub(crate) mod filter;
@@ -54,14 +60,6 @@ pub(crate) struct TransactionContents {
     pub(crate) contents: Option<Arc<NativeTransactionContents>>,
 }
 
-#[derive(QueryableByName)]
-struct TxBounds {
-    #[diesel(sql_type = BigInt, column_name = "tx_lo")]
-    tx_lo: i64,
-    #[diesel(sql_type = BigInt, column_name = "tx_hi")]
-    tx_hi: i64,
-}
-
 pub(crate) type CTransaction = JsonCursor<u64>;
 
 /// Description of a transaction, the unit of activity on Sui.
@@ -75,6 +73,20 @@ impl Transaction {
     /// The results to the chain of executing this transaction.
     async fn effects(&self) -> Option<TransactionEffects> {
         Some(TransactionEffects::from(self.clone()))
+    }
+
+    /// The type of this transaction as well as the commands and/or parameters comprising the transaction of this kind.
+    async fn kind(&self, ctx: &Context<'_>) -> Result<Option<TransactionKind>, RpcError> {
+        let contents = self.contents.fetch(ctx, self.digest).await?;
+        let Some(content) = &contents.contents else {
+            return Ok(None);
+        };
+
+        let transaction_data = content.data()?;
+        Ok(TransactionKind::from(
+            transaction_data.kind().clone(),
+            contents.scope.clone(),
+        ))
     }
 
     #[graphql(flatten)]
@@ -180,13 +192,25 @@ impl Transaction {
         }))
     }
 
-    /// Cursor based pagination through transactions based on filters.
+    /// Cursor based pagination through transactions with filters applied.
+    ///
+    /// Returns empty results when no checkpoint is set in scope (e.g. execution scope).
     pub(crate) async fn paginate(
         ctx: &Context<'_>,
         scope: Scope,
         page: Page<CTransaction>,
-        filter: TransactionFilter,
+        TransactionFilter {
+            after_checkpoint,
+            at_checkpoint,
+            before_checkpoint,
+            affected_address,
+            sent_address,
+        }: TransactionFilter,
     ) -> Result<Connection<String, Transaction>, RpcError> {
+        let Some(checkpoint_viewed_at) = scope.checkpoint_viewed_at() else {
+            return Ok(Connection::new(false, false));
+        };
+
         let mut conn = Connection::new(false, false);
 
         if page.limit() == 0 {
@@ -199,12 +223,22 @@ impl Transaction {
 
         let global_tx_hi = watermarks.high_watermark().transaction();
 
-        let tx_digest_keys = if let Some(cp_bounds) =
-            filter.checkpoint_bounds(reader_lo, scope.checkpoint_viewed_at())
-        {
-            tx_unfiltered(ctx, &cp_bounds, &page, global_tx_hi).await?
-        } else {
+        let Some(cp_bounds) = checkpoint_bounds(
+            after_checkpoint.map(u64::from),
+            at_checkpoint.map(u64::from),
+            before_checkpoint.map(u64::from),
+            reader_lo,
+            checkpoint_viewed_at,
+        ) else {
             return Ok(Connection::new(false, false));
+        };
+
+        let tx_bounds = tx_bounds(ctx, &cp_bounds, global_tx_hi, &page, |c| *c.deref()).await?;
+
+        let tx_digest_keys = if affected_address.is_some() || sent_address.is_some() {
+            tx_affected_address(ctx, tx_bounds, &page, affected_address, sent_address).await?
+        } else {
+            tx_unfiltered(tx_bounds, &page)
         };
 
         // Paginate the resulting tx_sequence_numbers and create cursor objects for pagination.
@@ -240,98 +274,107 @@ impl Transaction {
     }
 }
 
-/// The tx_sequence_numbers within checkpoint bounds and with cursors applied inclusively.
-/// Results are limited to `page.limit() + 2` to allow has_previous_page and has_next_page calculations.
-///
-/// The checkpoint lower and upper bounds are used to determine the inclusive lower (tx_lo) and exclusive
-/// upper (tx_hi) bounds of the sequence of tx_sequence_numbers to use in queries.
-///
-/// tx_lo: The cp_sequence_number of the checkpoint at the start of the bounds.
-/// tx_hi: The tx_lo of the checkpoint directly after the cp_bounds.end(). If it does not exists,
-///      at cp_bounds.end() fallback to the maximum tx_sequence_number in the context's watermark
-///      (global_tx_hi).
-///
-/// NOTE: for consistency, assume that lowerbounds are inclusive and upperbounds are exclusive.
-/// Bounds that do not follow this convention will be annotated explicitly (e.g. `lo_exclusive` or
-/// `hi_inclusive`).
-async fn tx_unfiltered(
+async fn tx_affected_address(
     ctx: &Context<'_>,
-    cp_bounds: &RangeInclusive<u64>,
+    tx_bounds: Range<u64>,
     page: &Page<CTransaction>,
-    global_tx_hi: u64,
+    affected_address: Option<SuiAddress>,
+    sent_address: Option<SuiAddress>,
 ) -> Result<Vec<u64>, RpcError> {
-    let pg_reader: &PgReader = ctx.data()?;
-    let query = query!(
+    // Use sent_address as affected_address if affected_address is not set to use PG index.
+    let affected_address = affected_address.or(sent_address).unwrap();
+    let mut query = query!(
         r#"
-        WITH
-        tx_lo AS (
-            SELECT 
-                tx_lo 
-            FROM 
-                cp_sequence_numbers 
-            WHERE 
-                cp_sequence_number = {BigInt}
-            LIMIT 1
-        ),
-
-        -- tx_hi is the tx_lo of the checkpoint directly after the cp_bounds.end()
-        tx_hi AS (
-            SELECT 
-                tx_lo AS tx_hi
-            FROM 
-                cp_sequence_numbers 
-            WHERE 
-                cp_sequence_number = {BigInt} + 1 
-            LIMIT 1
-        )
-
-        SELECT
-            (SELECT tx_lo FROM tx_lo) AS "tx_lo",
-            -- If we cannot get the tx_hi from the checkpoint directly after the cp_bounds.end() we use global tx_hi.
-            COALESCE((SELECT tx_hi FROM tx_hi), {BigInt}) AS "tx_hi";"#,
-        *cp_bounds.start() as i64,
-        *cp_bounds.end() as i64,
-        global_tx_hi as i64
+SELECT
+    tx_sequence_number
+FROM
+    tx_affected_addresses
+WHERE
+    affected = {Bytea} /* affected_address */
+"#,
+        affected_address.into_vec(),
     );
+    if let Some(sent_address) = sent_address {
+        query += query!(
+            r#"
+AND sender = {Bytea} /* sent_address */
+"#,
+            sent_address.into_vec()
+        );
+    }
+    tx_sequence_numbers(ctx, tx_bounds, page, query).await
+}
+
+async fn tx_sequence_numbers(
+    ctx: &Context<'_>,
+    Range {
+        start: tx_lo,
+        end: tx_hi,
+    }: Range<u64>,
+    page: &Page<CTransaction>,
+    mut query: Query<'_>,
+) -> Result<Vec<u64>, RpcError> {
+    query += query!(
+        r#"
+    AND {BigInt} <= tx_sequence_number /* tx_lo */
+    AND tx_sequence_number < {BigInt} /* tx_hi */
+ORDER BY
+    tx_sequence_number {} /* order_by_direction */
+LIMIT
+    {BigInt} /* limit_with_overhead */
+"#,
+        tx_lo as i64,
+        tx_hi as i64,
+        page.order_by_direction(),
+        page.limit_with_overhead() as i64,
+    );
+
+    let pg_reader: &PgReader = ctx.data()?;
+
+    #[derive(QueryableByName)]
+    struct TxSequenceNumber {
+        #[diesel(sql_type = BigInt)]
+        tx_sequence_number: i64,
+    }
 
     let mut conn = pg_reader
         .connect()
         .await
         .context("Failed to connect to database")?;
 
-    let results: Vec<TxBounds> = conn
+    let wrapped_tx_sequence_numbers: Vec<TxSequenceNumber> = conn
         .results(query)
         .await
         .context("Failed to execute query")?;
 
-    let (tx_lo, tx_hi) = results
-        .first()
-        .context("No valid checkpoints found")
-        .map(|bounds| (bounds.tx_lo as u64, bounds.tx_hi as u64))?;
-
-    // Inclusive cursor bounds
-    let pg_lo = page.after().map_or(tx_lo, |cursor| cursor.max(tx_lo));
-    let pg_hi = page
-        .before()
-        .map(|cursor| cursor.saturating_add(1))
-        .map_or(tx_hi, |cursor| cursor.min(tx_hi));
-
-    const PAGINATION_OVERHEAD: usize = 2; // For has_previous_page and has_next_page calculations.
-
-    Ok(if page.is_from_front() {
-        (pg_lo..pg_hi)
-            .take(page.limit() + PAGINATION_OVERHEAD)
+    let tx_sequence_numbers = if page.is_from_front() {
+        wrapped_tx_sequence_numbers
+            .iter()
+            .map(|t| t.tx_sequence_number as u64)
             .collect()
+    } else {
+        wrapped_tx_sequence_numbers
+            .iter()
+            .rev()
+            .map(|t| t.tx_sequence_number as u64)
+            .collect()
+    };
+
+    Ok(tx_sequence_numbers)
+}
+
+/// The tx_sequence_numbers with cursors applied inclusively.
+/// Results are limited to `page.limit() + 2` to allow has_previous_page and has_next_page calculations.
+fn tx_unfiltered(tx_bounds: Range<u64>, page: &Page<CTransaction>) -> Vec<u64> {
+    if page.is_from_front() {
+        tx_bounds.take(page.limit_with_overhead()).collect()
     } else {
         // Graphql last syntax expects results to be in ascending order. If we are paginating backwards,
         // we reverse the results after applying limits.
-        let mut results: Vec<_> = (pg_lo..pg_hi)
-            .rev()
-            .take(page.limit() + PAGINATION_OVERHEAD)
-            .collect();
+        let mut results: Vec<_> = tx_bounds.rev().take(page.limit_with_overhead()).collect();
         results.reverse();
         results
-    })
+    }
 }
 
 impl TransactionContents {
@@ -353,6 +396,9 @@ impl TransactionContents {
         if self.contents.is_some() {
             return Ok(self.clone());
         }
+        let Some(checkpoint_viewed_at) = self.scope.checkpoint_viewed_at() else {
+            return Ok(self.clone());
+        };
 
         let kv_loader: &KvLoader = ctx.data()?;
         let Some(transaction) = kv_loader
@@ -364,7 +410,10 @@ impl TransactionContents {
         };
 
         // Discard the loaded result if we are viewing it at a checkpoint before it existed.
-        if transaction.cp_sequence_number() > self.scope.checkpoint_viewed_at() {
+        let cp_num = transaction
+            .cp_sequence_number()
+            .context("Any transaction fetched from the DB should have a checkpoint set")?;
+        if cp_num > checkpoint_viewed_at {
             return Ok(self.clone());
         }
 

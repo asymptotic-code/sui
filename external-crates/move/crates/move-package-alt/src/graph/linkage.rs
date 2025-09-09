@@ -11,10 +11,11 @@ use petgraph::{
     visit::EdgeRef,
 };
 use thiserror::Error;
+use tracing::debug;
 
 use crate::{flavor::MoveFlavor, schema::OriginalID};
 
-use super::PackageGraph;
+use super::{PackageGraph, PackageInfo};
 
 #[derive(Debug, Error)]
 pub enum LinkageError {
@@ -61,8 +62,8 @@ pub enum LinkageError {
 
 pub type LinkageResult<T> = Result<T, LinkageError>;
 
-/// Mapping from original ID to the package node to use for that address
-type LinkageTable = BTreeMap<OriginalID, NodeIndex>;
+/// Mapping from original ID to the package info to use for that address
+pub type LinkageTable<'a, F> = BTreeMap<OriginalID, PackageInfo<'a, F>>;
 
 impl<F: MoveFlavor> PackageGraph<F> {
     /// Construct and return a linkage table for the root package of `self`. Only published
@@ -75,12 +76,12 @@ impl<F: MoveFlavor> PackageGraph<F> {
     ///
     /// This method checks that the entire graph has consistent linkage, but only returns the
     /// linkage for the root node.
-    pub fn linkage(&self) -> LinkageResult<LinkageTable> {
+    pub fn linkage(&self) -> LinkageResult<LinkageTable<F>> {
         // we compute the linkage in reverse topological order, so that the linkage for a package's
         // dependencies have been computed before we compute its linkage
         let sorted = toposort(&self.inner, None).map_err(LinkageError::CyclicDependencies)?;
 
-        let mut linkages: BTreeMap<NodeIndex, LinkageTable> = BTreeMap::new();
+        let mut linkages: BTreeMap<NodeIndex, BTreeMap<OriginalID, NodeIndex>> = BTreeMap::new();
         for node in sorted.iter().rev() {
             let package_node = &self.inner[*node];
 
@@ -94,7 +95,7 @@ impl<F: MoveFlavor> PackageGraph<F> {
 
             // compute the linkage for `node` by iterating all transitive deps and looking for
             // duplicates
-            let mut linkage = LinkageTable::new();
+            let mut linkage: BTreeMap<OriginalID, NodeIndex> = BTreeMap::new();
             let overrides = self.override_nodes(*node)?;
 
             // TODO: `select_dep(node, ...)` produces an error if there's a missing override in `node`,
@@ -105,13 +106,13 @@ impl<F: MoveFlavor> PackageGraph<F> {
             for (original_id, nodes) in transitive_deps.into_iter() {
                 linkage.insert(
                     original_id.clone(),
-                    self.select_dep(node, original_id, nodes, &overrides)?,
+                    self.select_dep(original_id, nodes, &overrides)?,
                 );
             }
 
             // if this node is published, add it to its linkage
             if let Some(oid) = package_node.original_id() {
-                let old_entry = linkage.insert(oid, *node);
+                let old_entry = linkage.insert(oid.clone(), *node);
                 if old_entry.is_some() {
                     // this means a package depends on another package that has the same original
                     // id (but it's a different package since we already checked for cycles)
@@ -123,12 +124,19 @@ impl<F: MoveFlavor> PackageGraph<F> {
         }
 
         let root = sorted[0];
-        Ok(linkages
-            .remove(&sorted[0]) // root package is first in topological order
-            .expect("all linkages have been computed"))
+        let root_linkage = linkages
+            .remove(&root) // root package is first in topological order
+            .expect("all linkages have been computed");
+
+        debug!("computed linkage: {root_linkage:?}");
+        // Convert NodeIndex to PackageInfo
+        Ok(root_linkage
+            .into_iter()
+            .map(|(oid, node)| (oid, self.package_info(node)))
+            .collect())
     }
 
-    /// Returns the the packages that are overridden in `node`, keyed by their original IDs (only
+    /// Returns the packages that are overridden in `node`, keyed by their original IDs (only
     /// published packages are returned).
     fn override_nodes(&self, node_id: NodeIndex) -> LinkageResult<BTreeMap<OriginalID, NodeIndex>> {
         let mut result: BTreeMap<OriginalID, NodeIndex> = BTreeMap::new();
@@ -145,7 +153,7 @@ impl<F: MoveFlavor> PackageGraph<F> {
                 continue;
             };
 
-            let old = result.insert(oid, edge.target());
+            let old = result.insert(oid.clone(), edge.target());
             if old.is_some() {
                 return Err(LinkageError::ConflictingOverrides);
             }
@@ -161,7 +169,6 @@ impl<F: MoveFlavor> PackageGraph<F> {
     ///  - Otherwise return an error message
     fn select_dep(
         &self,
-        root: &NodeIndex,
         original_id: &OriginalID,
         nodes: Vec<&NodeIndex>,
         overrides: &BTreeMap<OriginalID, NodeIndex>,

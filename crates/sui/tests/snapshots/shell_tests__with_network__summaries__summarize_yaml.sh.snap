@@ -25,6 +25,8 @@ Summary generation successful. Summaries stored in 'package_summaries'
 address_mapping.yaml
 root_package_metadata.yaml
 accumulator.yaml
+accumulator_metadata.yaml
+accumulator_settlement.yaml
 address.yaml
 authenticator_state.yaml
 bag.yaml
@@ -36,6 +38,7 @@ clock.yaml
 coin.yaml
 config.yaml
 deny_list.yaml
+derived_object.yaml
 display.yaml
 dynamic_field.yaml
 dynamic_object_field.yaml

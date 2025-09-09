@@ -4,6 +4,7 @@
 //! This module contains the transactional test runner instantiation for the Sui adapter
 
 pub mod args;
+pub mod cursor;
 pub mod offchain_state;
 pub mod programmable_transaction_test_parser;
 mod simulator_persisted_store;
@@ -14,6 +15,7 @@ pub use move_transactional_test_runner::framework::{
     create_adapter, run_tasks_with_adapter, run_test_impl,
 };
 use rand::rngs::StdRng;
+use simulacrum::AdvanceEpochConfig;
 use simulacrum::Simulacrum;
 use simulacrum::SimulatorStore;
 use simulator_persisted_store::PersistedStore;
@@ -117,7 +119,7 @@ pub trait TransactionalAdapter: Send + Sync + ReadStore {
         duration: std::time::Duration,
     ) -> anyhow::Result<TransactionEffects>;
 
-    async fn advance_epoch(&mut self, create_random_state: bool) -> anyhow::Result<()>;
+    async fn advance_epoch(&mut self, config: AdvanceEpochConfig) -> anyhow::Result<()>;
 
     async fn request_gas(
         &mut self,
@@ -270,7 +272,7 @@ impl TransactionalAdapter for ValidatorWithFullnode {
         unimplemented!("advance_clock not supported")
     }
 
-    async fn advance_epoch(&mut self, _create_random_state: bool) -> anyhow::Result<()> {
+    async fn advance_epoch(&mut self, _config: AdvanceEpochConfig) -> anyhow::Result<()> {
         self.validator.reconfigure_for_testing().await;
         self.fullnode.reconfigure_for_testing().await;
         Ok(())
@@ -488,8 +490,8 @@ impl TransactionalAdapter for Simulacrum<StdRng, PersistedStore> {
         Ok(self.advance_clock(duration))
     }
 
-    async fn advance_epoch(&mut self, create_random_state: bool) -> anyhow::Result<()> {
-        self.advance_epoch(create_random_state);
+    async fn advance_epoch(&mut self, config: AdvanceEpochConfig) -> anyhow::Result<()> {
+        self.advance_epoch(config);
         Ok(())
     }
 

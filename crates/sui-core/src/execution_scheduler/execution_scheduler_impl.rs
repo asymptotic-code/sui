@@ -4,7 +4,8 @@
 use crate::{
     authority::{
         authority_per_epoch_store::AuthorityPerEpochStore,
-        shared_object_version_manager::Schedulable, AuthorityMetrics, ExecutionEnv,
+        shared_object_version_manager::{Schedulable, WithdrawType},
+        AuthorityMetrics, ExecutionEnv,
     },
     execution_cache::{ObjectCacheRead, TransactionCacheRead},
     execution_scheduler::{
@@ -19,7 +20,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use mysten_common::debug_fatal;
 use mysten_metrics::spawn_monitored_task;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 use sui_config::node::AuthorityOverloadConfig;
@@ -27,7 +28,7 @@ use sui_types::{
     base_types::{FullObjectID, SequenceNumber},
     error::SuiResult,
     executable_transaction::VerifiedExecutableTransaction,
-    storage::InputKey,
+    storage::{ChildObjectResolver, InputKey},
     transaction::{SenderSignedData, TransactionDataAPI, TransactionKey},
     SUI_ACCUMULATOR_ROOT_OBJECT_ID,
 };
@@ -35,7 +36,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 use tracing::{debug, error};
 
-use super::{overload_tracker::OverloadTracker, ExecutionSchedulerAPI, PendingCertificate};
+use super::{overload_tracker::OverloadTracker, PendingCertificate};
 
 #[derive(Clone)]
 pub struct ExecutionScheduler {
@@ -80,19 +81,21 @@ impl Drop for PendingGuard<'_> {
 impl ExecutionScheduler {
     pub fn new(
         object_cache_read: Arc<dyn ObjectCacheRead>,
+        child_object_resolver: Arc<dyn ChildObjectResolver + Send + Sync>,
         transaction_cache_read: Arc<dyn TransactionCacheRead>,
         tx_ready_certificates: UnboundedSender<PendingCertificate>,
-        balance_accumulator_enabled: bool,
+        epoch_store: &Arc<AuthorityPerEpochStore>,
         metrics: Arc<AuthorityMetrics>,
     ) -> Self {
         tracing::info!("Creating new ExecutionScheduler");
+        let balance_accumulator_enabled = epoch_store.accumulators_enabled();
         let balance_withdraw_scheduler = if balance_accumulator_enabled {
             let starting_accumulator_version = object_cache_read
                 .get_object(&SUI_ACCUMULATOR_ROOT_OBJECT_ID)
                 .expect("Accumulator root object must be present if balance accumulator is enabled")
                 .version();
             Some(BalanceWithdrawScheduler::new(
-                Arc::new(object_cache_read.clone()),
+                Arc::new(child_object_resolver),
                 starting_accumulator_version,
             ))
         } else {
@@ -148,11 +151,9 @@ impl ExecutionScheduler {
         .concat();
 
         let epoch = epoch_store.epoch();
-        debug!(?tx_digest, "Scheduled transaction in execution scheduler");
-        tracing::trace!(
+        debug!(
             ?tx_digest,
-            "Waiting for input objects: {:?}",
-            input_and_receiving_keys
+            "Scheduled transaction, waiting for input objects: {:?}", input_and_receiving_keys,
         );
 
         let availability = self
@@ -214,7 +215,6 @@ impl ExecutionScheduler {
         let pending_cert = PendingCertificate {
             certificate: cert.clone(),
             execution_env,
-            waiting_input_objects: BTreeSet::new(),
             stats: PendingCertificateStats {
                 enqueue_time,
                 ready_time: Some(Instant::now()),
@@ -398,8 +398,8 @@ impl ExecutionScheduler {
     }
 }
 
-impl ExecutionSchedulerAPI for ExecutionScheduler {
-    fn enqueue(
+impl ExecutionScheduler {
+    pub fn enqueue(
         &self,
         certs: Vec<(Schedulable, ExecutionEnv)>,
         epoch_store: &Arc<AuthorityPerEpochStore>,
@@ -413,13 +413,18 @@ impl ExecutionSchedulerAPI for ExecutionScheduler {
         for (schedulable, env) in certs {
             match schedulable {
                 Schedulable::Transaction(tx) => {
-                    ordinary_txns.push((tx, env));
+                    // Check if this transaction has withdraws based on the assigned versions
+                    match env.assigned_versions.withdraw_type {
+                        WithdrawType::Withdraw(accumulator_version) => {
+                            tx_with_withdraws.push((tx, accumulator_version, env));
+                        }
+                        WithdrawType::NonWithdraw => {
+                            ordinary_txns.push((tx, env));
+                        }
+                    }
                 }
                 s @ Schedulable::RandomnessStateUpdate(..) => {
                     tx_with_keys.push((s.key(), env));
-                }
-                Schedulable::Withdraw(tx, version) => {
-                    tx_with_withdraws.push((tx, version, env));
                 }
                 Schedulable::AccumulatorSettlement(_, _) => {
                     settlement_txns.push((schedulable.key(), env));
@@ -433,7 +438,7 @@ impl ExecutionSchedulerAPI for ExecutionScheduler {
         self.schedule_settlement_transactions(settlement_txns, epoch_store);
     }
 
-    fn enqueue_transactions(
+    pub fn enqueue_transactions(
         &self,
         certs: Vec<(VerifiedExecutableTransaction, ExecutionEnv)>,
         epoch_store: &Arc<AuthorityPerEpochStore>,
@@ -451,7 +456,7 @@ impl ExecutionSchedulerAPI for ExecutionScheduler {
                     debug_fatal!(
                         "We should never enqueue certificate from wrong epoch. Expected={} Certificate={:?}",
                         epoch_store.epoch(),
-                        cert.0.epoch(),
+                        cert.0.epoch()
                     );
                     None
                 }
@@ -493,14 +498,14 @@ impl ExecutionSchedulerAPI for ExecutionScheduler {
             .inc_by(already_executed_certs_num);
     }
 
-    fn settle_balances(&self, settlement: BalanceSettlement) {
+    pub fn settle_balances(&self, settlement: BalanceSettlement) {
         self.balance_withdraw_scheduler
             .as_ref()
             .expect("Balance withdraw scheduler must be enabled if there are settlements")
             .settle_balances(settlement);
     }
 
-    fn check_execution_overload(
+    pub fn check_execution_overload(
         &self,
         overload_config: &AuthorityOverloadConfig,
         tx_data: &SenderSignedData,
@@ -510,7 +515,7 @@ impl ExecutionSchedulerAPI for ExecutionScheduler {
             .check_execution_overload(overload_config, tx_data, inflight_queue_len)
     }
 
-    fn num_pending_certificates(&self) -> usize {
+    pub fn num_pending_certificates(&self) -> usize {
         (self
             .metrics
             .transaction_manager_num_pending_certificates
@@ -522,7 +527,7 @@ impl ExecutionSchedulerAPI for ExecutionScheduler {
     }
 
     #[cfg(test)]
-    fn check_empty_for_testing(&self) {
+    pub fn check_empty_for_testing(&self) {
         assert_eq!(self.num_pending_certificates(), 0);
     }
 }
@@ -531,6 +536,7 @@ impl ExecutionSchedulerAPI for ExecutionScheduler {
 mod test {
     use std::{time::Duration, vec};
 
+    use crate::authority::shared_object_version_manager::AssignedVersions;
     use sui_test_transaction_builder::TestTransactionBuilder;
     use sui_types::executable_transaction::VerifiedExecutableTransaction;
     use sui_types::object::Owner;
@@ -550,32 +556,25 @@ mod test {
 
     use crate::authority::ExecutionEnv;
     use crate::authority::{authority_tests::init_state_with_objects, AuthorityState};
-    use crate::execution_scheduler::{
-        ExecutionSchedulerAPI, ExecutionSchedulerWrapper, SchedulingSource,
-    };
+    use crate::execution_scheduler::SchedulingSource;
 
     use super::{ExecutionScheduler, PendingCertificate};
 
     #[allow(clippy::disallowed_methods)] // allow unbounded_channel()
     fn make_execution_scheduler(
         state: &AuthorityState,
-    ) -> (
-        ExecutionSchedulerWrapper,
-        UnboundedReceiver<PendingCertificate>,
-    ) {
+    ) -> (ExecutionScheduler, UnboundedReceiver<PendingCertificate>) {
         // Create a new execution scheduler instead of reusing the authority's, to examine
         // execution_scheduler output from rx_ready_certificates.
         let (tx_ready_certificates, rx_ready_certificates) = unbounded_channel();
-        // Do not call ExecutionSchedulerWrapper::new() here, because we want to always
-        // construct an ExecutionScheduler in the tests here, not TransactionManager.
-        let execution_scheduler =
-            ExecutionSchedulerWrapper::ExecutionScheduler(ExecutionScheduler::new(
-                state.get_object_cache_reader().clone(),
-                state.get_transaction_cache_reader().clone(),
-                tx_ready_certificates,
-                false,
-                state.metrics.clone(),
-            ));
+        let execution_scheduler = ExecutionScheduler::new(
+            state.get_object_cache_reader().clone(),
+            state.get_child_object_resolver().clone(),
+            state.get_transaction_cache_reader().clone(),
+            tx_ready_certificates,
+            &state.epoch_store_for_testing(),
+            state.metrics.clone(),
+        );
 
         (execution_scheduler, rx_ready_certificates)
     }
@@ -840,19 +839,27 @@ mod test {
             vec![
                 (
                     transaction_read_0.clone(),
-                    ExecutionEnv::new().with_assigned_versions(tx_read_0_assigned_versions),
+                    ExecutionEnv::new().with_assigned_versions(AssignedVersions::non_withdraw(
+                        tx_read_0_assigned_versions,
+                    )),
                 ),
                 (
                     transaction_read_1.clone(),
-                    ExecutionEnv::new().with_assigned_versions(tx_read_1_assigned_versions),
+                    ExecutionEnv::new().with_assigned_versions(AssignedVersions::non_withdraw(
+                        tx_read_1_assigned_versions,
+                    )),
                 ),
                 (
                     transaction_default.clone(),
-                    ExecutionEnv::new().with_assigned_versions(tx_default_assigned_versions),
+                    ExecutionEnv::new().with_assigned_versions(AssignedVersions::non_withdraw(
+                        tx_default_assigned_versions,
+                    )),
                 ),
                 (
                     transaction_read_2.clone(),
-                    ExecutionEnv::new().with_assigned_versions(tx_read_2_assigned_versions),
+                    ExecutionEnv::new().with_assigned_versions(AssignedVersions::non_withdraw(
+                        tx_read_2_assigned_versions,
+                    )),
                 ),
             ],
             &state.epoch_store_for_testing(),
@@ -1388,7 +1395,8 @@ mod test {
         execution_scheduler.enqueue_transactions(
             vec![(
                 cancelled_transaction.clone(),
-                ExecutionEnv::new().with_assigned_versions(assigned_versions),
+                ExecutionEnv::new()
+                    .with_assigned_versions(AssignedVersions::non_withdraw(assigned_versions)),
             )],
             &state.epoch_store_for_testing(),
         );

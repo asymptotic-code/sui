@@ -104,6 +104,7 @@ use tabled::{
 };
 
 use move_symbol_pool::Symbol;
+use sui_keys::key_derive;
 use sui_types::digests::ChainIdentifier;
 use tracing::{debug, info};
 
@@ -642,9 +643,8 @@ pub enum SuiClientCommands {
     /// Replay a given transaction to view transaction effects. Set environment variable MOVE_VM_STEP=1 to debug.
     #[clap(name = "replay-transaction")]
     ReplayTransaction {
-        /// The digest of the transaction to replay
-        #[arg(long, short)]
-        tx_digest: String,
+        #[command(flatten)]
+        replay_config: SR2::ReplayConfigStable,
 
         /// Log extra gas-related information
         #[arg(long)]
@@ -653,46 +653,6 @@ pub enum SuiClientCommands {
         /// Log information about each programmable transaction command
         #[arg(long)]
         ptb_info: bool,
-
-        /// The output directory for the replay artifacts. Defaults `<cur_dir>/.replay/<digest>`.
-        #[arg(long)]
-        output_dir: Option<PathBuf>,
-
-        /// Whether to trace the transaction execution. Generated traces will be saved in the output
-        /// directory (or `<cur_dir>/.replay/<digest>` if none provided).
-        #[arg(long = "trace", default_value = "false")]
-        trace: bool,
-
-        /// Whether existing artifacts that were generated from a previous replay of the transaction
-        /// should be overwritten or an error raised if they already exist.
-        #[arg(long, default_value = "false")]
-        overwrite_existing: bool,
-    },
-
-    /// Replay transactions listed in a file.
-    #[clap(name = "replay-batch")]
-    ReplayBatch {
-        /// The path to the file of transaction digests to replay, with one digest per line
-        #[arg(long, short)]
-        path: PathBuf,
-
-        /// If an error is encountered during a transaction, this specifies whether to terminate or continue
-        #[arg(long, short)]
-        terminate_early: bool,
-
-        /// Whether to trace the transaction execution. Generated traces will be saved in the output
-        /// directory (or `<cur_dir>/.replay/<digest>` if none provided).
-        #[arg(long = "trace", default_value = "false")]
-        trace: bool,
-
-        /// The output directory for the replay artifacts. Defaults `<cur_dir>/.replay/<digest>`.
-        #[arg(long, short)]
-        output_dir: Option<PathBuf>,
-
-        /// Whether existing artifacts that were generated from a previous replay of the transaction
-        /// should be overwritten or an error raised if they already exist.
-        #[arg(long, default_value = "false")]
-        overwrite_existing: bool,
     },
 }
 
@@ -776,64 +736,30 @@ impl SuiClientCommands {
     ) -> Result<SuiClientCommandResult, anyhow::Error> {
         let ret = match self {
             SuiClientCommands::ReplayTransaction {
-                tx_digest,
+                replay_config,
                 gas_info: _,
                 ptb_info: _,
-                output_dir,
-                trace,
-                overwrite_existing,
             } => {
                 let node = get_replay_node(context).await?;
-                let cmd2 = SR2::ReplayConfig {
-                    digest: Some(tx_digest.clone()),
-                    digests_path: None,
+
+                let experimental_config = SR2::ReplayConfigExperimental {
                     node,
-                    trace,
-                    terminate_early: false,
-                    output_dir,
-                    show_effects: false,
-                    overwrite_existing,
+                    ..Default::default()
                 };
 
-                let artifact_path = SR2::handle_replay_config(&cmd2, USER_AGENT).await?;
+                let artifact_path =
+                    SR2::handle_replay_config(&replay_config, &experimental_config, USER_AGENT)
+                        .await?;
 
-                // show effects and gas
-                SR2::print_effects_or_fork(
-                    &tx_digest,
-                    &artifact_path,
-                    true,
-                    &mut std::io::stdout(),
-                )?;
-
-                // this will be displayed via trace info, so no output is needed here
-                SuiClientCommandResult::NoOutput
-            }
-            SuiClientCommands::ReplayBatch {
-                path,
-                terminate_early,
-                trace,
-                output_dir,
-                overwrite_existing,
-            } => {
-                let node = get_replay_node(context).await?;
-                let cmd2 = SR2::ReplayConfig {
-                    digest: None,
-                    digests_path: Some(path),
-                    node,
-                    trace,
-                    terminate_early,
-                    output_dir,
-                    show_effects: false,
-                    overwrite_existing,
-                };
-
-                let artifact_path = SR2::handle_replay_config(&cmd2, USER_AGENT).await?;
-
-                println!(
-                    "Replayed transactions from {}. Artifacts stored under {}",
-                    cmd2.digests_path.as_ref().unwrap().display(),
-                    artifact_path.display()
-                );
+                if let Some(digest) = &replay_config.digest {
+                    // show effects and gas
+                    SR2::print_effects_or_fork(
+                        digest,
+                        &artifact_path,
+                        replay_config.show_effects,
+                        &mut std::io::stdout(),
+                    )?;
+                }
 
                 // this will be displayed via trace info, so no output is needed here
                 SuiClientCommandResult::NoOutput
@@ -957,17 +883,6 @@ impl SuiClientCommands {
                 let client = context.get_client().await?;
                 let read_api = client.read_api();
                 let chain_id = read_api.get_chain_identifier().await.ok();
-                let protocol_version = read_api.get_protocol_config(None).await?.protocol_version;
-                let protocol_config = ProtocolConfig::get_for_version(
-                    protocol_version,
-                    match chain_id
-                        .as_ref()
-                        .and_then(ChainIdentifier::from_chain_short_id)
-                    {
-                        Some(chain_id) => chain_id.chain(),
-                        None => Chain::Unknown,
-                    },
-                );
 
                 check_protocol_version_and_warn(read_api).await?;
                 let package_path =
@@ -1003,7 +918,7 @@ impl SuiClientCommands {
                 .await;
 
                 // Restore original ID, then check result.
-                if let (Some(chain_id), Some(previous_id)) = (chain_id, previous_id) {
+                if let (Some(chain_id), Some(previous_id)) = (chain_id.clone(), previous_id) {
                     let _ = sui_package_management::set_package_id(
                         &package_path,
                         build_config.install_dir.clone(),
@@ -1023,6 +938,28 @@ impl SuiClientCommands {
                 let dep_ids = compiled_package.get_published_dependencies_ids();
 
                 if verify_compatibility {
+                    let protocol_version =
+                        read_api.get_protocol_config(None).await?.protocol_version;
+
+                    ensure!(
+                        ProtocolVersion::MAX >= protocol_version,
+                        "On-chain protocol version ({}) is ahead of the latest \
+                        known version ({}) in the CLI. Please update the CLI to the latest version \
+                        if you want to use --verify-compatibility flag",
+                        protocol_version.as_u64(),
+                        ProtocolVersion::MAX.as_u64()
+                    );
+
+                    let protocol_config = ProtocolConfig::get_for_version(
+                        protocol_version,
+                        match chain_id
+                            .as_ref()
+                            .and_then(ChainIdentifier::from_chain_short_id)
+                        {
+                            Some(chain_id) => chain_id.chain(),
+                            None => Chain::Unknown,
+                        },
+                    );
                     check_compatibility(
                         read_api,
                         package_id,
@@ -1604,12 +1541,14 @@ impl SuiClientCommands {
                 derivation_path,
                 word_length,
             } => {
-                let (address, phrase, scheme) = context.config.keystore.generate(
-                    key_scheme,
-                    alias.clone(),
-                    derivation_path,
-                    word_length,
-                )?;
+                let (address, keypair, scheme, phrase) =
+                    key_derive::generate_new_key(key_scheme, derivation_path, word_length)
+                        .map_err(|e| anyhow!("Failed to generate new key: {}", e))?;
+                context
+                    .config
+                    .keystore
+                    .import(alias.clone(), keypair)
+                    .await?;
 
                 let alias = match alias {
                     Some(x) => x,
@@ -1627,9 +1566,9 @@ impl SuiClientCommands {
             SuiClientCommands::RemoveAddress { alias_or_address } => {
                 let identity = KeyIdentity::from_str(&alias_or_address)
                     .map_err(|e| anyhow!("Invalid address or alias: {}", e))?;
-                let address: SuiAddress = context.config.keystore.get_by_identity(identity)?;
+                let address: SuiAddress = context.config.keystore.get_by_identity(&identity)?;
 
-                context.config.keystore.remove(address)?;
+                context.config.keystore.remove(address).await?;
 
                 SuiClientCommandResult::RemoveAddress(RemoveAddressOutput { alias_or_address })
             }
@@ -3398,7 +3337,8 @@ pub(crate) async fn dry_run_or_execute_or_serialize(
         let mut signatures = vec![context
             .config
             .keystore
-            .sign_secure(&signer, &tx_data, Intent::sui_transaction())?
+            .sign_secure(&signer, &tx_data, Intent::sui_transaction())
+            .await?
             .into()];
 
         if let Some(gas_sponsor) = gas_sponsor {
@@ -3407,7 +3347,8 @@ pub(crate) async fn dry_run_or_execute_or_serialize(
                     context
                         .config
                         .keystore
-                        .sign_secure(&gas_sponsor, &tx_data, Intent::sui_transaction())?
+                        .sign_secure(&gas_sponsor, &tx_data, Intent::sui_transaction())
+                        .await?
                         .into(),
                 );
             }

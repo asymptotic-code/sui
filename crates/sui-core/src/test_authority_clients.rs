@@ -8,12 +8,9 @@ use std::{
     time::Duration,
 };
 
+use crate::authority::{test_authority_builder::TestAuthorityBuilder, ExecutionEnv};
 use crate::{
-    authority::AuthorityState, authority_client::AuthorityAPI, transaction_driver::SubmitTxResponse,
-};
-use crate::{
-    authority::{test_authority_builder::TestAuthorityBuilder, ExecutionEnv},
-    execution_scheduler::ExecutionSchedulerAPI,
+    authority::AuthorityState, authority_client::AuthorityAPI, transaction_driver::SubmitTxResult,
 };
 use async_trait::async_trait;
 use consensus_types::block::BlockRef;
@@ -85,7 +82,17 @@ impl AuthorityAPI for LocalAuthorityClient {
         }
         let state = self.state.clone();
         let epoch_store = self.state.load_epoch_store_one_call_per_task();
-        let deserialized_transaction = bcs::from_bytes::<Transaction>(&request.transaction)
+        // TODO(fastpath): handle multiple transactions.
+        if request.transactions.len() != 1 {
+            return Err(SuiError::UnsupportedFeatureError {
+                error: format!(
+                    "Expected exactly 1 transaction in request, got {}",
+                    request.transactions.len()
+                ),
+            });
+        }
+
+        let deserialized_transaction = bcs::from_bytes::<Transaction>(&request.transactions[0])
             .map_err(|e| SuiError::TransactionDeserializationError {
                 error: e.to_string(),
             })?;
@@ -113,7 +120,11 @@ impl AuthorityAPI for LocalAuthorityClient {
             index: 0,
         };
 
-        SubmitTxResponse::Submitted { consensus_position }.try_into()
+        let submit_result = SubmitTxResult::Submitted { consensus_position };
+        let raw_result = submit_result.try_into()?;
+        Ok(RawSubmitTxResponse {
+            results: vec![raw_result],
+        })
     }
 
     async fn handle_transaction(
@@ -237,6 +248,25 @@ impl AuthorityAPI for LocalAuthorityClient {
     ) -> Result<SuiSystemState, SuiError> {
         self.state.get_sui_system_state_object_for_testing()
     }
+
+    async fn validator_health(
+        &self,
+        _request: sui_types::messages_grpc::RawValidatorHealthRequest,
+    ) -> Result<sui_types::messages_grpc::RawValidatorHealthResponse, SuiError> {
+        let typed_response = sui_types::messages_grpc::ValidatorHealthResponse {
+            num_inflight_consensus_transactions: 0,
+            num_inflight_execution_transactions: 0,
+            last_committed_leader_round: 1000,
+            last_locally_built_checkpoint: 500,
+        };
+
+        typed_response.try_into().map_err(|e| {
+            sui_types::error::SuiError::GrpcMessageSerializeError {
+                type_info: "ValidatorHealthResponse".to_string(),
+                error: format!("Failed to convert to raw response: {}", e),
+            }
+        })
+    }
 }
 
 impl LocalAuthorityClient {
@@ -334,6 +364,7 @@ impl LocalAuthorityClient {
     }
 }
 
+// TODO: The way we are passing in and using delay and count is really ugly code. Please fix it.
 #[derive(Clone)]
 pub struct MockAuthorityApi {
     delay: Duration,
@@ -457,6 +488,25 @@ impl AuthorityAPI for MockAuthorityApi {
     ) -> Result<SuiSystemState, SuiError> {
         unimplemented!();
     }
+
+    async fn validator_health(
+        &self,
+        _request: sui_types::messages_grpc::RawValidatorHealthRequest,
+    ) -> Result<sui_types::messages_grpc::RawValidatorHealthResponse, SuiError> {
+        let typed_response = sui_types::messages_grpc::ValidatorHealthResponse {
+            num_inflight_consensus_transactions: 0,
+            num_inflight_execution_transactions: 0,
+            last_committed_leader_round: 1000,
+            last_locally_built_checkpoint: 500,
+        };
+
+        typed_response.try_into().map_err(|e| {
+            sui_types::error::SuiError::GrpcMessageSerializeError {
+                type_info: "ValidatorHealthResponse".to_string(),
+                error: format!("Failed to convert to raw response: {}", e),
+            }
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -556,6 +606,13 @@ impl AuthorityAPI for HandleTransactionTestAuthorityClient {
         &self,
         _request: SystemStateRequest,
     ) -> Result<SuiSystemState, SuiError> {
+        unimplemented!()
+    }
+
+    async fn validator_health(
+        &self,
+        _request: sui_types::messages_grpc::RawValidatorHealthRequest,
+    ) -> Result<sui_types::messages_grpc::RawValidatorHealthResponse, SuiError> {
         unimplemented!()
     }
 }
