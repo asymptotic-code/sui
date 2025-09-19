@@ -14,10 +14,16 @@ public fun epoch_spec(self: &TxContext): u64 {
     sui::tx_context::epoch(self)
 }
 
+// see sui-prover issue #219.  When that's fixed, these two items can be removed
+native fun tx_context_sender_sf(self: &TxContext): address;
+
 #[spec(target=sui::tx_context::sender)]
 public fun sender_spec(self: &TxContext): address {
-    sui::tx_context::sender(self)
+    let r = sui::tx_context::sender(self);
+    ensures(r == tx_context_sender_sf(self));
+    r
 }
+
 
 #[spec(target=sui::priority_queue::new)]
 public fun new_spec<T: drop>(mut entries: vector<priority_queue::Entry<T>>): priority_queue::PriorityQueue<T> {

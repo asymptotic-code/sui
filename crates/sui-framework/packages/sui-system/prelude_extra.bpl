@@ -217,3 +217,13 @@ axiom (forall v: $2_table_vec_TableVec'$3_validator_Validator', a: int ::
        validator_sui_address(GetTable(v->$contents->$contents, $EncodeKey'u64'(r))) == a &&
        (! exists_validator_in_table_in_range_sf(v, 0, r, a))
   else r == -1));
+
+// 2. For module "other_specs"
+
+// see sui-prover issue #219.  When that's fixed, these two  items can be removed
+//   native fun tx_context_sender_sf(self: &TxContext): address;
+procedure {:inline 1} $3_other_specs_tx_context_sender_sf(x: $2_tx_context_TxContext) returns (ret: int) {
+ ret := tx_context_sender(x);
+ }
+
+function tx_context_sender(x: $2_tx_context_TxContext): int;

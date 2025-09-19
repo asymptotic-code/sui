@@ -1200,3 +1200,30 @@ public(package) fun request_add_validator_candidate_for_testing(
 
     self.validators.request_add_validator_candidate(validator, ctx);
 }
+
+// == specifications ==
+
+#[spec_only]
+use prover::prover::{requires,ensures};
+#[spec_only]
+use sui_system::validator_set::{exists_validator_sf, find_validator_sf};
+#[spec_only]
+use sui_system::helpers::can_add_u64;
+
+#[spec(prove)]
+fun request_remove_validator_spec(
+    self: &mut SuiSystemStateInnerV2,
+    ctx: &TxContext,
+) {
+    let n_active_validators = self.validators.active_validators().length();
+    if (n_active_validators >= self.parameters.min_validator_count) {
+        // probably this is an invariant of validator_set:
+        requires(self.validators.pending_removals().length() <= n_active_validators);
+        requires(can_add_u64(n_active_validators, self.validators.num_pending_active_validators()));
+        requires(self.validators.next_epoch_validator_count() > self.parameters.min_validator_count);
+    };
+    requires(exists_validator_sf(self.validators.active_validators(), ctx.sender()));
+    let validator_index = find_validator_sf(self.validators.active_validators(), ctx.sender()).borrow();
+    requires(! self.validators.pending_removals().contains(validator_index));
+    request_remove_validator(self, ctx);
+}

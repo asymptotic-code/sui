@@ -1661,3 +1661,15 @@ public fun get_pending_validator_ref_spec(
     requires(exists_validator_in_table_sf(&self.pending_active_validators, validator_address));
     get_pending_validator_ref(self, validator_address)
 }
+
+// == getters needed by specifications in callers to this module ==
+
+#[spec_only]
+public fun pending_removals(self: &ValidatorSet): vector<u64> {
+    self.pending_removals
+}
+
+#[spec_only]
+public fun num_pending_active_validators(self: &ValidatorSet): u64 {
+    self.pending_active_validators.length()
+}
