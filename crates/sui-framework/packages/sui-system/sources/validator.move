@@ -1038,3 +1038,10 @@ public fun validate_metadata_spec(metadata: &ValidatorMetadata) {
 public fun validate_metadata_bcs_spec(metadata: vector<u8>) {
     validate_metadata_bcs(metadata);
 }
+
+// == getters needed by other specifications ==
+
+#[test_only]
+fun max_commission_rate(): u64 {
+    MAX_COMMISSION_RATE
+}

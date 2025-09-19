@@ -1227,3 +1227,15 @@ fun request_remove_validator_spec(
     requires(! self.validators.pending_removals().contains(validator_index));
     request_remove_validator(self, ctx);
 }
+
+
+#[spec(prove)]
+fun request_set_commission_rate_spec(
+    self: &mut SuiSystemStateInnerV2,
+    new_commission_rate: u64,
+    ctx: &TxContext,
+) {
+    requires(exists_validator_sf(self.validators.active_validators(), ctx.sender()));
+    requires(new_commission_rate <= validator::max_commission_rate());
+    request_set_commission_rate(self, new_commission_rate, ctx);
+}
