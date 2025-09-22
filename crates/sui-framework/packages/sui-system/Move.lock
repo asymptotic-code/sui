@@ -52,24 +52,9 @@ dependencies = [
 
 [[move.package]]
 id = "SuiSpecs"
-source = { git = "https://github.com/asymptotic-code/sui-prover.git", rev = "main", subdir = "packages/sui-framework-specs" }
+source = { git = "https://github.com/asymptotic-code/sui-prover.git", rev = "main", subdir = "packages/sui-specs" }
 
 dependencies = [
   { id = "Prover", name = "Prover" },
   { id = "Sui", name = "Sui" },
 ]
-
-# [[move.package]]
-# id = "SuiSystem"
-# source = { git = "https://github.com/asymptotic-code/sui.git", rev = "next", subdir = "crates/sui-framework/packages/sui-system" }
-
-# dependencies = [
-#  { id = "MoveStdlib", name = "MoveStdlib" },
-#  { id = "Sui", name = "Sui" },
-#]
-
-
-[move.toolchain-version]
-compiler-version = "1.22.0"
-edition = "legacy"
-flavor = "sui"

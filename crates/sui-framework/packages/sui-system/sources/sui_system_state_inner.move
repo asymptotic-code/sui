@@ -1206,7 +1206,7 @@ public(package) fun request_add_validator_candidate_for_testing(
 #[spec_only]
 use prover::prover::{requires,ensures};
 #[spec_only]
-use sui_system::validator_set::{exists_validator_sf, find_validator_sf};
+use sui_system::validator_set::{exists_validator_sf, exists_validator_in_table_sf, find_validator_sf};
 #[spec_only]
 use sui_system::helpers::can_add_u64;
 
@@ -1238,4 +1238,20 @@ fun request_set_commission_rate_spec(
     requires(exists_validator_sf(self.validators.active_validators(), ctx.sender()));
     requires(new_commission_rate <= validator::max_commission_rate());
     request_set_commission_rate(self, new_commission_rate, ctx);
+}
+
+// #[spec(prove)]
+#[spec_only] // DBG
+fun set_candidate_validator_commission_rate_spec(
+    self: &mut SuiSystemStateInnerV2,
+    new_commission_rate: u64,
+    ctx: &TxContext,
+) {
+    // let validator_address = ctx.sender();
+    // requires(exists_validator_sf(self.validators.active_validators(), validator_address) ||
+    //     exists_validator_in_table_sf(self.validators.pending_active_validators(), validator_address) ||
+    //     (self.validators.validator_candidates().contains(validator_address) &&
+    //      self.validators.validator_candidates()[validator_address].version() == 1));
+    // requires(new_commission_rate <= validator::max_commission_rate());
+    set_candidate_validator_commission_rate(self, new_commission_rate, ctx);
 }
