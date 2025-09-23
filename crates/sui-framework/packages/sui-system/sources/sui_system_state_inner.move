@@ -1240,18 +1240,11 @@ fun request_set_commission_rate_spec(
     request_set_commission_rate(self, new_commission_rate, ctx);
 }
 
-// #[spec(prove)]
-#[spec_only] // DBG
+#[spec(prove)]
 fun set_candidate_validator_commission_rate_spec(
     self: &mut SuiSystemStateInnerV2,
     new_commission_rate: u64,
     ctx: &TxContext,
 ) {
-    // let validator_address = ctx.sender();
-    // requires(exists_validator_sf(self.validators.active_validators(), validator_address) ||
-    //     exists_validator_in_table_sf(self.validators.pending_active_validators(), validator_address) ||
-    //     (self.validators.validator_candidates().contains(validator_address) &&
-    //      self.validators.validator_candidates()[validator_address].version() == 1));
-    // requires(new_commission_rate <= validator::max_commission_rate());
     set_candidate_validator_commission_rate(self, new_commission_rate, ctx);
 }
