@@ -1662,14 +1662,71 @@ public fun get_pending_validator_ref_spec(
     get_pending_validator_ref(self, validator_address)
 }
 
+// == preconditions of some multiply-used functions, here as an aid to memory and proof maintenance ==
+//
+// because the return value is important to some callers, these are `no_opaque`
+
+#[spec(prove, no_opaque)]
+fun get_active_or_pending_or_candidate_validator_ref_spec(
+    self: &mut ValidatorSet,
+    validator_address: address,
+    which_validator: u8,
+): &Validator {
+    requires(exists_validator_sf(&self.active_validators, validator_address) ||
+             ( which_validator != ACTIVE_VALIDATOR_ONLY &&
+               ( exists_validator_in_table_sf(&self.pending_active_validators, validator_address) ||
+                 which_validator != ACTIVE_OR_PENDING_VALIDATOR &&
+                   self.validator_candidates.contains(validator_address) &&
+                   self.validator_candidates[validator_address].version() == 1)));
+    get_active_or_pending_or_candidate_validator_ref(self, validator_address, which_validator)
+}
+
+#[spec(prove, no_opaque)]
+fun get_active_or_pending_or_candidate_validator_mut_spec(
+    self: &mut ValidatorSet,
+    validator_address: address,
+    include_candidate: bool,
+): &mut Validator {
+        requires(exists_validator_sf(&self.active_validators, validator_address) ||
+                 exists_validator_in_table_sf(&self.pending_active_validators, validator_address) ||
+                 ( include_candidate &&
+                   self.validator_candidates.contains(validator_address) &&
+                   self.validator_candidates[validator_address].version() == 1));
+    get_active_or_pending_or_candidate_validator_mut(self, validator_address, include_candidate)
+}
+
+#[spec(prove, focus, no_opaque)]
+fun get_candidate_or_active_validator_mut_spec(self: &mut ValidatorSet, validator_address: address): &mut Validator {
+    requires((self.validator_candidates.contains(validator_address)
+              && self.validator_candidates[validator_address].version() == 1)
+          || exists_validator_sf(&self.active_validators, validator_address));
+    get_candidate_or_active_validator_mut(self, validator_address)
+}
+
+
 // == getters needed by specifications in callers to this module ==
 
-#[spec_only]
+#[test_only]
 public fun pending_removals(self: &ValidatorSet): vector<u64> {
     self.pending_removals
 }
 
-#[spec_only]
+#[test_only]
 public fun num_pending_active_validators(self: &ValidatorSet): u64 {
     self.pending_active_validators.length()
+}
+
+#[test_only]
+public fun pending_active_validators(self: &ValidatorSet): &TableVec<Validator> {
+    &self.pending_active_validators
+}
+
+#[test_only]
+public fun validator_candidates(self: &ValidatorSet): &Table<address, ValidatorWrapper> {
+    &self.validator_candidates
+}
+
+#[test_only]
+public fun min_staking_threshold(): u64 {
+    MIN_STAKING_THRESHOLD
 }
