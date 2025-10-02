@@ -193,6 +193,13 @@ pub enum ExpectedFailureKind_ {
 pub type ExpectedFailureKind = Spanned<ExpectedFailureKind_>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopInvariantInfo {
+    pub target: NameAccessChain,
+    pub label: Option<Symbol>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Attribute_ {
     BytecodeInstruction,
@@ -238,6 +245,7 @@ pub enum Attribute_ {
     },
     SpecOnly {
         inv_target: Option<NameAccessChain>,
+        loop_inv: Option<LoopInvariantInfo>,
     },
 }
 
@@ -1787,12 +1795,19 @@ impl AstDebug for Attribute_ {
                 }
                 w.write(")");
             },
-            A::SpecOnly { inv_target } => {
-                if inv_target.is_some() {
-                    w.write(format!("spec_only(inv_target={})", inv_target.clone().unwrap()));
+            A::SpecOnly { inv_target, loop_inv } => {
+                let li = if let Some(loop_inv) = loop_inv {
+                    format!("loop_inv(target={}, label={})", loop_inv.target.to_string(), loop_inv.label.unwrap_or(Symbol::from("NONE")))
                 } else {
-                    w.write("spec_only()");
-                } 
+                    "".to_string()
+                };
+
+                if inv_target.is_some() {
+                    w.write(format!("spec_only({li} inv_target={})", inv_target.clone().unwrap()));
+                } else {
+                    w.write(format!("spec_only({li})"));
+                }
+
             },
         }
     }
