@@ -473,6 +473,7 @@ fn parse_spec_parametized(context: &mut Context, loc: &Loc, inner_attrs: &Spanne
     let mut no_opaque: bool = false;
     let mut ignore_abort: bool = false;
     let mut boogie_opt: Option<String> = None;
+    let mut timeout: Option<u64> = None;
 
     let mut visited = BTreeSet::new();
 
@@ -549,6 +550,36 @@ fn parse_spec_parametized(context: &mut Context, loc: &Loc, inner_attrs: &Spanne
                         return vec![];
                     };
                     boogie_opt = Some(s.to_string());
+                } else if prop == KA::VerificationAttribute::TIMEOUT_NAME {
+                    let AttributeValue_::Value(sp!(_, P::Value_::Num(number))) = val.value else {
+                        let msg = format!(
+                            "Expected number for {} parameter '{}'",
+                            KA::VerificationAttribute::SPEC,
+                            prop
+                        );
+                        context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                        return vec![];
+                    };
+                    if number.parse::<u64>().is_err() {
+                        let msg = format!(
+                            "Failed to parse number for {} parameter '{}'",
+                            KA::VerificationAttribute::SPEC,
+                            prop
+                        );
+                        context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                        return vec![];
+                    }
+                    let num = number.parse::<u64>().unwrap();
+                    if num == 0 {
+                        let msg = format!(
+                            "Timeout for {} parameter '{}' must be greater than zero",
+                            KA::VerificationAttribute::SPEC,
+                            prop
+                        );
+                        context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                        return vec![];
+                    }
+                    timeout = Some(num);
                 } else if prop == KA::VerificationAttribute::SKIP_NAME {
                     let AttributeValue_::Value(sp!(_, P::Value_::ByteString(s))) = val.value else {
                         let msg = format!(
@@ -597,7 +628,7 @@ fn parse_spec_parametized(context: &mut Context, loc: &Loc, inner_attrs: &Spanne
         return vec![];
     }
 
-    vec![sp(*loc, Attribute_::Spec { prove, skip, focus, target, no_opaque, ignore_abort, boogie_opt })]
+    vec![sp(*loc, Attribute_::Spec { prove, skip, focus, target, no_opaque, ignore_abort, boogie_opt, timeout })]
 
 }
 
@@ -615,6 +646,7 @@ fn parse_spec(context: &mut Context, attribute: ParsedAttribute) -> Vec<Attribut
                 no_opaque: false,
                 target: None,
                 boogie_opt: None,
+                timeout: None,
             })]
         }
         PA::Parameterized(_, inner_attrs) => {

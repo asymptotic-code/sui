@@ -188,6 +188,7 @@ pub enum VerificationAttribute {
         no_opaque: bool,
         ignore_abort: bool,
         boogie_opt: Option<String>,
+        timeout: Option<u64>,
     },
     // Denotes a function is only used by specs, only included in compilation in verify mode
     SpecOnly {
@@ -292,6 +293,7 @@ impl VerificationAttribute {
     pub const NO_OPAQUE_NAME: &'static str = "no_opaque";
     pub const IGNORE_ABORT_NAME: &'static str = "ignore_abort";
     pub const BOOGIE_OPT_NAME: &'static str = "boogie_opt";
+    pub const TIMEOUT_NAME: &'static str = "timeout";
 
     // Spec only arguments
     pub const INV_TARGET_NAME: &'static str = "inv_target";
@@ -936,7 +938,7 @@ impl AstDebug for ExpectedFailure {
 impl AstDebug for VerificationAttribute {
     fn ast_debug(&self, w: &mut AstWriter) {
         match self {
-            VerificationAttribute::Spec { focus, prove, skip, target, no_opaque, ignore_abort, boogie_opt } => {
+            VerificationAttribute::Spec { focus, prove, skip, target, no_opaque, ignore_abort, boogie_opt, timeout } => {
                 w.write("spec(");
                 let mut first = true;
                 if *focus {
@@ -971,6 +973,10 @@ impl AstDebug for VerificationAttribute {
                 if boogie_opt.is_some() {
                     if !first { w.write(", "); }
                     w.write(format!("boogie_opt({})", boogie_opt.clone().unwrap()));
+                }
+                if timeout.is_some() {
+                    if !first { w.write(", "); }
+                    w.write(format!("timeout({})", timeout.unwrap()));
                 }
                 w.write(")");
             }

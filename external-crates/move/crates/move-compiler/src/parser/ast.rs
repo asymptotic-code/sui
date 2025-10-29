@@ -236,6 +236,7 @@ pub enum Attribute_ {
         no_opaque: bool,
         ignore_abort: bool,
         boogie_opt: Option<String>,
+        timeout: Option<u64>,
     },
     SpecOnly {
         inv_target: Option<NameAccessChain>,
@@ -1754,7 +1755,7 @@ impl AstDebug for Attribute_ {
             A::RandomTest => {
                 w.write("rand_test");
             },
-            A::Spec { focus, prove, skip, target, no_opaque, ignore_abort, boogie_opt }  => {
+            A::Spec { focus, prove, skip, target, no_opaque, ignore_abort, boogie_opt, timeout }  => {
                 w.write("spec(");
                 let mut first = true;
                 if *focus {
@@ -1789,6 +1790,10 @@ impl AstDebug for Attribute_ {
                 if boogie_opt.is_some() {
                     if !first { w.write(", "); }
                     w.write(format!("boogie_opt({})", boogie_opt.clone().unwrap()));
+                }
+                if timeout.is_some() {
+                    if !first { w.write(", "); }
+                    w.write(format!("timeout({})", timeout.clone().unwrap()));
                 }
                 w.write(")");
             },
