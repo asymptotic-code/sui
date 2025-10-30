@@ -195,9 +195,8 @@ pub type ExpectedFailureKind = Spanned<ExpectedFailureKind_>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopInvariantInfo {
     pub target: NameAccessChain,
-    pub label: Option<u64>,
+    pub label: u64,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
@@ -1807,7 +1806,7 @@ impl AstDebug for Attribute_ {
             },
             A::SpecOnly { inv_target, loop_inv } => {
                 let li = if let Some(loop_inv) = loop_inv {
-                    format!("loop_inv(target={}, label={})", loop_inv.target.to_string(), loop_inv.label.unwrap_or_default())
+                    format!("loop_inv(target={}, label={})", loop_inv.target.to_string(), loop_inv.label)
                 } else {
                     "".to_string()
                 };

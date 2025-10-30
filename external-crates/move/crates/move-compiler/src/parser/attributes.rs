@@ -728,7 +728,7 @@ fn parse_spec_only_parametized(context: &mut Context, loc: &Loc, inner_attrs: &S
                 };
 
                 let mut target = None;
-                let mut label = None;
+                let mut label = 0;
 
                 for inner_attr in inner_attrs {
                     if let ParsedAttribute_::Assigned(key, val) = &inner_attr.value {
@@ -746,7 +746,7 @@ fn parse_spec_only_parametized(context: &mut Context, loc: &Loc, inner_attrs: &S
                         } else if key.value == KA::VerificationAttribute::LOOP_INV_LABEL_NAME.into() {
                             match val.value {
                                 AttributeValue_::Value(sp!(_, P::Value_::Num(n))) => {
-                                    label = Some(n.parse::<u64>().unwrap());
+                                    label = n.parse::<u64>().unwrap();
                                 }
                                 _ => {
                                     let msg = format!(

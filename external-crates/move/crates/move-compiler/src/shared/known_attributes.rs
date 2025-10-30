@@ -180,7 +180,7 @@ pub enum AttributePosition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopInvariantInfo {
     pub target: ModuleAccess,
-    pub label: Option<u64>,
+    pub label: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -992,7 +992,7 @@ impl AstDebug for VerificationAttribute {
             }
             VerificationAttribute::SpecOnly { inv_target, loop_inv } => {
                 let li = if let Some(loop_inv) = loop_inv {
-                    format!("loop_inv(target={}, label={})", loop_inv.target.to_string(), loop_inv.label.unwrap_or_default())
+                    format!("loop_inv(target={}, label={})", loop_inv.target.to_string(), loop_inv.label)
                 } else {
                     "".to_string()
                 };
