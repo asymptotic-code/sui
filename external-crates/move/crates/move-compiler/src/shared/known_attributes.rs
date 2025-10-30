@@ -11,7 +11,7 @@ use move_core_types::vm_status::StatusCode;
 use move_ir_types::location::*;
 use move_symbol_pool::Symbol;
 use once_cell::sync::Lazy;
-use std::{collections::BTreeSet, fmt};
+use std::{collections::BTreeSet, fmt, u64};
 
 use super::unique_set::UniqueSet;
 
@@ -180,7 +180,7 @@ pub enum AttributePosition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopInvariantInfo {
     pub target: ModuleAccess,
-    pub label: Option<Symbol>,
+    pub label: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -992,7 +992,7 @@ impl AstDebug for VerificationAttribute {
             }
             VerificationAttribute::SpecOnly { inv_target, loop_inv } => {
                 let li = if let Some(loop_inv) = loop_inv {
-                    format!("loop_inv(target={}, label={})", loop_inv.target.to_string(), loop_inv.label.unwrap_or(Symbol::from("NONE")))
+                    format!("loop_inv(target={}, label={})", loop_inv.target.to_string(), loop_inv.label.unwrap_or_default())
                 } else {
                     "".to_string()
                 };

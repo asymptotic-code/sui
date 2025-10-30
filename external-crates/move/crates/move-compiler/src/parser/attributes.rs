@@ -19,7 +19,6 @@ use crate::{
 };
 
 use move_ir_types::location::*;
-use move_symbol_pool::Symbol;
 
 /// Converts a parsed attribute to a known Attribute, or leaves it as an Unknown attribute.
 /// Some attributes may induce a number of internal attributes for easier handling later.
@@ -746,8 +745,8 @@ fn parse_spec_only_parametized(context: &mut Context, loc: &Loc, inner_attrs: &S
                             target = Some(access.clone());
                         } else if key.value == KA::VerificationAttribute::LOOP_INV_LABEL_NAME.into() {
                             match val.value {
-                                AttributeValue_::Value(sp!(_, P::Value_::ByteString(bs))) => {
-                                    label = Some(bs.to_string());
+                                AttributeValue_::Value(sp!(_, P::Value_::Num(n))) => {
+                                    label = Some(n.parse::<u64>().unwrap());
                                 }
                                 _ => {
                                     let msg = format!(
@@ -783,7 +782,14 @@ fn parse_spec_only_parametized(context: &mut Context, loc: &Loc, inner_attrs: &S
                             return vec![];
                         }
 
-                        return vec![sp(*loc, Attribute_::SpecOnly { inv_target: None, loop_inv: Some(LoopInvariantInfo { target: target.unwrap(), label: label.map(Symbol::from) }) })];
+                        return vec![sp(*loc, 
+                            Attribute_::SpecOnly { 
+                                inv_target: None,
+                                loop_inv: Some(LoopInvariantInfo { 
+                                    target: target.unwrap(),
+                                    label,
+                                }) 
+                            })];
                     } else {
                         let msg = format!(
                             "Expected assign attributes only for {} parameter '{}'",
