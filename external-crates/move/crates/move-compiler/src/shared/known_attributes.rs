@@ -180,7 +180,7 @@ pub enum AttributePosition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopInvariantInfo {
     pub target: ModuleAccess,
-    pub label: u64,
+    pub label: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

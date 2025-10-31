@@ -195,7 +195,7 @@ pub type ExpectedFailureKind = Spanned<ExpectedFailureKind_>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopInvariantInfo {
     pub target: NameAccessChain,
-    pub label: u64,
+    pub label: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
