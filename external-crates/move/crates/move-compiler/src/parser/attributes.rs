@@ -747,7 +747,7 @@ fn parse_spec_only_parametized(context: &mut Context, loc: &Loc, inner_attrs: &S
                             println!("Val value: {:?}", val.value);
                             match &val.value {
                                 AttributeValue_::Value(sp!(_, P::Value_::Num(n))) => {
-                                    label = n.as_usize();
+                                    label = n.parse::<usize>().unwrap();
                                 }
                                 _ => {
                                     let msg = format!(
