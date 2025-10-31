@@ -746,21 +746,8 @@ fn parse_spec_only_parametized(context: &mut Context, loc: &Loc, inner_attrs: &S
                         } else if key.value == KA::VerificationAttribute::LOOP_INV_LABEL_NAME.into() {
                             println!("Val value: {:?}", val.value);
                             match &val.value {
-                                AttributeValue_::Value(sp!(_, vval)) => {
-                                    match vval {
-                                        P::Value_::Num(n) => {
-                                            label = n.as_usize();
-                                        }
-                                        _ => {
-                                            let msg = format!(
-                                                "Expected number for {} parameter '{}'",
-                                                KA::VerificationAttribute::LOOP_INV_NAME,
-                                                KA::VerificationAttribute::LOOP_INV_LABEL_NAME,
-                                            );
-                                            context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
-                                            return vec![];
-                                        }
-                                    }
+                                AttributeValue_::Value(sp!(_, P::Value_::Num(n))) => {
+                                    label = n.as_usize();
                                 }
                                 _ => {
                                     let msg = format!(
@@ -795,15 +782,6 @@ fn parse_spec_only_parametized(context: &mut Context, loc: &Loc, inner_attrs: &S
                             context.add_diag(diag);
                             return vec![];
                         }
-
-                        return vec![sp(*loc, 
-                            Attribute_::SpecOnly { 
-                                inv_target: None,
-                                loop_inv: Some(LoopInvariantInfo { 
-                                    target: target.unwrap(),
-                                    label,
-                                }) 
-                            })];
                     } else {
                         let msg = format!(
                             "Expected assign attributes only for {} parameter '{}'",
@@ -814,6 +792,16 @@ fn parse_spec_only_parametized(context: &mut Context, loc: &Loc, inner_attrs: &S
                         return vec![];
                     }
                 }
+
+                return vec![sp(*loc,
+                    Attribute_::SpecOnly { 
+                        inv_target: None,
+                        loop_inv: Some(LoopInvariantInfo { 
+                            target: target.unwrap(),
+                            label,
+                        }) 
+                    })
+                ];
             }
         }
     }
