@@ -85,10 +85,6 @@ impl Symbol {
         self.as_ref()
     }
 
-    pub fn as_usize(&self) -> usize {
-        self.0.get() as usize
-    }
-
     fn tag(&self) -> Tag {
         let tag = (self.0.get() & TAG_MASK) as u8;
         match tag {

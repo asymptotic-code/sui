@@ -569,7 +569,7 @@ fn parse_spec_parametized(context: &mut Context, loc: &Loc, inner_attrs: &Spanne
                         context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
                         return vec![];
                     }
-                    let num = number.as_usize() as u64;
+                    let num = number.parse::<u64>().unwrap();
                     if num == 0 {
                         let msg = format!(
                             "Timeout for {} parameter '{}' must be greater than zero",
@@ -744,7 +744,6 @@ fn parse_spec_only_parametized(context: &mut Context, loc: &Loc, inner_attrs: &S
                             };
                             target = Some(access.clone());
                         } else if key.value == KA::VerificationAttribute::LOOP_INV_LABEL_NAME.into() {
-                            println!("Val value: {:?}", val.value);
                             match &val.value {
                                 AttributeValue_::Value(sp!(_, P::Value_::Num(n))) => {
                                     label = n.parse::<usize>().unwrap();
