@@ -201,7 +201,7 @@ pub enum VerificationAttribute {
         inv_target: Option<ModuleAccess>,
         loop_inv: Option<LoopInvariantInfo>,
         explicit_specs: Vec<ModuleAccess>,
-        explicit_spec_modules: Vec<ModuleAccess>,
+        explicit_spec_modules: Vec<ModuleIdent>,
     },
 }
 
@@ -1054,7 +1054,7 @@ impl AstDebug for VerificationAttribute {
                 if !explicit_spec_modules.is_empty() {
                     w.write(" explicit_spec_modules(");
                     w.comma(explicit_spec_modules, |w, spec_module| {
-                        spec_module.ast_debug(w);
+                        w.write(spec_module.value.module.to_string());
                     });
                     w.write(")");
                 }

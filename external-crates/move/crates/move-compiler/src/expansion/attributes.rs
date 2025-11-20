@@ -374,14 +374,7 @@ fn attribute(
             },
             explicit_spec_modules: explicit_spec_modules
                 .into_iter()
-                .filter_map(|chain| {
-                    context
-                        .name_access_chain_to_module_access(
-                            crate::expansion::path_expander::Access::Module,
-                            chain,
-                        )
-                        .map(|result| result.access)
-                })
+                .filter_map(|chain| context.name_access_chain_to_module_ident(chain))
                 .collect(),
             explicit_specs: explicit_specs
                 .into_iter()
