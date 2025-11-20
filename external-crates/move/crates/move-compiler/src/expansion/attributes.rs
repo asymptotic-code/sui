@@ -11,9 +11,13 @@ use crate::{
     ice, ice_assert,
     parser::ast as P,
     shared::{
+        Name,
         known_attributes::{
-            self as A, AttributeKind, AttributeKind_, AttributePosition, KnownAttribute, LoopInvariantInfo, ModeAttribute, TestingAttribute
-        }, unique_map::UniqueMap, unique_set::UniqueSet, Name
+            self as A, AttributeKind, AttributeKind_, AttributePosition, KnownAttribute,
+            LoopInvariantInfo, ModeAttribute, TestingAttribute,
+        },
+        unique_map::UniqueMap,
+        unique_set::UniqueSet,
     },
 };
 
@@ -312,38 +316,85 @@ fn attribute(
             KA::Testing(TestingAttribute::ExpectedFailure(Box::new(failure)))
         }
         PA::RandomTest => KA::Testing(A::TestingAttribute::RandTest),
-        PA::Spec { focus, skip, prove, ignore_abort, no_opaque, target, boogie_opt, timeout } => 
-            KA::Verification(A::VerificationAttribute::Spec { 
-                focus,
-                skip,
-                prove,
-                ignore_abort,
-                no_opaque,
-                boogie_opt,
-                timeout,
-                target: target
-                    .map(|t| context.name_access_chain_to_module_access(crate::expansion::path_expander::Access::Term, t))
-                    .flatten()
-                    .map(|result| result.access),
-            }),
-        PA::SpecOnly { inv_target, loop_inv } =>
-            KA::Verification(A::VerificationAttribute::SpecOnly {
-                inv_target: inv_target
-                    .map(|t: Spanned<P::NameAccessChain_>| context.name_access_chain_to_module_access(crate::expansion::path_expander::Access::Term, t))
-                    .flatten()
-                    .map(|result| result.access),
-                loop_inv: if let Some(loop_inv) = loop_inv {
-                    Some(LoopInvariantInfo {
-                        target:
-                            context.name_access_chain_to_module_access(crate::expansion::path_expander::Access::Term, loop_inv.target)
-                            .unwrap()
-                            .access,
-                        label: loop_inv.label,
-                    })
-                } else {
-                    None
-                },
-            }),
+        PA::Spec {
+            focus,
+            skip,
+            prove,
+            ignore_abort,
+            no_opaque,
+            target,
+            boogie_opt,
+            timeout,
+        } => KA::Verification(A::VerificationAttribute::Spec {
+            focus,
+            skip,
+            prove,
+            ignore_abort,
+            no_opaque,
+            boogie_opt,
+            timeout,
+            target: target
+                .map(|t| {
+                    context.name_access_chain_to_module_access(
+                        crate::expansion::path_expander::Access::Term,
+                        t,
+                    )
+                })
+                .flatten()
+                .map(|result| result.access),
+        }),
+        PA::SpecOnly {
+            inv_target,
+            loop_inv,
+            explicit_specs,
+            explicit_spec_modules,
+        } => KA::Verification(A::VerificationAttribute::SpecOnly {
+            inv_target: inv_target
+                .map(|t: Spanned<P::NameAccessChain_>| {
+                    context.name_access_chain_to_module_access(
+                        crate::expansion::path_expander::Access::Term,
+                        t,
+                    )
+                })
+                .flatten()
+                .map(|result| result.access),
+            loop_inv: if let Some(loop_inv) = loop_inv {
+                Some(LoopInvariantInfo {
+                    target: context
+                        .name_access_chain_to_module_access(
+                            crate::expansion::path_expander::Access::Term,
+                            loop_inv.target,
+                        )
+                        .unwrap()
+                        .access,
+                    label: loop_inv.label,
+                })
+            } else {
+                None
+            },
+            explicit_spec_modules: explicit_spec_modules
+                .into_iter()
+                .filter_map(|chain| {
+                    context
+                        .name_access_chain_to_module_access(
+                            crate::expansion::path_expander::Access::Term,
+                            chain,
+                        )
+                        .map(|result| result.access)
+                })
+                .collect(),
+            explicit_specs: explicit_specs
+                .into_iter()
+                .filter_map(|chain| {
+                    context
+                        .name_access_chain_to_module_access(
+                            crate::expansion::path_expander::Access::Term,
+                            chain,
+                        )
+                        .map(|result| result.access)
+                })
+                .collect(),
+        }),
     };
     Some(sp(loc, attr_))
 }
