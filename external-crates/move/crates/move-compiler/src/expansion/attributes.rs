@@ -377,7 +377,7 @@ fn attribute(
                 .filter_map(|chain| {
                     context
                         .name_access_chain_to_module_access(
-                            crate::expansion::path_expander::Access::Term,
+                            crate::expansion::path_expander::Access::Module,
                             chain,
                         )
                         .map(|result| result.access)
