@@ -310,8 +310,8 @@ impl VerificationAttribute {
     pub const LOOP_INV_NAME: &'static str = "loop_inv";
     pub const LOOP_INV_TARGET_NAME: &'static str = "target";
     pub const LOOP_INV_LABEL_NAME: &'static str = "label";
-    pub const EXPLICIT_SPEC_NAME: &'static str = "explicit_spec";
-    pub const EXPLICIT_SPEC_MODULE_NAME: &'static str = "explicit_spec_module";
+    pub const EXPLICIT_SPEC_NAME: &'static str = "include";
+    pub const EXPLICIT_SPEC_MODULE_NAME: &'static str = "include_module";
 
     pub const fn name(&self) -> &str {
         match self {
