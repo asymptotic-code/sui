@@ -784,7 +784,6 @@ fn parse_spec_only_loop_inv(
         Attribute_::SpecOnly {
             inv_target: None,
             explicit_specs: vec![],
-            explicit_spec_modules: vec![],
             loop_inv: Some(LoopInvariantInfo {
                 target: target.unwrap(),
                 label,
@@ -802,7 +801,6 @@ fn parse_spec_only_parametized(
 
     let mut inv_target = None;
     let mut explicit_specs = vec![];
-    let mut explicit_spec_modules = vec![];
 
     for attr in attrs {
         match &attr.value {
@@ -822,7 +820,6 @@ fn parse_spec_only_parametized(
                 let allowed = [
                     KA::VerificationAttribute::INV_TARGET_NAME,
                     KA::VerificationAttribute::EXPLICIT_SPEC_NAME,
-                    KA::VerificationAttribute::EXPLICIT_SPEC_MODULE_NAME,
                 ];
                 if !allowed.contains(&kind.value.as_ref()) {
                     let msg = format!(
@@ -856,10 +853,8 @@ fn parse_spec_only_parametized(
                         return vec![];
                     }
                     inv_target = Some(access.clone());
-                } else if kind.value == KA::VerificationAttribute::EXPLICIT_SPEC_NAME.into() {
-                    explicit_specs.push(access.clone());
                 } else {
-                    explicit_spec_modules.push(access.clone());
+                    explicit_specs.push(access.clone());
                 }
             }
             ParsedAttribute_::Parameterized(kind, val) => {
@@ -878,9 +873,11 @@ fn parse_spec_only_parametized(
         }
     }
 
-    if inv_target.is_some() && (!explicit_specs.is_empty() || !explicit_spec_modules.is_empty()) {
+    if inv_target.is_some() && !explicit_specs.is_empty() {
         let msg = format!(
-            "Cannot combine 'inv_target' with 'explicit_spec' or 'explicit_spec_module' in {}",
+            "Cannot combine '{}' with '{}' in {}",
+            KA::VerificationAttribute::INV_TARGET_NAME,
+            KA::VerificationAttribute::EXPLICIT_SPEC_NAME,
             KA::VerificationAttribute::SPEC_ONLY,
         );
         context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
@@ -893,7 +890,6 @@ fn parse_spec_only_parametized(
             inv_target,
             loop_inv: None,
             explicit_specs,
-            explicit_spec_modules,
         },
     )];
 }
@@ -909,7 +905,6 @@ fn parse_spec_only(context: &mut Context, attribute: ParsedAttribute) -> Vec<Att
                     inv_target: None,
                     loop_inv: None,
                     explicit_specs: vec![],
-                    explicit_spec_modules: vec![],
                 },
             )]
         }

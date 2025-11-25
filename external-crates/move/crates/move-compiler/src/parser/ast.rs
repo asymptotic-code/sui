@@ -248,7 +248,6 @@ pub enum Attribute_ {
         inv_target: Option<NameAccessChain>,
         loop_inv: Option<LoopInvariantInfo>,
         explicit_specs: Vec<NameAccessChain>,
-        explicit_spec_modules: Vec<NameAccessChain>,
     },
 }
 
@@ -1851,7 +1850,6 @@ impl AstDebug for Attribute_ {
                 inv_target,
                 loop_inv,
                 explicit_specs,
-                explicit_spec_modules,
             } => {
                 let li = if let Some(loop_inv) = loop_inv {
                     format!(
@@ -1875,13 +1873,6 @@ impl AstDebug for Attribute_ {
                     w.write(" explicit_specs(");
                     w.comma(explicit_specs, |w, spec| {
                         spec.ast_debug(w);
-                    });
-                    w.write(")");
-                }
-                if !explicit_spec_modules.is_empty() {
-                    w.write(" explicit_spec_modules(");
-                    w.comma(explicit_spec_modules, |w, spec_module| {
-                        spec_module.ast_debug(w);
                     });
                     w.write(")");
                 }

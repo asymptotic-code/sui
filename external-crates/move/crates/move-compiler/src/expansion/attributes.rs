@@ -347,47 +347,54 @@ fn attribute(
             inv_target,
             loop_inv,
             explicit_specs,
-            explicit_spec_modules,
-        } => KA::Verification(A::VerificationAttribute::SpecOnly {
-            inv_target: inv_target
-                .map(|t: Spanned<P::NameAccessChain_>| {
-                    context.name_access_chain_to_module_access(
-                        crate::expansion::path_expander::Access::Term,
-                        t,
-                    )
-                })
-                .flatten()
-                .map(|result| result.access),
-            loop_inv: if let Some(loop_inv) = loop_inv {
-                Some(LoopInvariantInfo {
-                    target: context
+        } => {
+            let mut specs = vec![];
+            let mut spec_modules = vec![];
+
+            explicit_specs
+                .into_iter()
+                .for_each(|chain| { 
+                    if let Some(access) = context
                         .name_access_chain_to_module_access(
                             crate::expansion::path_expander::Access::Term,
-                            loop_inv.target,
-                        )
-                        .unwrap()
-                        .access,
-                    label: loop_inv.label,
-                })
-            } else {
-                None
-            },
-            explicit_spec_modules: explicit_spec_modules
-                .into_iter()
-                .filter_map(|chain| context.name_access_chain_to_module_ident(chain))
-                .collect(),
-            explicit_specs: explicit_specs
-                .into_iter()
-                .filter_map(|chain| {
-                    context
-                        .name_access_chain_to_module_access(
+                            chain.clone(),
+                        ) {
+                            specs.push(access.access);
+                    } else {
+                        if let Some(mi) = context.name_access_chain_to_module_ident(chain) {
+                            spec_modules.push(mi);
+                        }
+                    }
+                });
+
+            KA::Verification(A::VerificationAttribute::SpecOnly {
+                inv_target: inv_target
+                    .map(|t: Spanned<P::NameAccessChain_>| {
+                        context.name_access_chain_to_module_access(
                             crate::expansion::path_expander::Access::Term,
-                            chain,
+                            t,
                         )
-                        .map(|result| result.access)
-                })
-                .collect(),
-        }),
+                    })
+                    .flatten()
+                    .map(|result| result.access),
+                loop_inv: if let Some(loop_inv) = loop_inv {
+                    Some(LoopInvariantInfo {
+                        target: context
+                            .name_access_chain_to_module_access(
+                                crate::expansion::path_expander::Access::Term,
+                                loop_inv.target,
+                            )
+                            .unwrap()
+                            .access,
+                        label: loop_inv.label,
+                    })
+                } else {
+                    None
+                },
+                explicit_spec_modules: spec_modules,
+                explicit_specs: specs,
+            })
+        }
     };
     Some(sp(loc, attr_))
 }
