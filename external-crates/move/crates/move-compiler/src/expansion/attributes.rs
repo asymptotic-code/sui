@@ -355,7 +355,7 @@ fn attribute(
                 .into_iter()
                 .for_each(|chain| { 
                     if let Some(access) = context
-                        .name_access_chain_to_module_access(
+                        .name_access_chain_to_module_access_unsafe(
                             crate::expansion::path_expander::Access::Term,
                             chain.clone(),
                         ) {

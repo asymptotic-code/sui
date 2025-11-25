@@ -297,6 +297,28 @@ impl<'env> Context<'env> {
         )
     }
 
+    pub fn name_access_chain_to_module_access_unsafe(
+        &mut self,
+        access: Access,
+        chain: P::NameAccessChain,
+    ) -> Option<AccessPath> {
+        let Context {
+            path_expander,
+            defn_context: inner_context,
+            ..
+        } = self;
+        let res = path_expander
+            .as_mut()
+            .unwrap()
+            .name_access_chain_to_module_access(inner_context, access, chain);
+
+        if res.errors.is_empty() {
+            res.result
+        } else {
+            None
+        }
+    }
+
     pub fn name_access_chain_to_module_ident(
         &mut self,
         chain: P::NameAccessChain,
