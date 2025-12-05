@@ -72,7 +72,7 @@ native public fun mul(x: Real, y: Real): Real;
 #[spec_only]
 native public fun div(x: Real, y: Real): Real;
 #[spec_only]
-native public fun sqrt(x: Real, y: Integer): Real;
+native public fun sqrt(x: Real): Real;
 #[spec_only]
 native public fun exp(x: Real, y: Integer): Real;
 
