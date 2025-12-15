@@ -325,24 +325,53 @@ fn attribute(
             target,
             boogie_opt,
             timeout,
-        } => KA::Verification(A::VerificationAttribute::Spec {
-            focus,
-            skip,
-            prove,
-            ignore_abort,
-            no_opaque,
-            boogie_opt,
-            timeout,
-            target: target
-                .map(|t| {
-                    context.name_access_chain_to_module_access(
-                        crate::expansion::path_expander::Access::Term,
-                        t,
-                    )
-                })
-                .flatten()
-                .map(|result| result.access),
-        }),
+            explicit_specs,
+        } => {
+            let mut specs = vec![];
+            let mut spec_modules = vec![];
+
+            explicit_specs
+                .into_iter()
+                .for_each(|chain| { 
+                    let result = context
+                        .name_access_chain_to_module_access_unsafe(
+                            crate::expansion::path_expander::Access::Term,
+                            chain.clone()
+                        );
+                    if result.errors.is_empty() {
+                        specs.push(result.result.unwrap().access);
+                    } else {
+                        if let Some(mi) = context.name_access_chain_to_module_ident(chain) {
+                            spec_modules.push(mi);
+                        } else {
+                            for err in result.errors {
+                                context.add_diag(err.into_diagnostic());
+                            }
+                        }
+                    }
+                });
+
+            KA::Verification(A::VerificationAttribute::Spec {
+                focus,
+                skip,
+                prove,
+                ignore_abort,
+                no_opaque,
+                boogie_opt,
+                timeout,
+                target: target
+                    .map(|t| {
+                        context.name_access_chain_to_module_access(
+                            crate::expansion::path_expander::Access::Term,
+                            t,
+                        )
+                    })
+                    .flatten()
+                    .map(|result| result.access),
+                explicit_specs: specs,
+                explicit_spec_modules: spec_modules,
+            })
+        },
         PA::SpecOnly {
             inv_target,
             loop_inv,
