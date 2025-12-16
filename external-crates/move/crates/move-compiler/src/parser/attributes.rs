@@ -483,6 +483,7 @@ fn parse_spec_parametized(
     let mut ignore_abort: bool = false;
     let mut boogie_opt: Option<String> = None;
     let mut timeout: Option<u64> = None;
+    let mut explicit_specs = vec![];
 
     let mut visited = BTreeSet::new();
 
@@ -527,14 +528,17 @@ fn parse_spec_parametized(
             ParsedAttribute_::Assigned(kind, val) => {
                 let prop = kind.value.to_string();
 
-                if !visited.insert(prop.clone()) {
-                    let msg = format!(
-                        "Duplicate {} parameter '{}'",
-                        KA::VerificationAttribute::SPEC,
-                        prop
-                    );
-                    context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
-                    return vec![];
+                if prop != KA::VerificationAttribute::EXPLICIT_SPEC_NAME {
+                    // Explicit specs can appear multiple times
+                    if !visited.insert(prop.clone()) {
+                        let msg = format!(
+                            "Duplicate {} parameter '{}'",
+                            KA::VerificationAttribute::SPEC,
+                            prop
+                        );
+                        context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                        return vec![];
+                    }
                 }
 
                 if prop == KA::VerificationAttribute::TARGET_NAME {
@@ -600,6 +604,17 @@ fn parse_spec_parametized(
                         return vec![];
                     };
                     skip = Some(s.to_string());
+                } else if prop == KA::VerificationAttribute::EXPLICIT_SPEC_NAME {
+                    let AttributeValue_::ModuleAccess(ref access) = val.value else {
+                        let msg = format!(
+                            "Expected module access for {} parameter '{}'",
+                            KA::VerificationAttribute::SPEC,
+                            prop
+                        );
+                        context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                        return vec![];
+                    };
+                    explicit_specs.push(access.clone());
                 } else {
                     let msg = format!(
                         "Unknown {} assign parameter '{}'. Expected: {} or {}",
@@ -648,6 +663,7 @@ fn parse_spec_parametized(
             ignore_abort,
             boogie_opt,
             timeout,
+            explicit_specs,
         },
     )]
 }
@@ -669,6 +685,7 @@ fn parse_spec(context: &mut Context, attribute: ParsedAttribute) -> Vec<Attribut
                     target: None,
                     boogie_opt: None,
                     timeout: None,
+                    explicit_specs: vec![],
                 },
             )]
         }
