@@ -194,6 +194,8 @@ pub enum VerificationAttribute {
         ignore_abort: bool,
         boogie_opt: Option<String>,
         timeout: Option<u64>,
+        explicit_specs: Vec<ModuleAccess>,
+        explicit_spec_modules: Vec<ModuleIdent>,
     },
     // Denotes a function is only used by specs, only included in compilation in verify mode
     SpecOnly {
@@ -961,6 +963,8 @@ impl AstDebug for VerificationAttribute {
                 ignore_abort,
                 boogie_opt,
                 timeout,
+                explicit_specs,
+                explicit_spec_modules,
             } => {
                 w.write("spec(");
                 let mut first = true;
@@ -1016,6 +1020,20 @@ impl AstDebug for VerificationAttribute {
                         w.write(", ");
                     }
                     w.write(format!("timeout({})", timeout.unwrap()));
+                }
+                if !explicit_specs.is_empty() {
+                    w.write(" explicit_specs(");
+                    w.comma(explicit_specs, |w, spec| {
+                        spec.ast_debug(w);
+                    });
+                    w.write(")");
+                }
+                if !explicit_spec_modules.is_empty() {
+                    w.write(" explicit_spec_modules(");
+                    w.comma(explicit_spec_modules, |w, spec_module| {
+                        w.write(spec_module.value.module.to_string());
+                    });
+                    w.write(")");
                 }
                 w.write(")");
             }

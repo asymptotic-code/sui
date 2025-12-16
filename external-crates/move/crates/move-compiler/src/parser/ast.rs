@@ -243,6 +243,7 @@ pub enum Attribute_ {
         ignore_abort: bool,
         boogie_opt: Option<String>,
         timeout: Option<u64>,
+        explicit_specs: Vec<NameAccessChain>,
     },
     SpecOnly {
         inv_target: Option<NameAccessChain>,
@@ -1768,6 +1769,7 @@ impl AstDebug for Attribute_ {
                 ignore_abort,
                 boogie_opt,
                 timeout,
+                explicit_specs,
             } => {
                 w.write("spec(");
                 let mut first = true;
@@ -1823,6 +1825,13 @@ impl AstDebug for Attribute_ {
                         w.write(", ");
                     }
                     w.write(format!("timeout({})", timeout.clone().unwrap()));
+                }
+                if !explicit_specs.is_empty() {
+                    w.write(" explicit_specs(");
+                    w.comma(explicit_specs, |w, spec| {
+                        spec.ast_debug(w);
+                    });
+                    w.write(")");
                 }
                 w.write(")");
             }
