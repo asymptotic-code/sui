@@ -90,6 +90,7 @@ public fun substring(string: &String, i: u64, j: u64): String {
 }
 
 /// Get the inner bytes of the `string` as a reference
+#[ext(pure)]
 public fun as_bytes(string: &String): &vector<u8> {
     &string.bytes
 }
@@ -108,18 +109,21 @@ public fun byte(char: Char): u8 {
 
 /// Returns `true` if `b` is a valid ASCII character.
 /// Returns `false` otherwise.
+#[ext(pure)]
 public fun is_valid_char(b: u8): bool {
     b <= 0x7F
 }
 
 /// Returns `true` if `byte` is a printable ASCII character.
 /// Returns `false` otherwise.
+#[ext(pure)]
 public fun is_printable_char(byte: u8): bool {
     byte >= 0x20 && // Disallow metacharacters
         byte <= 0x7E // Don't allow DEL metacharacter
 }
 
 /// Returns `true` if `string` is empty.
+#[ext(pure)]
 public fun is_empty(string: &String): bool {
     string.bytes.is_empty()
 }

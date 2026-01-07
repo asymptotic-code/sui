@@ -7,6 +7,7 @@ module std::address;
 
 /// Should be converted to a native function.
 /// Current implementation only works for Sui.
+#[ext(pure)]
 public fun length(): u64 {
     32
 }
