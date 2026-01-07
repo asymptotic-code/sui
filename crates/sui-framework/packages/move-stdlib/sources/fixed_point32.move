@@ -109,6 +109,7 @@ public fun get_raw_value(num: FixedPoint32): u64 {
 }
 
 /// Returns true if the ratio is zero.
+#[ext(pure)]
 public fun is_zero(num: FixedPoint32): bool {
     num.value == 0
 }

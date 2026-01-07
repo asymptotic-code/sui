@@ -58,6 +58,7 @@ public native fun original_id<T>(): address;
 
 /// Returns true iff the TypeName represents a primitive type, i.e. one of
 /// u8, u16, u32, u64, u128, u256, bool, address, vector.
+#[ext(pure)]
 public fun is_primitive(self: &TypeName): bool {
     let bytes = self.name.as_bytes();
     bytes == &b"bool" ||
@@ -80,6 +81,7 @@ public fun is_primitive(self: &TypeName): bool {
 }
 
 /// Get the String representation of `self`
+#[ext(pure)]
 public fun as_string(self: &TypeName): &String {
     &self.name
 }
@@ -162,6 +164,7 @@ public fun datatype_string(self: &TypeName): String {
 }
 
 /// Convert `self` into its inner String
+#[ext(pure)]
 public fun into_string(self: TypeName): String {
     self.name
 }
@@ -179,6 +182,7 @@ public fun get_with_original_ids<T>(): TypeName {
 }
 
 #[deprecated(note = b"Renamed to `as_string` for consistency.")]
+#[ext(pure)]
 public fun borrow_string(self: &TypeName): &String {
     self.as_string()
 }

@@ -44,6 +44,7 @@ public fun try_utf8(bytes: vector<u8>): Option<String> {
 }
 
 /// Returns a reference to the underlying byte vector.
+#[ext(pure)]
 public fun as_bytes(s: &String): &vector<u8> {
     &s.bytes
 }
@@ -55,11 +56,13 @@ public fun into_bytes(s: String): vector<u8> {
 }
 
 /// Checks whether this string is empty.
+#[ext(pure)]
 public fun is_empty(s: &String): bool {
     s.bytes.is_empty()
 }
 
 /// Returns the length of this string, in bytes.
+#[ext(pure)]
 public fun length(s: &String): u64 {
     s.bytes.length()
 }
@@ -120,6 +123,7 @@ native fun internal_index_of(v: &vector<u8>, r: &vector<u8>): u64;
 // === Deprecated ===
 
 #[deprecated(note = b"Use `std::string::as_bytes` instead.")]
+#[ext(pure)]
 public fun bytes(s: &String): &vector<u8> { s.as_bytes() }
 
 #[deprecated(note = b"Use `std::string::substring` instead.")]
