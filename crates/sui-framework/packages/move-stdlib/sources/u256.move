@@ -42,26 +42,31 @@ public fun pow(base: u256, exponent: u8): u256 {
 }
 
 /// Try to convert a `u256` to a `u8`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u8(x: u256): Option<u8> {
     std::macros::try_as_u8!(x)
 }
 
 /// Try to convert a `u256` to a `u16`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u16(x: u256): Option<u16> {
     std::macros::try_as_u16!(x)
 }
 
 /// Try to convert a `u256` to a `u32`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u32(x: u256): Option<u32> {
     std::macros::try_as_u32!(x)
 }
 
 /// Try to convert a `u256` to a `u64`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u64(x: u256): Option<u64> {
     std::macros::try_as_u64!(x)
 }
 
 /// Try to convert a `u256` to a `u128`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u128(x: u256): Option<u128> {
     std::macros::try_as_u128!(x)
 }

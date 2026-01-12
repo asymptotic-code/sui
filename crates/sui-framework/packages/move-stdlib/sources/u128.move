@@ -71,21 +71,25 @@ public fun sqrt(x: u128): u128 {
 }
 
 /// Try to convert a `u128` to a `u8`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u8(x: u128): Option<u8> {
     std::macros::try_as_u8!(x)
 }
 
 /// Try to convert a `u128` to a `u16`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u16(x: u128): Option<u16> {
     std::macros::try_as_u16!(x)
 }
 
 /// Try to convert a `u128` to a `u32`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u32(x: u128): Option<u32> {
     std::macros::try_as_u32!(x)
 }
 
 /// Try to convert a `u128` to a `u64`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u64(x: u128): Option<u64> {
     std::macros::try_as_u64!(x)
 }
