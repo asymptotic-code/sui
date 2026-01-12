@@ -24,6 +24,7 @@ public fun none<Element>(): Option<Element> {
 }
 
 /// Return an `Option` containing `e`
+#[ext(pure)]
 public fun some<Element>(e: Element): Option<Element> {
     Option { vec: vector::singleton(e) }
 }
