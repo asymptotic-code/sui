@@ -18,27 +18,32 @@ const EOPTION_IS_SET: u64 = 0x40000;
 const EOPTION_NOT_SET: u64 = 0x40001;
 
 /// Return an empty `Option`
+#[ext(pure)]
 public fun none<Element>(): Option<Element> {
     Option { vec: vector::empty() }
 }
 
 /// Return an `Option` containing `e`
+#[ext(pure)]
 public fun some<Element>(e: Element): Option<Element> {
     Option { vec: vector::singleton(e) }
 }
 
 /// Return true if `t` does not hold a value
+#[ext(pure)]
 public fun is_none<Element>(t: &Option<Element>): bool {
     t.vec.is_empty()
 }
 
 /// Return true if `t` holds a value
+#[ext(pure)]
 public fun is_some<Element>(t: &Option<Element>): bool {
     !t.vec.is_empty()
 }
 
 /// Return true if the value in `t` is equal to `e_ref`
 /// Always returns `false` if `t` does not hold a value
+#[ext(pure)]
 public fun contains<Element>(t: &Option<Element>, e_ref: &Element): bool {
     t.vec.contains(e_ref)
 }
@@ -52,6 +57,7 @@ public fun borrow<Element>(t: &Option<Element>): &Element {
 
 /// Return a reference to the value inside `t` if it holds one
 /// Return `default_ref` if `t` does not hold a value
+#[ext(pure)]
 public fun borrow_with_default<Element>(t: &Option<Element>, default_ref: &Element): &Element {
     let vec_ref = &t.vec;
     if (vec_ref.is_empty()) default_ref else &vec_ref[0]
@@ -59,6 +65,7 @@ public fun borrow_with_default<Element>(t: &Option<Element>, default_ref: &Eleme
 
 /// Return the value inside `t` if it holds one
 /// Return `default` if `t` does not hold a value
+#[ext(pure)]
 public fun get_with_default<Element: copy + drop>(t: &Option<Element>, default: Element): Element {
     let vec_ref = &t.vec;
     if (vec_ref.is_empty()) default else vec_ref[0]

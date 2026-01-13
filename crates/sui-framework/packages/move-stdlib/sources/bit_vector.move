@@ -85,6 +85,7 @@ public fun is_index_set(bitvector: &BitVector, bit_index: u64): bool {
 }
 
 /// Return the length (number of usable bits) of this bitvector
+#[ext(pure)]
 public fun length(bitvector: &BitVector): u64 {
     bitvector.bit_field.length()
 }

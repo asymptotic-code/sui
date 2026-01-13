@@ -62,6 +62,7 @@ public fun from_quotient(numerator: u128, denominator: u128): UQ64_64 {
 
 /// Create a fixed-point value from an integer.
 /// `from_int` and `from_quotient` should be preferred over using `from_raw`.
+#[ext(pure)]
 public fun from_int(integer: u64): UQ64_64 {
     UQ64_64(std::macros::uq_from_int!(integer, FRACTIONAL_BITS))
 }
@@ -92,6 +93,7 @@ public fun div(a: UQ64_64, b: UQ64_64): UQ64_64 {
 }
 
 /// Convert a fixed-point number to an integer, truncating any fractional part.
+#[ext(pure)]
 public fun to_int(a: UQ64_64): u64 {
     std::macros::uq_to_int!(a.0, FRACTIONAL_BITS)
 }
@@ -123,33 +125,39 @@ public fun int_div(val: u128, divisor: UQ64_64): u128 {
 }
 
 /// Less than or equal to. Returns `true` if and only if `a <= a`.
+#[ext(pure)]
 public fun le(a: UQ64_64, b: UQ64_64): bool {
     a.0 <= b.0
 }
 
 /// Less than. Returns `true` if and only if `a < b`.
+#[ext(pure)]
 public fun lt(a: UQ64_64, b: UQ64_64): bool {
     a.0 < b.0
 }
 
 /// Greater than or equal to. Returns `true` if and only if `a >= b`.
+#[ext(pure)]
 public fun ge(a: UQ64_64, b: UQ64_64): bool {
     a.0 >= b.0
 }
 
 /// Greater than. Returns `true` if and only if `a > b`.
+#[ext(pure)]
 public fun gt(a: UQ64_64, b: UQ64_64): bool {
     a.0 > b.0
 }
 
 /// Accessor for the raw u128 value. Can be paired with `from_raw` to perform less common operations
 /// on the raw values directly.
+#[ext(pure)]
 public fun to_raw(a: UQ64_64): u128 {
     a.0
 }
 
 /// Accessor for the raw u128 value. Can be paired with `to_raw` to perform less common operations
 /// on the raw values directly.
+#[ext(pure)]
 public fun from_raw(raw_value: u128): UQ64_64 {
     UQ64_64(raw_value)
 }

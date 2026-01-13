@@ -13,21 +13,25 @@ public fun bitwise_not(x: u128): u128 {
 }
 
 /// Return the larger of `x` and `y`
+#[ext(pure)]
 public fun max(x: u128, y: u128): u128 {
     std::macros::num_max!(x, y)
 }
 
 /// Return the smaller of `x` and `y`
+#[ext(pure)]
 public fun min(x: u128, y: u128): u128 {
     std::macros::num_min!(x, y)
 }
 
 /// Return the absolute value of x - y
+#[ext(pure)]
 public fun diff(x: u128, y: u128): u128 {
     std::macros::num_diff!(x, y)
 }
 
 /// Calculate x / y, but round up the result.
+#[ext(pure)]
 public fun divide_and_round_up(x: u128, y: u128): u128 {
     std::macros::num_divide_and_round_up!(x, y)
 }
@@ -67,21 +71,25 @@ public fun sqrt(x: u128): u128 {
 }
 
 /// Try to convert a `u128` to a `u8`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u8(x: u128): Option<u8> {
     std::macros::try_as_u8!(x)
 }
 
 /// Try to convert a `u128` to a `u16`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u16(x: u128): Option<u16> {
     std::macros::try_as_u16!(x)
 }
 
 /// Try to convert a `u128` to a `u32`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u32(x: u128): Option<u32> {
     std::macros::try_as_u32!(x)
 }
 
 /// Try to convert a `u128` to a `u64`. Returns `None` if the value is too large.
+#[ext(pure)]
 public fun try_as_u64(x: u128): Option<u64> {
     std::macros::try_as_u64!(x)
 }
