@@ -31,7 +31,6 @@ public fun diff(x: u128, y: u128): u128 {
 }
 
 /// Calculate x / y, but round up the result.
-#[ext(pure)]
 public fun divide_and_round_up(x: u128, y: u128): u128 {
     std::macros::num_divide_and_round_up!(x, y)
 }
