@@ -214,6 +214,7 @@ public fun delete(id: UID) {
 }
 
 /// Get the underlying `ID` of `obj`
+#[ext(pure)]
 public fun id<T: key>(obj: &T): ID {
     borrow_uid(obj).id
 }
