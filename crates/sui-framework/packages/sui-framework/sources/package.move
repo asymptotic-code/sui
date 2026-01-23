@@ -188,6 +188,7 @@ public fun published_package(self: &Publisher): &String {
 /// because there is already a pending upgrade in the transaction.
 /// Otherwise guaranteed to be the latest version of any given
 /// package.
+#[ext(pure)]
 public fun upgrade_package(cap: &UpgradeCap): ID {
     cap.package
 }
