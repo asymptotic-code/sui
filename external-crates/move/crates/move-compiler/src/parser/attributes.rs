@@ -483,6 +483,7 @@ fn parse_spec_parametized(
     let mut ignore_abort: bool = false;
     let mut boogie_opt: Option<String> = None;
     let mut timeout: Option<u64> = None;
+    let mut extra_bpl: Option<String> = None;
     let mut explicit_specs = vec![];
 
     let mut visited = BTreeSet::new();
@@ -615,13 +616,25 @@ fn parse_spec_parametized(
                         return vec![];
                     };
                     explicit_specs.push(access.clone());
+                } else if prop == KA::VerificationAttribute::EXTRA_BPL_NAME {
+                    let AttributeValue_::Value(sp!(_, P::Value_::ByteString(s))) = val.value else {
+                        let msg = format!(
+                            "Expected byte string for {} parameter '{}'",
+                            KA::VerificationAttribute::SPEC,
+                            prop
+                        );
+                        context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                        return vec![];
+                    };
+                    extra_bpl = Some(s.to_string());
                 } else {
                     let msg = format!(
-                        "Unknown {} assign parameter '{}'. Expected: {} or {}",
+                        "Unknown {} assign parameter '{}'. Expected: {}, {} or {}",
                         KA::VerificationAttribute::SPEC,
                         prop,
                         KA::VerificationAttribute::TARGET_NAME,
-                        KA::VerificationAttribute::SKIP_NAME
+                        KA::VerificationAttribute::SKIP_NAME,
+                        KA::VerificationAttribute::EXTRA_BPL_NAME,
                     );
                     context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
                     return vec![];
@@ -663,6 +676,7 @@ fn parse_spec_parametized(
             ignore_abort,
             boogie_opt,
             timeout,
+            extra_bpl,
             explicit_specs,
         },
     )]
@@ -685,6 +699,7 @@ fn parse_spec(context: &mut Context, attribute: ParsedAttribute) -> Vec<Attribut
                     target: None,
                     boogie_opt: None,
                     timeout: None,
+                    extra_bpl: None,
                     explicit_specs: vec![],
                 },
             )]
@@ -801,6 +816,7 @@ fn parse_spec_only_loop_inv(
         Attribute_::SpecOnly {
             axiom: false,
             inv_target: None,
+            extra_bpl: None,
             explicit_specs: vec![],
             loop_inv: Some(LoopInvariantInfo {
                 target: target.unwrap(),
@@ -818,6 +834,7 @@ fn parse_spec_only_parametized(
     let sp!(inner_loc, attrs) = inner_attrs;
 
     let mut inv_target = None;
+    let mut extra_bpl = None;
     let mut explicit_specs = vec![];
 
     for attr in attrs {
@@ -853,6 +870,7 @@ fn parse_spec_only_parametized(
                         axiom: true,
                         inv_target: None,
                         loop_inv: None,
+                        extra_bpl: None,
                         explicit_specs: vec![],
                     },
                 )];
@@ -861,6 +879,7 @@ fn parse_spec_only_parametized(
                 let allowed = [
                     KA::VerificationAttribute::INV_TARGET_NAME,
                     KA::VerificationAttribute::EXPLICIT_SPEC_NAME,
+                    KA::VerificationAttribute::EXTRA_BPL_NAME,
                 ];
                 if !allowed.contains(&kind.value.as_ref()) {
                     let msg = format!(
@@ -872,6 +891,21 @@ fn parse_spec_only_parametized(
                     let diag = diag!(Attributes::InvalidUsage, (*inner_loc, msg));
                     context.add_diag(diag);
                     return vec![];
+                }
+
+                if kind.value == KA::VerificationAttribute::EXTRA_BPL_NAME.into() {
+                    if let AttributeValue_::Value(sp!(_, P::Value_::ByteString(s))) = &val.value {
+                        extra_bpl = Some(s.to_string());
+                        continue;
+                    } else {
+                        let msg = format!(
+                            "Expected byte string for {} parameter '{}'",
+                            KA::VerificationAttribute::SPEC_ONLY,
+                            kind.value,
+                        );
+                        context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                        return vec![];
+                    }
                 }
 
                 let AttributeValue_::ModuleAccess(ref access) = val.value else {
@@ -931,6 +965,7 @@ fn parse_spec_only_parametized(
             axiom: false,
             inv_target,
             loop_inv: None,
+            extra_bpl,
             explicit_specs,
         },
     )];
@@ -947,6 +982,7 @@ fn parse_spec_only(context: &mut Context, attribute: ParsedAttribute) -> Vec<Att
                     axiom: false,
                     inv_target: None,
                     loop_inv: None,
+                    extra_bpl: None,
                     explicit_specs: vec![],
                 },
             )]
