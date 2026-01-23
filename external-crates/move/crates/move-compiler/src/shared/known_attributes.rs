@@ -195,12 +195,14 @@ pub enum VerificationAttribute {
         ignore_abort: bool,
         boogie_opt: Option<String>,
         timeout: Option<u64>,
+        extra_bpl: Option<String>,
         explicit_specs: Vec<ModuleAccess>,
         explicit_spec_modules: Vec<ModuleIdent>,
     },
     // Denotes a function is only used by specs, only included in compilation in verify mode
     SpecOnly {
         axiom: bool,
+        extra_bpl: Option<String>,
         inv_target: Option<ModuleAccess>,
         loop_inv: Option<LoopInvariantInfo>,
         explicit_specs: Vec<ModuleAccess>,
@@ -314,6 +316,7 @@ impl VerificationAttribute {
     pub const LOOP_INV_TARGET_NAME: &'static str = "target";
     pub const LOOP_INV_LABEL_NAME: &'static str = "label";
     pub const EXPLICIT_SPEC_NAME: &'static str = "include";
+    pub const EXTRA_BPL_NAME: &'static str = "extra_bpl";
     pub const AXIOM: &'static str = "axiom";
 
     pub const fn name(&self) -> &str {
@@ -965,6 +968,7 @@ impl AstDebug for VerificationAttribute {
                 ignore_abort,
                 boogie_opt,
                 timeout,
+                extra_bpl,
                 explicit_specs,
                 explicit_spec_modules,
             } => {
@@ -1011,6 +1015,12 @@ impl AstDebug for VerificationAttribute {
                     }
                     w.write(format!("ignore_abort = {}", ignore_abort));
                 }
+                if extra_bpl.is_some() {
+                    if !first {
+                        w.write(", ");
+                    }
+                    w.write(format!("extra_bpl = {}", extra_bpl.clone().unwrap()));
+                }
                 if boogie_opt.is_some() {
                     if !first {
                         w.write(", ");
@@ -1041,6 +1051,7 @@ impl AstDebug for VerificationAttribute {
             }
             VerificationAttribute::SpecOnly {
                 axiom,
+                extra_bpl,
                 inv_target,
                 loop_inv,
                 explicit_specs,
@@ -1062,6 +1073,12 @@ impl AstDebug for VerificationAttribute {
                         w.write(format!(
                             " inv_target={}",
                             inv_target,
+                        ));
+                    };
+                    if extra_bpl.is_some() {
+                        w.write(format!(
+                            " extra_bpl({})",
+                            extra_bpl.clone().unwrap(),
                         ));
                     };
                     if !explicit_specs.is_empty() {

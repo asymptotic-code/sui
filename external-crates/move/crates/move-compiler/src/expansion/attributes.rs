@@ -325,6 +325,7 @@ fn attribute(
             target,
             boogie_opt,
             timeout,
+            extra_bpl,
             explicit_specs,
         } => {
             let mut specs = vec![];
@@ -359,6 +360,7 @@ fn attribute(
                 no_opaque,
                 boogie_opt,
                 timeout,
+                extra_bpl,
                 target: target
                     .map(|t| {
                         context.name_access_chain_to_module_access(
@@ -376,6 +378,7 @@ fn attribute(
             axiom,
             inv_target,
             loop_inv,
+            extra_bpl,
             explicit_specs,
         } => {
             let mut specs = vec![];
@@ -404,6 +407,7 @@ fn attribute(
 
             KA::Verification(A::VerificationAttribute::SpecOnly {
                 axiom,
+                extra_bpl,
                 inv_target: inv_target
                     .map(|t: Spanned<P::NameAccessChain_>| {
                         context.name_access_chain_to_module_access(
