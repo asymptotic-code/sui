@@ -125,4 +125,6 @@ public macro fun do_eq<$R: drop>($stop: u128, $f: |u128| -> $R) {
 #[spec_only]
 public use fun std::integer::from_u128 as u128.to_int;
 #[spec_only]
+public use fun std::integer::signed_from_u128 as u128.to_signed_int;
+#[spec_only]
 public use fun std::real::from_u128 as u128.to_real;
