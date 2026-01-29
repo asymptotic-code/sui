@@ -327,6 +327,7 @@ fn attribute(
             timeout,
             extra_bpl,
             explicit_specs,
+            uninterpreted,
         } => {
             let mut specs = vec![];
             let mut spec_modules = vec![];
@@ -372,6 +373,14 @@ fn attribute(
                     .map(|result| result.access),
                 explicit_specs: specs,
                 explicit_spec_modules: spec_modules,
+                uninterpreted: uninterpreted.iter()
+                    .filter_map(|t|
+                        context.name_access_chain_to_module_access(
+                            crate::expansion::path_expander::Access::Term,
+                            t.clone(),
+                        ).map(|result| result.access)
+                    )
+                    .collect::<Vec<_>>()
             })
         },
         PA::SpecOnly {
