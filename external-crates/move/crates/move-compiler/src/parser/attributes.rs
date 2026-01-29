@@ -485,6 +485,7 @@ fn parse_spec_parametized(
     let mut timeout: Option<u64> = None;
     let mut extra_bpl: Option<String> = None;
     let mut explicit_specs = vec![];
+    let mut uninterpreted = vec![];
 
     let mut visited = BTreeSet::new();
 
@@ -529,7 +530,7 @@ fn parse_spec_parametized(
             ParsedAttribute_::Assigned(kind, val) => {
                 let prop = kind.value.to_string();
 
-                if prop != KA::VerificationAttribute::EXPLICIT_SPEC_NAME {
+                if prop != KA::VerificationAttribute::EXPLICIT_SPEC_NAME && prop != KA::VerificationAttribute::UNINTERPRETED_NAME {
                     // Explicit specs can appear multiple times
                     if !visited.insert(prop.clone()) {
                         let msg = format!(
@@ -616,6 +617,17 @@ fn parse_spec_parametized(
                         return vec![];
                     };
                     explicit_specs.push(access.clone());
+                } else if prop == KA::VerificationAttribute::UNINTERPRETED_NAME {
+                    let AttributeValue_::ModuleAccess(ref access) = val.value else {
+                        let msg = format!(
+                            "Expected module access for {} parameter '{}'",
+                            KA::VerificationAttribute::SPEC,
+                            prop
+                        );
+                        context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                        return vec![];
+                    };
+                    uninterpreted.push(access.clone());
                 } else if prop == KA::VerificationAttribute::EXTRA_BPL_NAME {
                     let AttributeValue_::Value(sp!(_, P::Value_::ByteString(s))) = val.value else {
                         let msg = format!(
@@ -678,6 +690,7 @@ fn parse_spec_parametized(
             timeout,
             extra_bpl,
             explicit_specs,
+            uninterpreted,
         },
     )]
 }
@@ -701,6 +714,7 @@ fn parse_spec(context: &mut Context, attribute: ParsedAttribute) -> Vec<Attribut
                     timeout: None,
                     extra_bpl: None,
                     explicit_specs: vec![],
+                    uninterpreted: vec![],
                 },
             )]
         }

@@ -245,6 +245,7 @@ pub enum Attribute_ {
         timeout: Option<u64>,
         extra_bpl: Option<String>,
         explicit_specs: Vec<NameAccessChain>,
+        uninterpreted: Vec<NameAccessChain>,
     },
     SpecOnly {
         axiom: bool,
@@ -1774,6 +1775,7 @@ impl AstDebug for Attribute_ {
                 timeout,
                 extra_bpl,
                 explicit_specs,
+                uninterpreted,
             } => {
                 w.write("spec(");
                 let mut first = true;
@@ -1835,6 +1837,12 @@ impl AstDebug for Attribute_ {
                         w.write(", ");
                     }
                     w.write(format!("extra_bpl = {}", extra_bpl.clone().unwrap()));
+                }
+                if !uninterpreted.is_empty() {
+                    if !first {
+                        w.write(", ");
+                    }
+                    w.write(format!("uninterpreted({})", uninterpreted.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
                 }
                 if !explicit_specs.is_empty() {
                     w.write(" explicit_specs(");

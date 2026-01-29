@@ -197,6 +197,7 @@ pub enum VerificationAttribute {
         extra_bpl: Option<String>,
         explicit_specs: Vec<ModuleAccess>,
         explicit_spec_modules: Vec<ModuleIdent>,
+        uninterpreted: Vec<ModuleAccess>,
     },
     // Denotes a function is only used by specs, only included in compilation in verify mode
     SpecOnly {
@@ -308,6 +309,7 @@ impl VerificationAttribute {
     pub const IGNORE_ABORT_NAME: &'static str = "ignore_abort";
     pub const BOOGIE_OPT_NAME: &'static str = "boogie_opt";
     pub const TIMEOUT_NAME: &'static str = "timeout";
+    pub const UNINTERPRETED_NAME: &'static str = "uninterpreted";
 
     // Spec only arguments
     pub const INV_TARGET_NAME: &'static str = "inv_target";
@@ -971,6 +973,7 @@ impl AstDebug for VerificationAttribute {
                 extra_bpl,
                 explicit_specs,
                 explicit_spec_modules,
+                uninterpreted,
             } => {
                 w.write("spec(");
                 let mut first = true;
@@ -1032,6 +1035,12 @@ impl AstDebug for VerificationAttribute {
                         w.write(", ");
                     }
                     w.write(format!("timeout({})", timeout.unwrap()));
+                }
+                if !uninterpreted.is_empty() {
+                    if !first {
+                        w.write(", ");
+                    }
+                    w.write(format!("uninterpreted({})", uninterpreted.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
                 }
                 if !explicit_specs.is_empty() {
                     w.write(" explicit_specs(");
