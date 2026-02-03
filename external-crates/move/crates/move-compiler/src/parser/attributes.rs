@@ -486,6 +486,7 @@ fn parse_spec_parametized(
     let mut extra_bpl: Option<String> = None;
     let mut explicit_specs = vec![];
     let mut uninterpreted = vec![];
+    let mut run_on: Option<String> = None;
 
     let mut visited = BTreeSet::new();
 
@@ -639,14 +640,26 @@ fn parse_spec_parametized(
                         return vec![];
                     };
                     extra_bpl = Some(s.to_string());
+                } else if prop == KA::VerificationAttribute::RUN_ON_NAME {
+                    let AttributeValue_::Value(sp!(_, P::Value_::ByteString(s))) = val.value else {
+                        let msg = format!(
+                            "Expected byte string for {} parameter '{}'",
+                            KA::VerificationAttribute::SPEC,
+                            prop
+                        );
+                        context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                        return vec![];
+                    };
+                    run_on = Some(s.to_string());
                 } else {
                     let msg = format!(
-                        "Unknown {} assign parameter '{}'. Expected: {}, {} or {}",
+                        "Unknown {} assign parameter '{}'. Expected: {}, {}, {} or {}",
                         KA::VerificationAttribute::SPEC,
                         prop,
                         KA::VerificationAttribute::TARGET_NAME,
                         KA::VerificationAttribute::SKIP_NAME,
                         KA::VerificationAttribute::EXTRA_BPL_NAME,
+                        KA::VerificationAttribute::RUN_ON_NAME,
                     );
                     context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
                     return vec![];
@@ -691,6 +704,7 @@ fn parse_spec_parametized(
             extra_bpl,
             explicit_specs,
             uninterpreted,
+            run_on,
         },
     )]
 }
@@ -715,6 +729,7 @@ fn parse_spec(context: &mut Context, attribute: ParsedAttribute) -> Vec<Attribut
                     extra_bpl: None,
                     explicit_specs: vec![],
                     uninterpreted: vec![],
+                    run_on: None,
                 },
             )]
         }
