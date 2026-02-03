@@ -328,6 +328,7 @@ fn attribute(
             extra_bpl,
             explicit_specs,
             uninterpreted,
+            run_on,
         } => {
             let mut specs = vec![];
             let mut spec_modules = vec![];
@@ -380,7 +381,8 @@ fn attribute(
                             t.clone(),
                         ).map(|result| result.access)
                     )
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>(),
+                run_on,
             })
         },
         PA::SpecOnly {
