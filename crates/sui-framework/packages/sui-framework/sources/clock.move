@@ -27,6 +27,7 @@ public struct Clock has key {
 
 /// The `clock`'s current timestamp as a running total of
 /// milliseconds since an arbitrary point in the past.
+#[ext(pure)]
 public fun timestamp_ms(clock: &Clock): u64 {
     clock.timestamp_ms
 }

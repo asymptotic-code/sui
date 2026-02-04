@@ -38,11 +38,13 @@ public struct Balance<phantom T> has store {
 }
 
 /// Get the amount stored in a `Balance`.
+#[ext(pure)]
 public fun value<T>(self: &Balance<T>): u64 {
     self.value
 }
 
 /// Get the `Supply` value.
+#[ext(pure)]
 public fun supply_value<T>(supply: &Supply<T>): u64 {
     supply.value
 }
@@ -68,6 +70,7 @@ public fun decrease_supply<T>(self: &mut Supply<T>, balance: Balance<T>): u64 {
 }
 
 /// Create a zero `Balance` for type `T`.
+#[ext(pure)]
 public fun zero<T>(): Balance<T> {
     Balance { value: 0 }
 }

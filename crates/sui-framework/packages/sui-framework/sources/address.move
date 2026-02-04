@@ -24,6 +24,7 @@ const EAddressParseError: u64 = 0;
 
 /// Convert `a` into a u256 by interpreting `a` as the bytes of a big-endian integer
 /// (e.g., `to_u256(0x1) == 1`)
+#[ext(pure)]
 public native fun to_u256(a: address): u256;
 
 /// Convert `n` into an address by encoding it as a big-endian integer (e.g., `from_u256(1) = @0x1`)
@@ -35,6 +36,7 @@ public native fun from_u256(n: u256): address;
 public native fun from_bytes(bytes: vector<u8>): address;
 
 /// Convert `a` into BCS-encoded bytes.
+#[ext(pure)]
 public fun to_bytes(a: address): vector<u8> {
     bcs::to_bytes(&a)
 }
@@ -76,11 +78,13 @@ fun hex_char_value(c: u8): u8 {
 }
 
 /// Length of a Sui address in bytes
+#[ext(pure)]
 public fun length(): u64 {
     LENGTH
 }
 
 /// Largest possible address
+#[ext(pure)]
 public fun max(): u256 {
     MAX
 }
