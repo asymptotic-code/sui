@@ -85,11 +85,13 @@ public struct UID has store {
 // === id ===
 
 /// Get the raw bytes of a `ID`
+#[ext(pure)]
 public fun id_to_bytes(id: &ID): vector<u8> {
     bcs::to_bytes(&id.bytes)
 }
 
 /// Get the inner bytes of `id` as an address.
+#[ext(pure)]
 public fun id_to_address(id: &ID): address {
     id.bytes
 }
@@ -100,6 +102,7 @@ public fun id_from_bytes(bytes: vector<u8>): ID {
 }
 
 /// Make an `ID` from an address.
+#[ext(pure)]
 public fun id_from_address(bytes: address): ID {
     ID { bytes }
 }
@@ -200,21 +203,25 @@ public(package) fun address_alias_state(): UID {
 }
 
 /// Get the inner `ID` of `uid`
+#[ext(pure)]
 public fun uid_as_inner(uid: &UID): &ID {
     &uid.id
 }
 
 /// Get the raw bytes of a `uid`'s inner `ID`
+#[ext(pure)]
 public fun uid_to_inner(uid: &UID): ID {
     uid.id
 }
 
 /// Get the raw bytes of a `UID`
+#[ext(pure)]
 public fun uid_to_bytes(uid: &UID): vector<u8> {
     bcs::to_bytes(&uid.id.bytes)
 }
 
 /// Get the inner bytes of `id` as an address.
+#[ext(pure)]
 public fun uid_to_address(uid: &UID): address {
     uid.id.bytes
 }
@@ -246,16 +253,19 @@ public fun id<T: key>(obj: &T): ID {
 }
 
 /// Borrow the underlying `ID` of `obj`
+#[ext(pure)]
 public fun borrow_id<T: key>(obj: &T): &ID {
     &borrow_uid(obj).id
 }
 
 /// Get the raw bytes for the underlying `ID` of `obj`
+#[ext(pure)]
 public fun id_bytes<T: key>(obj: &T): vector<u8> {
     bcs::to_bytes(&borrow_uid(obj).id)
 }
 
 /// Get the inner bytes for the underlying `ID` of `obj`
+#[ext(pure)]
 public fun id_address<T: key>(obj: &T): address {
     borrow_uid(obj).id.bytes
 }

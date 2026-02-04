@@ -31,27 +31,34 @@ public struct TxContext has drop {
 
 /// Return the address of the user that signed the current
 /// transaction
+#[ext(pure)]
 public fun sender(_self: &TxContext): address {
     native_sender()
 }
+#[ext(pure)]
 native fun native_sender(): address;
 
 /// Return the transaction digest (hash of transaction inputs).
 /// Please do not use as a source of randomness.
+#[ext(pure)]
 public fun digest(self: &TxContext): &vector<u8> {
     &self.tx_hash
 }
 
 /// Return the current epoch
+#[ext(pure)]
 public fun epoch(_self: &TxContext): u64 {
     native_epoch()
 }
+#[ext(pure)]
 native fun native_epoch(): u64;
 
 /// Return the epoch start time as a unix timestamp in milliseconds.
+#[ext(pure)]
 public fun epoch_timestamp_ms(_self: &TxContext): u64 {
     native_epoch_timestamp_ms()
 }
+#[ext(pure)]
 native fun native_epoch_timestamp_ms(): u64;
 
 /// Return the adress of the transaction sponsor or `None` if there was no sponsor.
@@ -69,16 +76,20 @@ native fun fresh_id(): address;
 
 /// Return the reference gas price in effect for the epoch the transaction
 /// is being executed in.
+#[ext(pure)]
 public fun reference_gas_price(_self: &TxContext): u64 {
     native_rgp()
 }
+#[ext(pure)]
 native fun native_rgp(): u64;
 
 /// Return the gas price submitted for the current transaction.
 /// That is the value the user submitted with the transaction data.
+#[ext(pure)]
 public fun gas_price(_self: &TxContext): u64 {
     native_gas_price()
 }
+#[ext(pure)]
 native fun native_gas_price(): u64;
 
 // ==== test-only functions ====

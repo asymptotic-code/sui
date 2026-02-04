@@ -95,6 +95,7 @@ public struct DenyCapV2<phantom T> has key, store {
 // === Supply <-> TreasuryCap morphing and accessors  ===
 
 /// Return the total number of `T`'s in circulation.
+#[ext(pure)]
 public fun total_supply<T>(cap: &TreasuryCap<T>): u64 {
     balance::supply_value(&cap.total_supply)
 }
@@ -110,6 +111,7 @@ public fun treasury_into_supply<T>(treasury: TreasuryCap<T>): Supply<T> {
 }
 
 /// Get immutable reference to the treasury's `Supply`.
+#[ext(pure)]
 public fun supply_immut<T>(treasury: &TreasuryCap<T>): &Supply<T> {
     &treasury.total_supply
 }
@@ -122,11 +124,13 @@ public fun supply_mut<T>(treasury: &mut TreasuryCap<T>): &mut Supply<T> {
 // === Balance <-> Coin accessors and type morphing ===
 
 /// Public getter for the coin's value
+#[ext(pure)]
 public fun value<T>(self: &Coin<T>): u64 {
     self.balance.value()
 }
 
 /// Get immutable reference to the balance of a coin.
+#[ext(pure)]
 public fun balance<T>(coin: &Coin<T>): &Balance<T> {
     &coin.balance
 }
@@ -480,22 +484,27 @@ public entry fun update_icon_url<T>(
 
 // === Get coin metadata fields for on-chain consumption ===
 
+#[ext(pure)]
 public fun get_decimals<T>(metadata: &CoinMetadata<T>): u8 {
     metadata.decimals
 }
 
+#[ext(pure)]
 public fun get_name<T>(metadata: &CoinMetadata<T>): string::String {
     metadata.name
 }
 
+#[ext(pure)]
 public fun get_symbol<T>(metadata: &CoinMetadata<T>): ascii::String {
     metadata.symbol
 }
 
+#[ext(pure)]
 public fun get_description<T>(metadata: &CoinMetadata<T>): string::String {
     metadata.description
 }
 
+#[ext(pure)]
 public fun get_icon_url<T>(metadata: &CoinMetadata<T>): Option<Url> {
     metadata.icon_url
 }
