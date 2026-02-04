@@ -13,6 +13,7 @@ public struct Url has copy, drop, store {
 }
 
 /// Create a `Url`, with no validation
+#[ext(pure)]
 public fun new_unsafe(url: String): Url {
     Url { url }
 }
@@ -25,6 +26,7 @@ public fun new_unsafe_from_bytes(bytes: vector<u8>): Url {
 }
 
 /// Get inner URL
+#[ext(pure)]
 public fun inner_url(self: &Url): String {
     self.url
 }
