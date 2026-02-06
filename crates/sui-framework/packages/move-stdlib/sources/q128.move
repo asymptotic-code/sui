@@ -148,7 +148,8 @@ public fun to_real(q: Q128): Real {
 
 #[spec_only]
 public macro fun is_zero($q: Q128): bool {
-    $q.val == std::integer::zero!()
+    let q = $q;
+    q.val == std::integer::zero!()
 }
 
 #[spec_only, ext(pure)]
