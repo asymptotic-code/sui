@@ -1,6 +1,3 @@
-// Copyright (c) Mysten Labs, Inc.
-// SPDX-License-Identifier: Apache-2.0
-
 /// Signed fixed-point type with 64 fractional bits.
 /// Internally stores an arbitrary-precision `Integer`; actual value = val / 2^64.
 module std::q64;
