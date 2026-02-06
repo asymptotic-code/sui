@@ -128,3 +128,9 @@ public use fun std::integer::from_u128 as u128.to_int;
 public use fun std::integer::signed_from_u128 as u128.to_signed_int;
 #[spec_only]
 public use fun std::real::from_u128 as u128.to_real;
+#[spec_only]
+public use fun std::q32::from_u128 as u128.to_q32;
+#[spec_only]
+public use fun std::q64::from_u128 as u128.to_q64;
+#[spec_only]
+public use fun std::q128::from_u128 as u128.to_q128;
