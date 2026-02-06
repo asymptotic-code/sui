@@ -163,6 +163,16 @@ public fun is_int(q: Q64): bool {
     q.val.mod(SCALE.to_int()) == 0u64.to_int()
 }
 
+#[spec_only, ext(pure)]
+public fun is_uq32_64(x: Q64): bool {
+    !x.is_neg() && x.lt(0x1_0000_0000u128.to_q64())
+}
+
+#[spec_only, ext(pure)]
+public fun is_uq64_64(x: Q64): bool {
+    !x.is_neg() && x.lt(0x1_0000_0000_0000_0000u128.to_q64())
+}
+
 // === Fixed-point conversions ===
 
 #[spec_only, ext(pure)]

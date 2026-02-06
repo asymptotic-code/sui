@@ -162,3 +162,13 @@ public fun is_neg(q: Q128): bool { q.val.is_neg() }
 public fun is_int(q: Q128): bool {
     q.val.mod(SCALE.to_int()) == 0u64.to_int()
 }
+
+#[spec_only, ext(pure)]
+public fun is_uq64_128(x: Q128): bool {
+    !x.is_neg() && x.lt(0x1_0000_0000_0000_0000u256.to_q128())
+}
+
+#[spec_only, ext(pure)]
+public fun is_uq128_128(x: Q128): bool {
+    !x.is_neg() && x.lt(0x1_0000_0000_0000_0000_0000_0000_0000_0000u256.to_q128())
+}
