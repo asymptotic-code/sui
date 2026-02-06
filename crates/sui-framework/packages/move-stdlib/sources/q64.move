@@ -164,3 +164,10 @@ public fun is_neg(q: Q64): bool { q.val.is_neg() }
 public fun is_int(q: Q64): bool {
     q.val.mod(SCALE.to_int()) == 0u64.to_int()
 }
+
+// === Fixed-point conversions ===
+
+#[spec_only, ext(pure)]
+public fun from_uq64_64(x: std::uq64_64::UQ64_64): Q64 {
+    Q64 { val: x.to_raw().to_int() }
+}

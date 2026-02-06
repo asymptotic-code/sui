@@ -164,3 +164,15 @@ public fun is_neg(q: Q32): bool { q.val.is_neg() }
 public fun is_int(q: Q32): bool {
     q.val.mod(SCALE.to_int()) == 0u64.to_int()
 }
+
+// === Fixed-point conversions ===
+
+#[spec_only, ext(pure)]
+public fun from_fp32(x: std::fixed_point32::FixedPoint32): Q32 {
+    Q32 { val: x.get_raw_value().to_int() }
+}
+
+#[spec_only, ext(pure)]
+public fun from_uq32_32(x: std::uq32_32::UQ32_32): Q32 {
+    Q32 { val: x.to_raw().to_int() }
+}
