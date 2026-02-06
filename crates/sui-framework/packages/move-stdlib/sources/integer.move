@@ -33,6 +33,13 @@ native public fun to_u256(x: Integer): u256;
 public use fun std::real::from_integer as Integer.to_real;
 
 #[spec_only]
+public use fun std::q32::from_integer as Integer.to_q32;
+#[spec_only]
+public use fun std::q64::from_integer as Integer.to_q64;
+#[spec_only]
+public use fun std::q128::from_integer as Integer.to_q128;
+
+#[spec_only]
 native public fun add(x: Integer, y: Integer): Integer;
 #[spec_only]
 native public fun sub(x: Integer, y: Integer): Integer;

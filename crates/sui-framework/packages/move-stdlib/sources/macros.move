@@ -234,3 +234,25 @@ public macro fun uq_int_div<$T, $U>(
     if (quotient > $max_t as $U) $abort_overflow;
     quotient as $T
 }
+
+// === Q fixed-point macro (spec-only, arbitrary-precision Integer) ===
+
+#[spec_only]
+public macro fun q_pow(
+    $a: std::integer::Integer,
+    $n: std::integer::Integer,
+    $scale: std::integer::Integer,
+): std::integer::Integer {
+    let a = $a;
+    let n = $n;
+    let scale = $scale;
+    let zero = std::integer::zero!();
+    let one = std::integer::one!();
+    if (n == zero) {
+        scale
+    } else if (n.is_pos()) {
+        a.pow(n).div(scale.pow(n.sub(one)))
+    } else {
+        scale.pow(n.abs().add(one)).div(a.pow(n.abs()))
+    }
+}
