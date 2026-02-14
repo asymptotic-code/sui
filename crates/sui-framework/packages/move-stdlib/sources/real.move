@@ -85,6 +85,16 @@ native public fun lte(x: Real, y: Real): bool;
 #[spec_only]
 native public fun gte(x: Real, y: Real): bool;
 
+#[spec_only, ext(pure)]
+public fun min(x: Real, y: Real): Real {
+    if (x.lt(y)) x else y
+}
+
+#[spec_only, ext(pure)]
+public fun max(x: Real, y: Real): Real {
+    if (x.gt(y)) x else y
+}
+
 #[spec_only]
 public use fun std::q32::from_real as Real.to_q32;
 #[spec_only]
