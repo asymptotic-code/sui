@@ -119,6 +119,16 @@ public fun lte(a: Q128, b: Q128): bool { a.val.lte(b.val) }
 #[spec_only, ext(pure)]
 public fun gte(a: Q128, b: Q128): bool { a.val.gte(b.val) }
 
+#[spec_only, ext(pure)]
+public fun min(a: Q128, b: Q128): Q128 {
+    if (a.lt(b)) a else b
+}
+
+#[spec_only, ext(pure)]
+public fun max(a: Q128, b: Q128): Q128 {
+    if (a.gt(b)) a else b
+}
+
 // === Rounding / Conversion ===
 
 #[spec_only, ext(pure)]

@@ -125,6 +125,16 @@ public fun abs(x: Integer): Integer {
 }
 
 #[spec_only, ext(pure)]
+public fun min(x: Integer, y: Integer): Integer {
+    if (x.lt(y)) x else y
+}
+
+#[spec_only, ext(pure)]
+public fun max(x: Integer, y: Integer): Integer {
+    if (x.gt(y)) x else y
+}
+
+#[spec_only, ext(pure)]
 public fun div_trunc(x: Integer, y: Integer): Integer {
     let result_abs = x.abs().div(y.abs());
     if (x.is_pos() && y.is_pos() || x.is_neg() && y.is_neg()) {
