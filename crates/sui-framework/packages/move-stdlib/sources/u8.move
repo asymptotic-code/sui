@@ -110,3 +110,7 @@ public use fun std::q32::from_u8 as u8.to_q32;
 public use fun std::q64::from_u8 as u8.to_q64;
 #[spec_only]
 public use fun std::q128::from_u8 as u8.to_q128;
+#[spec_only]
+public use fun std::q_wad::from_u8 as u8.to_q_wad;
+#[spec_only]
+public use fun std::q_ray::from_u8 as u8.to_q_ray;
