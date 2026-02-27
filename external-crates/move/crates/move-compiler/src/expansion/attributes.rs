@@ -429,16 +429,15 @@ fn attribute(
                     .flatten()
                     .map(|result| result.access),
                 loop_inv: if let Some(loop_inv) = loop_inv {
-                    Some(LoopInvariantInfo {
-                        target: context
-                            .name_access_chain_to_module_access(
-                                crate::expansion::path_expander::Access::Term,
-                                loop_inv.target,
-                            )
-                            .unwrap()
-                            .access,
-                        label: loop_inv.label,
-                    })
+                    context
+                        .name_access_chain_to_module_access(
+                            crate::expansion::path_expander::Access::Term,
+                            loop_inv.target,
+                        )
+                        .map(|result| LoopInvariantInfo {
+                            target: result.access,
+                            label: loop_inv.label,
+                        })
                 } else {
                     None
                 },
