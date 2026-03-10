@@ -243,7 +243,7 @@ pub enum Attribute_ {
         ignore_abort: bool,
         boogie_opt: Option<String>,
         timeout: Option<u64>,
-        extra_bpl: Option<String>,
+        extra_bpl: Vec<String>,
         explicit_specs: Vec<NameAccessChain>,
         uninterpreted: Vec<NameAccessChain>,
         run_on: Option<String>,
@@ -252,7 +252,7 @@ pub enum Attribute_ {
         axiom: bool,
         inv_target: Option<NameAccessChain>,
         loop_inv: Option<LoopInvariantInfo>,
-        extra_bpl: Option<String>,
+        extra_bpl: Vec<String>,
         explicit_specs: Vec<NameAccessChain>,
     },
 }
@@ -1854,11 +1854,11 @@ impl AstDebug for Attribute_ {
                     }
                     w.write(format!("timeout({})", timeout.clone().unwrap()));
                 }
-                if extra_bpl.is_some() {
+                if !extra_bpl.is_empty() {
                     if !first {
                         w.write(", ");
                     }
-                    w.write(format!("extra_bpl = {}", extra_bpl.clone().unwrap()));
+                    w.write(format!("extra_bpl({})", extra_bpl.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
                 }
                 if !uninterpreted.is_empty() {
                     if !first {
@@ -1906,8 +1906,8 @@ impl AstDebug for Attribute_ {
                             inv_target,
                         ));
                     };
-                    if extra_bpl.is_some() {
-                        w.write(format!(" extra_bpl = {}", extra_bpl.clone().unwrap()));
+                    if !extra_bpl.is_empty() {
+                        w.write(format!(" extra_bpl({})", extra_bpl.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
                     }
                     if !explicit_specs.is_empty() {
                         w.write(" explicit_specs(");

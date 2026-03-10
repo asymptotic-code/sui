@@ -195,7 +195,7 @@ pub enum VerificationAttribute {
         ignore_abort: bool,
         boogie_opt: Option<String>,
         timeout: Option<u64>,
-        extra_bpl: Option<String>,
+        extra_bpl: Vec<String>,
         explicit_specs: Vec<ModuleAccess>,
         explicit_spec_modules: Vec<ModuleIdent>,
         uninterpreted: Vec<ModuleAccess>,
@@ -204,7 +204,7 @@ pub enum VerificationAttribute {
     // Denotes a function is only used by specs, only included in compilation in verify mode
     SpecOnly {
         axiom: bool,
-        extra_bpl: Option<String>,
+        extra_bpl: Vec<String>,
         inv_target: Option<ModuleAccess>,
         loop_inv: Option<LoopInvariantInfo>,
         explicit_specs: Vec<ModuleAccess>,
@@ -1021,11 +1021,11 @@ impl AstDebug for VerificationAttribute {
                     }
                     w.write(format!("ignore_abort = {}", ignore_abort));
                 }
-                if extra_bpl.is_some() {
+                if !extra_bpl.is_empty() {
                     if !first {
                         w.write(", ");
                     }
-                    w.write(format!("extra_bpl = {}", extra_bpl.clone().unwrap()));
+                    w.write(format!("extra_bpl({})", extra_bpl.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
                 }
                 if boogie_opt.is_some() {
                     if !first {
@@ -1093,10 +1093,10 @@ impl AstDebug for VerificationAttribute {
                             inv_target,
                         ));
                     };
-                    if extra_bpl.is_some() {
+                    if !extra_bpl.is_empty() {
                         w.write(format!(
                             " extra_bpl({})",
-                            extra_bpl.clone().unwrap(),
+                            extra_bpl.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", "),
                         ));
                     };
                     if !explicit_specs.is_empty() {
