@@ -483,7 +483,7 @@ fn parse_spec_parametized(
     let mut ignore_abort: bool = false;
     let mut boogie_opt: Option<String> = None;
     let mut timeout: Option<u64> = None;
-    let mut extra_bpl: Option<String> = None;
+    let mut extra_bpl = vec![];
     let mut explicit_specs = vec![];
     let mut uninterpreted = vec![];
     let mut run_on: Option<String> = None;
@@ -531,7 +531,9 @@ fn parse_spec_parametized(
             ParsedAttribute_::Assigned(kind, val) => {
                 let prop = kind.value.to_string();
 
-                if prop != KA::VerificationAttribute::EXPLICIT_SPEC_NAME && prop != KA::VerificationAttribute::UNINTERPRETED_NAME {
+                if prop != KA::VerificationAttribute::EXPLICIT_SPEC_NAME && 
+                    prop != KA::VerificationAttribute::UNINTERPRETED_NAME && 
+                    prop != KA::VerificationAttribute::EXTRA_BPL_NAME {
                     // Explicit specs can appear multiple times
                     if !visited.insert(prop.clone()) {
                         let msg = format!(
@@ -639,7 +641,18 @@ fn parse_spec_parametized(
                         context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
                         return vec![];
                     };
-                    extra_bpl = Some(s.to_string());
+
+                    if extra_bpl.contains(&s.to_string()) {
+                        let msg = format!(
+                            "Duplicated value for {} parameter '{}'",
+                            KA::VerificationAttribute::SPEC,
+                            prop
+                        );
+                        context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                        return vec![];
+                    }
+
+                    extra_bpl.push(s.to_string());
                 } else if prop == KA::VerificationAttribute::RUN_ON_NAME {
                     let AttributeValue_::Value(sp!(_, P::Value_::ByteString(s))) = val.value else {
                         let msg = format!(
@@ -726,7 +739,7 @@ fn parse_spec(context: &mut Context, attribute: ParsedAttribute) -> Vec<Attribut
                     target: None,
                     boogie_opt: None,
                     timeout: None,
-                    extra_bpl: None,
+                    extra_bpl: vec![],
                     explicit_specs: vec![],
                     uninterpreted: vec![],
                     run_on: None,
@@ -845,7 +858,7 @@ fn parse_spec_only_loop_inv(
         Attribute_::SpecOnly {
             axiom: false,
             inv_target: None,
-            extra_bpl: None,
+            extra_bpl: vec![],
             explicit_specs: vec![],
             loop_inv: Some(LoopInvariantInfo {
                 target: target.unwrap(),
@@ -863,7 +876,7 @@ fn parse_spec_only_parametized(
     let sp!(inner_loc, attrs) = inner_attrs;
 
     let mut inv_target = None;
-    let mut extra_bpl = None;
+    let mut extra_bpl = vec![];
     let mut explicit_specs = vec![];
 
     for attr in attrs {
@@ -899,7 +912,7 @@ fn parse_spec_only_parametized(
                         axiom: true,
                         inv_target: None,
                         loop_inv: None,
-                        extra_bpl: None,
+                        extra_bpl: vec![],
                         explicit_specs: vec![],
                     },
                 )];
@@ -924,7 +937,16 @@ fn parse_spec_only_parametized(
 
                 if kind.value == KA::VerificationAttribute::EXTRA_BPL_NAME.into() {
                     if let AttributeValue_::Value(sp!(_, P::Value_::ByteString(s))) = &val.value {
-                        extra_bpl = Some(s.to_string());
+                        if extra_bpl.contains(&s.to_string()) {
+                            let msg = format!(
+                                "Duplicated value for {} parameter '{}'",
+                                KA::VerificationAttribute::SPEC_ONLY,
+                                kind.value,
+                            );
+                            context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                            return vec![];
+                        }
+                        extra_bpl.push(s.to_string());
                         continue;
                     } else {
                         let msg = format!(
@@ -1011,7 +1033,7 @@ fn parse_spec_only(context: &mut Context, attribute: ParsedAttribute) -> Vec<Att
                     axiom: false,
                     inv_target: None,
                     loop_inv: None,
-                    extra_bpl: None,
+                    extra_bpl: vec![],
                     explicit_specs: vec![],
                 },
             )]
