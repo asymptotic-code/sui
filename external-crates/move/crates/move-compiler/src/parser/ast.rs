@@ -246,6 +246,7 @@ pub enum Attribute_ {
         extra_bpl: Vec<String>,
         explicit_specs: Vec<NameAccessChain>,
         uninterpreted: Vec<NameAccessChain>,
+        interpreted: Vec<NameAccessChain>,
         run_on: Option<String>,
     },
     SpecOnly {
@@ -1777,6 +1778,7 @@ impl AstDebug for Attribute_ {
                 extra_bpl,
                 explicit_specs,
                 uninterpreted,
+                interpreted,
                 run_on,
             } => {
                 w.write("spec(");
@@ -1845,6 +1847,12 @@ impl AstDebug for Attribute_ {
                         w.write(", ");
                     }
                     w.write(format!("uninterpreted({})", uninterpreted.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
+                }
+                if !interpreted.is_empty() {
+                    if !first {
+                        w.write(", ");
+                    }
+                    w.write(format!("interpreted({})", interpreted.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
                 }
                 if run_on.is_some() {
                     if !first {

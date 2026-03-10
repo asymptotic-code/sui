@@ -328,6 +328,7 @@ fn attribute(
             extra_bpl,
             explicit_specs,
             uninterpreted,
+            interpreted,
             run_on,
         } => {
             let mut specs = vec![];
@@ -375,6 +376,14 @@ fn attribute(
                 explicit_specs: specs,
                 explicit_spec_modules: spec_modules,
                 uninterpreted: uninterpreted.iter()
+                    .filter_map(|t|
+                        context.name_access_chain_to_module_access(
+                            crate::expansion::path_expander::Access::Term,
+                            t.clone(),
+                        ).map(|result| result.access)
+                    )
+                    .collect::<Vec<_>>(),
+                interpreted: interpreted.iter()
                     .filter_map(|t|
                         context.name_access_chain_to_module_access(
                             crate::expansion::path_expander::Access::Term,
