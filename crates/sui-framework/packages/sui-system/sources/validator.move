@@ -995,3 +995,13 @@ public(package) fun new_for_testing(
 
     validator
 }
+
+// === specs utils ===
+
+#[spec_only]
+use sui_system::staking_pool::activation_epoch;
+
+#[spec_only]
+public fun pool_activation_epoch(self: &Validator): Option<u64> {
+    activation_epoch(&self.staking_pool)
+}

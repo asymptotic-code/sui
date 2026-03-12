@@ -1,0 +1,11 @@
+[package]
+name = "SuiSystemSpecs"
+version = "0.0.1"
+published-at = "0x31"
+edition = "2024.beta"
+
+[dependencies]
+SuiSystem = { local = "../sui-system" }
+
+[addresses]
+sui_system_specs = "0x31"

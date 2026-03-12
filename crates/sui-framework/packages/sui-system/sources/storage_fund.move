@@ -69,3 +69,10 @@ public fun total_object_storage_rebates(self: &StorageFund): u64 {
 public fun total_balance(self: &StorageFund): u64 {
     self.total_object_storage_rebates.value() + self.non_refundable_balance.value()
 }
+
+// === specs utils ===
+
+#[spec_only]
+public fun non_refundable_balance(self: &StorageFund): u64 {
+    self.non_refundable_balance.value()
+}
