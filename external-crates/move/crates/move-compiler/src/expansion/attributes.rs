@@ -251,7 +251,9 @@ fn attribute(
             let note = note.and_then(|symbol| match byte_string::decode(loc, symbol.as_ref()) {
                 Ok(v) => Some(v),
                 Err(e) => {
-                    context.add_diags(e);
+                    for diag in e.into_iter() {
+                        context.add_diag(diag.into_diagnostic());
+                    }
                     None
                 }
             });
@@ -306,7 +308,7 @@ fn attribute(
             location,
         } => {
             let failure =
-                expected_failure_attribute(context, &loc, failure_kind, minor_status, location)?;
+                expected_failure_attribute(context, &loc, *failure_kind, minor_status, location)?;
             KA::Testing(TestingAttribute::ExpectedFailure(Box::new(failure)))
         }
         PA::RandomTest => KA::Testing(A::TestingAttribute::RandTest),
@@ -392,11 +394,11 @@ fn ext_attribue(
 fn expected_failure_attribute(
     context: &mut Context,
     attr_loc: &Loc,
-    failure_kind: Box<P::ExpectedFailureKind>,
+    failure_kind: P::ExpectedFailureKind,
     minor_status: Option<P::AttributeValue>,
     location: Option<P::NameAccessChain>,
 ) -> Option<A::ExpectedFailure> {
-    let sp!(failure_loc, failure_kind) = *failure_kind;
+    let sp!(failure_loc, failure_kind) = failure_kind;
     match failure_kind {
         P::ExpectedFailureKind_::Empty => Some(A::ExpectedFailure::Expected),
         P::ExpectedFailureKind_::Name(name) => expected_failure_named(
@@ -642,7 +644,7 @@ fn attribute_value_to_minor_code(
         }
         P::AttributeValue_::ModuleAccess(chain) => {
             let chain_loc = chain.loc;
-            let crate::expansion::path_expander::ModuleAccessResult {
+            let crate::expansion::path_expander::AccessPath {
                 access,
                 ptys_opt,
                 is_macro,

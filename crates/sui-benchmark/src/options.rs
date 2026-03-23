@@ -43,11 +43,6 @@ pub struct Opts {
     pub primary_gas_owner_id: String,
     #[clap(long, default_value = "500", global = true)]
     pub gas_request_chunk_size: u64,
-    /// Whether to run local or remote benchmark
-    /// NOTE: For running remote benchmark we must have the following
-    /// genesis_blob_path, keypair_path and primary_gas_id
-    #[clap(long, action = clap::ArgAction::Set, default_value = "true", global = true)]
-    pub local: bool,
     /// Required in remote benchmark, namely when local = false
     /// Multiple fullnodes can be specified.
     #[clap(long, num_args(1..), value_delimiter = ',', global = true)]
@@ -59,10 +54,6 @@ pub struct Opts {
     /// use a LocalValidatorAggregatorProxy.
     #[clap(long, action = clap::ArgAction::Set, default_value = "false", global = true)]
     pub use_fullnode_for_execution: bool,
-    /// True to use FullNodeReconfigObserver,
-    /// Otherwise use EmbeddedReconfigObserver,
-    #[clap(long, action = clap::ArgAction::Set, default_value = "false", global = true)]
-    pub use_fullnode_for_reconfig: bool,
     /// Default workload is 100% transfer object
     #[clap(subcommand)]
     pub run_spec: RunSpec,
@@ -193,6 +184,13 @@ pub enum RunSpec {
         // relative weight of party transactions in the benchmark workload
         #[clap(long, num_args(1..), value_delimiter = ',', default_values_t = [0])]
         party: Vec<u32>,
+        // relative weight of conflicting transfer transactions in the benchmark workload
+        // DEPRECATED: use composite instead (not deleting yet to avoid breaking stress docker)
+        #[clap(long, num_args(1..), value_delimiter = ',', default_values_t = [0])]
+        conflicting_transfer: Vec<u32>,
+        // relative weight of composite transactions in the benchmark workload
+        #[clap(long, num_args(1..), value_delimiter = ',', default_values_t = [0])]
+        composite: Vec<u32>,
 
         // --- workload-specific options --- (TODO: use subcommands or similar)
         // 100 for max hotness i.e all requests target
@@ -226,6 +224,10 @@ pub enum RunSpec {
         // See `ExpectedFailureType` enum for `expected_failure_type`
         #[clap(long, num_args(1..), value_delimiter = ',', default_values_t = [0])]
         expected_failure_type: Vec<u32>,
+        // Number of contested objects for conflicting transfer workload.
+        // Each contested object will have PAYLOADS_PER_CONTESTED_OBJECT payloads contending for it.
+        #[clap(long, num_args(1..), value_delimiter = ',', default_values_t = [2])]
+        num_contested_objects: Vec<u64>,
 
         // --- generic options ---
         // Target qps

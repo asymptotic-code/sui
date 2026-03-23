@@ -1,23 +1,26 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{object_runtime::ObjectRuntime, NativesCostTable};
+use crate::{
+    NativesCostTable, abstract_size, get_extension, get_extension_mut,
+    object_runtime::ObjectRuntime,
+};
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::{
     account_address::AccountAddress, gas_algebra::InternalGas, language_storage::StructTag,
     runtime_value as R, vm_status::StatusCode,
 };
+use move_vm_runtime::execution::values::{Struct, Vector};
 use move_vm_runtime::native_charge_gas_early_exit;
-use move_vm_runtime::native_functions::NativeContext;
-use move_vm_types::{
-    loaded_data::runtime_types::Type,
-    natives::function::NativeResult,
+use move_vm_runtime::natives::functions::NativeContext;
+use move_vm_runtime::{
+    execution::{Type, values::Value},
+    natives::functions::NativeResult,
     pop_arg,
-    values::{Struct, Value, Vector},
 };
 use smallvec::smallvec;
 use std::collections::VecDeque;
-use sui_types::{base_types::MoveObjectType, TypeTag};
+use sui_types::{TypeTag, base_types::MoveObjectType};
 use tracing::{error, instrument};
 
 const E_BCS_SERIALIZATION_FAILURE: u64 = 2;
@@ -40,9 +43,7 @@ pub fn read_setting_impl(
     let ConfigReadSettingImplCostParams {
         config_read_setting_impl_cost_base,
         config_read_setting_impl_cost_per_byte,
-    } = context
-        .extensions_mut()
-        .get::<NativesCostTable>()?
+    } = get_extension!(context, NativesCostTable)?
         .config_read_setting_impl_cost_params
         .clone();
 
@@ -74,7 +75,7 @@ pub fn read_setting_impl(
             return Err(
                 PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                     .with_message("Sui verifier guarantees this is a struct".to_string()),
-            )
+            );
         }
     };
     let Some(field_setting_layout) = context.type_to_type_layout(&field_setting_ty)? else {
@@ -83,7 +84,7 @@ pub fn read_setting_impl(
             E_BCS_SERIALIZATION_FAILURE,
         ));
     };
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
 
     let read_value_opt = consistent_value_before_current_epoch(
         object_runtime,
@@ -97,9 +98,11 @@ pub fn read_setting_impl(
         current_epoch,
     )?;
 
+    let size = abstract_size(object_runtime.protocol_config, &read_value_opt)?;
+
     native_charge_gas_early_exit!(
         context,
-        config_read_setting_impl_cost_per_byte * u64::from(read_value_opt.legacy_size()).into()
+        config_read_setting_impl_cost_per_byte * u64::from(size).into()
     );
 
     Ok(NativeResult::ok(
@@ -147,8 +150,8 @@ fn consistent_value_before_current_epoch(
     let [newer_value_epoch, newer_value, older_value_opt]: [Value; 3] = unpack_struct(data)?;
     let newer_value_epoch: u64 = newer_value_epoch.value_as()?;
     debug_assert!(
-        unpack_option(newer_value.copy_value()?, value_ty)?.is_some()
-            || unpack_option(older_value_opt.copy_value()?, value_ty)?.is_some()
+        unpack_option(newer_value.copy_value(), value_ty)?.is_some()
+            || unpack_option(older_value_opt.copy_value(), value_ty)?.is_some()
     );
     Ok(if current_epoch > newer_value_epoch {
         newer_value
@@ -159,7 +162,7 @@ fn consistent_value_before_current_epoch(
 
 fn unpack_struct<const N: usize>(s: Value) -> PartialVMResult<[Value; N]> {
     let s: Struct = s.value_as()?;
-    s.unpack()?.collect::<Vec<_>>().try_into().map_err(|e| {
+    s.unpack().collect::<Vec<_>>().try_into().map_err(|e| {
         PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
             .with_message(format!("struct expected to have {N} fields: {e:?}"))
     })
@@ -168,7 +171,7 @@ fn unpack_struct<const N: usize>(s: Value) -> PartialVMResult<[Value; N]> {
 fn unpack_option(option: Value, type_param: &Type) -> PartialVMResult<Option<Value>> {
     let [vec_value]: [Value; 1] = unpack_struct(option)?;
     let vec: Vector = vec_value.value_as()?;
-    Ok(if vec.elem_len() == 0 {
+    Ok(if vec.elem_len()? == 0 {
         None
     } else {
         let [elem]: [Value; 1] = vec.unpack(type_param, 1)?.try_into().map_err(|e| {

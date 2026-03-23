@@ -10,12 +10,13 @@ use crate::{
         warning_filters::WarningFilters,
     },
     editions::FeatureGate,
-    expansion::ast::{AbilitySet, ModuleIdent, ModuleIdent_, Mutability, Visibility},
+    expansion::ast::{self as E, AbilitySet, ModuleIdent, ModuleIdent_, Mutability, Visibility},
     ice,
     naming::ast::{
-        self as N, BlockLabel, BuiltinTypeName_, Color, DatatypeTypeParameter, EnumDefinition,
-        IndexSyntaxMethods, ResolvedUseFuns, StructDefinition, TParam, TParamID, TVar, Type, Type_,
-        TypeName, TypeName_, UseFun, UseFunKind, Var,
+        self as N, ANYTHING_TYPE, BlockLabel, BuiltinTypeName_, Color, DatatypeTypeParameter,
+        EnumDefinition, IndexSyntaxMethods, ResolvedUseFuns, StructDefinition, TParam, TParamID,
+        TVar, Type, Type_, TypeInner as TI, TypeName, TypeName_, UNIT_TYPE, UNRESOLVED_ERROR_TYPE,
+        UseFun, UseFunKind, VOID_TYPE, Var,
     },
     parser::ast::{
         Ability_, ConstantName, DatatypeName, DocComment, ENTRY_MODIFIER, Field, FunctionName,
@@ -26,6 +27,7 @@ use crate::{
         known_attributes::{TestingAttribute, ModeAttribute},
         matching::{new_match_var_name, MatchContext},
         program_info::*,
+        stdlib_definitions::StdlibName,
         string_utils::{debug_print, format_oxford_list},
         unique_map::UniqueMap,
         *,
@@ -129,6 +131,10 @@ pub struct ModuleContext<'env> {
     /// collects all used module members (functions and constants) but it's a superset of these in
     /// that it may contain other identifiers that do not in fact represent a function or a constant
     pub used_module_members: BTreeMap<ModuleIdent_, BTreeSet<Symbol>>,
+
+    /// Standard Library Bindings for resolving built-ins
+    pub stdlib_functions: BTreeMap<StdlibName, (ModuleIdent, FunctionName)>,
+    pub stdlib_types: BTreeMap<StdlibName, Type>,
 }
 
 pub struct Context<'env, 'outer> {
@@ -201,7 +207,7 @@ pub fn global_use_funs(info: &NamingProgramInfo) -> ResolvedUseFuns {
                 debug_display!((tn, (global_use_funs.get(tn).unwrap()))),
                 debug_display!((tn, &public_methods))
             );
-            global_use_funs.insert(*tn, public_methods);
+            global_use_funs.insert(tn.clone(), public_methods);
         }
     }
     global_use_funs
@@ -240,7 +246,7 @@ impl FoundMethod<'_, '_> {
         match self {
             FoundMethod::Global(_) => (),
             FoundMethod::Outer(_, used) => {
-                used.insert((*tn, *method_name));
+                used.insert((tn.clone(), *method_name));
             }
             FoundMethod::Local(use_fun) => {
                 use_fun.used = true;
@@ -426,6 +432,8 @@ impl<'env> ModuleContext<'env> {
             new_friends: BTreeSet::new(),
             used_module_members: BTreeMap::new(),
             deprecations,
+            stdlib_functions: BTreeMap::new(),
+            stdlib_types: BTreeMap::new(),
         })
     }
 
@@ -455,6 +463,12 @@ impl<'env> ModuleContext<'env> {
 
     pub fn add_use_funs_scope(&mut self, new_scope: N::UseFuns) {
         add_use_funs_scope!(self, new_scope)
+    }
+
+    pub fn add_stdlib_definitions(&mut self, stdlib_definitions: N::StdlibDefinitions) {
+        let N::StdlibDefinitions { functions, types } = stdlib_definitions;
+        self.stdlib_functions = functions;
+        self.stdlib_types = types;
     }
 
     pub fn finish_use_funs_scope(
@@ -545,7 +559,7 @@ impl<'env> ModuleContext<'env> {
     }
 
     pub fn error_type(&self, loc: Loc) -> Type {
-        sp(loc, Type_::UnresolvedError)
+        sp(loc, UNRESOLVED_ERROR_TYPE.clone())
     }
 
     pub fn is_current_module(&self, m: &ModuleIdent) -> bool {
@@ -664,6 +678,49 @@ impl<'env> ModuleContext<'env> {
         };
         debug_print!(self.debug.autocomplete_resolution, (lines "fields" => &fields_info; dbg));
         fields_info
+    }
+
+    pub fn get_stdlib_string_info(
+        &self,
+    ) -> Vec<(
+        N::Type,
+        Option<(ModuleIdent, FunctionName)>,
+        fn(&E::Value_) -> Result<(), String>,
+    )> {
+        use stdlib_definitions as SD;
+        let mut possibles: Vec<(
+            N::Type,
+            Option<(ModuleIdent, FunctionName)>,
+            fn(&E::Value_) -> Result<(), String>,
+        )> = vec![];
+
+        let (ascii_string_ty, ascii_string_ctor, ascii_string_value_validator) = (
+            self.stdlib_types.get(&SD::ASCII_STRING_TYPE),
+            self.stdlib_functions.get(&SD::ASCII_STRING_CTOR),
+            SD::ASCII_STRING_VALIDATOR,
+        );
+        if let Some(ty) = ascii_string_ty {
+            possibles.push((
+                ty.clone(),
+                ascii_string_ctor.copied(),
+                ascii_string_value_validator,
+            ))
+        }
+
+        let (string_string_ty, string_string_ctor, string_string_value_validator) = (
+            self.stdlib_types.get(&SD::STRING_STRING_TYPE),
+            self.stdlib_functions.get(&SD::STRING_STRING_CTOR),
+            SD::STRING_STRING_VALIDATOR,
+        );
+        if let Some(ty) = string_string_ty {
+            possibles.push((
+                ty.clone(),
+                string_string_ctor.copied(),
+                string_string_value_validator,
+            ))
+        }
+
+        possibles
     }
 }
 
@@ -1091,7 +1148,8 @@ impl<'env, 'outer> Context<'env, 'outer> {
         })
     }
 
-    // pass in a location for a better error location
+    // If the block has no type, it is set to diverge.
+    // Location is provided fora  better error.
     pub fn named_block_type(&mut self, name: BlockLabel, loc: Loc) -> Type {
         if let Some(ty) = self.named_block_map.get(&name) {
             ty.clone()
@@ -1221,7 +1279,7 @@ impl MatchContext<false> for Context<'_, '_> {
         self.env()
     }
 
-    fn reporter(&self) -> &DiagnosticReporter {
+    fn reporter(&self) -> &DiagnosticReporter<'_> {
         &self.reporter
     }
 
@@ -1290,6 +1348,7 @@ pub struct Subst {
 // This will eventually hold constraints like `Void` and `String` as well
 pub enum VarConstraint {
     Num(Loc),
+    String(Loc),
     Divergent(Loc),
 }
 
@@ -1323,6 +1382,16 @@ impl Subst {
         tvar
     }
 
+    pub fn new_string_var(&mut self, counter: &mut TVarCounter, loc: Loc) -> TVar {
+        let tvar = counter.next();
+        assert!(
+            self.tvar_constraints
+                .insert(tvar, VarConstraint::String(loc))
+                .is_none()
+        );
+        tvar
+    }
+
     pub fn new_divergent_var(&mut self, counter: &mut TVarCounter, loc: Loc) -> TVar {
         let tvar = counter.next();
         assert!(
@@ -1339,10 +1408,31 @@ impl Subst {
         }
     }
 
+    pub fn is_value_constrainted_var(&self, tvar: &TVar) -> bool {
+        self.tvar_constraints
+            .get(tvar)
+            .map(|constraint| constraint.is_num_var() || constraint.is_string_var())
+            .unwrap_or(false)
+    }
+
     pub fn is_num_var(&self, tvar: &TVar) -> bool {
         self.tvar_constraints
             .get(tvar)
             .map(|constraint| constraint.is_num_var())
+            .unwrap_or(false)
+    }
+
+    pub fn is_string_var(&self, tvar: &TVar) -> bool {
+        self.tvar_constraints
+            .get(tvar)
+            .map(|constraint| constraint.is_string_var())
+            .unwrap_or(false)
+    }
+
+    pub fn is_divergent_var(&self, tvar: &TVar) -> bool {
+        self.tvar_constraints
+            .get(tvar)
+            .map(|constraint| constraint.is_divergent())
             .unwrap_or(false)
     }
 }
@@ -1352,10 +1442,27 @@ impl VarConstraint {
         matches!(self, VarConstraint::Num(_))
     }
 
+    pub fn is_string_var(&self) -> bool {
+        matches!(self, VarConstraint::String(_))
+    }
+
+    pub fn is_divergent(&self) -> bool {
+        matches!(self, VarConstraint::Divergent(_))
+    }
+
     pub fn loc(&self) -> Loc {
         match self {
             VarConstraint::Num(loc) => *loc,
+            VarConstraint::String(loc) => *loc,
             VarConstraint::Divergent(loc) => *loc,
+        }
+    }
+
+    pub fn kind(&self) -> String {
+        match self {
+            VarConstraint::Num(_) => "num".to_owned(),
+            VarConstraint::String(_) => "string".to_owned(),
+            VarConstraint::Divergent(_) => "divergent".to_owned(),
         }
     }
 }
@@ -1409,25 +1516,28 @@ fn error_format_impl(sp!(_, b_): &Type, subst: &Subst, nested: bool) -> String {
 }
 
 fn error_format_impl_(b_: &Type_, subst: &Subst, nested: bool) -> String {
-    use Type_::*;
-    let res = match b_ {
-        UnresolvedError | Anything | Void => "_".to_string(),
-        Unit => "()".to_string(),
-        Var(id) => {
+    let res = match b_.inner() {
+        TI::UnresolvedError | TI::Anything | TI::Void => "_".to_string(),
+        TI::Unit => "()".to_string(),
+        TI::Var(id) => {
             let last_id = forward_tvar(subst, *id);
             match subst.get(last_id) {
-                Some(sp!(_, Var(_))) => unreachable!(),
-                Some(t) => error_format_nested(t, subst),
+                Some(t) => {
+                    assert!(!t.value.is_var());
+                    error_format_nested(t, subst)
+                }
                 None if nested && subst.is_num_var(&last_id) => "{integer}".to_string(),
                 None if subst.is_num_var(&last_id) => return "integer".to_string(),
+                None if nested && subst.is_string_var(&last_id) => "{string}".to_string(),
+                None if subst.is_string_var(&last_id) => return "string".to_string(),
                 None => "_".to_string(),
             }
         }
-        Apply(_, sp!(_, TypeName_::Multiple(_)), tys) => {
+        TI::Apply(_, sp!(_, TypeName_::Multiple(_)), tys) => {
             let inner = format_comma(tys.iter().map(|s| error_format_nested(s, subst)));
             format!("({})", inner)
         }
-        Apply(_, n, tys) => {
+        TI::Apply(_, n, tys) => {
             let tys_str = if !tys.is_empty() {
                 format!(
                     "<{}>",
@@ -1438,15 +1548,15 @@ fn error_format_impl_(b_: &Type_, subst: &Subst, nested: bool) -> String {
             };
             format!("{}{}", n, tys_str)
         }
-        Fun(args, result) => {
+        TI::Fun(args, result) => {
             format!(
                 "|{}| -> {}",
                 format_comma(args.iter().map(|t| error_format_nested(t, subst))),
                 error_format_nested(result, subst)
             )
         }
-        Param(tp) => tp.user_specified_name.value.to_string(),
-        Ref(mut_, ty) => format!(
+        TI::Param(tp) => tp.user_specified_name.value.to_string(),
+        TI::Ref(mut_, ty) => format!(
             "&{}{}",
             if *mut_ { "mut " } else { "" },
             error_format_nested(ty, subst)
@@ -1462,56 +1572,79 @@ fn error_format_impl_(b_: &Type_, subst: &Subst, nested: bool) -> String {
 pub fn infer_abilities<const INFO_PASS: bool>(
     context: &ProgramInfo<INFO_PASS>,
     subst: &Subst,
-    ty: Type,
+    ty: &Type,
 ) -> AbilitySet {
-    use Type_ as T;
+    fn ty_arg_abilities<'ty, const INFO_PASS: bool>(
+        context: &ProgramInfo<INFO_PASS>,
+        subst: &Subst,
+        ty_args: impl IntoIterator<Item = &'ty Type>,
+    ) -> Vec<AbilitySet> {
+        ty_args
+            .into_iter()
+            .map(|ty| infer_abilities(context, subst, ty))
+            .collect::<Vec<_>>()
+    }
+
     let loc = ty.loc;
-    match unfold_type(subst, ty).value {
-        T::Unit => AbilitySet::collection(loc),
-        T::Ref(_, _) => AbilitySet::references(loc),
-        T::Var(_) => unreachable!("ICE unfold_type failed, which is impossible"),
-        T::UnresolvedError | T::Anything | T::Void => AbilitySet::all(loc),
-        T::Param(TParam { abilities, .. }) | T::Apply(Some(abilities), _, _) => abilities,
-        T::Apply(None, n, ty_args) => {
-            let (declared_abilities, ty_args) = match &n.value {
-                TypeName_::Multiple(_) => (AbilitySet::collection(loc), ty_args),
-                TypeName_::Builtin(b) => (b.value.declared_abilities(b.loc), ty_args),
-                TypeName_::ModuleType(m, n) => match context.datatype_kind(m, n) {
-                    DatatypeKind::Struct => {
-                        let declared_abilities = context.struct_declared_abilities(m, n).clone();
-                        let non_phantom_ty_args = ty_args
-                            .into_iter()
-                            .zip(context.struct_type_parameters(m, n))
-                            .filter(|(_, param)| !param.is_phantom)
-                            .map(|(arg, _)| arg)
-                            .collect::<Vec<_>>();
-                        (declared_abilities, non_phantom_ty_args)
+    match unfold_type(subst, ty).value.inner() {
+        TI::Unit => AbilitySet::collection(loc),
+        TI::Ref(_, _) => AbilitySet::references(loc),
+        TI::Var(_) => unreachable!("ICE unfold_type failed, which is impossible"),
+        TI::UnresolvedError | TI::Anything | TI::Void => AbilitySet::all(loc),
+        TI::Param(TParam { abilities, .. }) | TI::Apply(Some(abilities), _, _) => abilities.clone(),
+        TI::Apply(None, n, ty_args) => {
+            let (declared_abilities, ty_arg_abilities) = match &n.value {
+                TypeName_::Multiple(_) => (
+                    AbilitySet::collection(loc),
+                    ty_arg_abilities(context, subst, ty_args),
+                ),
+                TypeName_::Builtin(b) => (
+                    b.value.declared_abilities(b.loc),
+                    ty_arg_abilities(context, subst, ty_args),
+                ),
+                TypeName_::ModuleType(m, n) => {
+                    let m = &m;
+                    let n = &n;
+                    match context.datatype_kind(m, n) {
+                        DatatypeKind::Struct => {
+                            let declared_abilities =
+                                context.struct_declared_abilities(m, n).clone();
+                            let non_phantom_ty_args = ty_args
+                                .iter()
+                                .zip(context.struct_type_parameters(m, n))
+                                .filter(|(_, param)| !param.is_phantom)
+                                .map(|(arg, _)| arg)
+                                .collect::<Vec<_>>();
+                            (
+                                declared_abilities,
+                                ty_arg_abilities(context, subst, non_phantom_ty_args),
+                            )
+                        }
+                        DatatypeKind::Enum => {
+                            let declared_abilities = context.enum_declared_abilities(m, n).clone();
+                            let non_phantom_ty_args = ty_args
+                                .iter()
+                                .zip(context.enum_type_parameters(m, n))
+                                .filter(|(_, param)| !param.is_phantom)
+                                .map(|(arg, _)| arg)
+                                .collect::<Vec<_>>();
+                            (
+                                declared_abilities,
+                                ty_arg_abilities(context, subst, non_phantom_ty_args),
+                            )
+                        }
                     }
-                    DatatypeKind::Enum => {
-                        let declared_abilities = context.enum_declared_abilities(m, n).clone();
-                        let non_phantom_ty_args = ty_args
-                            .into_iter()
-                            .zip(context.enum_type_parameters(m, n))
-                            .filter(|(_, param)| !param.is_phantom)
-                            .map(|(arg, _)| arg)
-                            .collect::<Vec<_>>();
-                        (declared_abilities, non_phantom_ty_args)
-                    }
-                },
+                }
             };
-            let ty_args_abilities = ty_args
-                .into_iter()
-                .map(|ty| infer_abilities(context, subst, ty))
-                .collect::<Vec<_>>();
             AbilitySet::from_abilities(declared_abilities.into_iter().filter(|ab| {
                 let requirement = ab.value.requires();
-                ty_args_abilities
+                ty_arg_abilities
                     .iter()
                     .all(|ty_arg_abilities| ty_arg_abilities.has_ability_(requirement))
             }))
             .unwrap()
         }
-        T::Fun(_, _) => AbilitySet::functions(loc),
+        TI::Fun(_, _) => AbilitySet::functions(loc),
     }
 }
 
@@ -1520,11 +1653,10 @@ pub fn infer_abilities<const INFO_PASS: bool>(
 // - the set of declared abilities
 // - its type arguments
 fn debug_abilities_info(context: &mut Context, ty: &Type) -> (Option<Loc>, AbilitySet, Vec<Type>) {
-    use Type_ as T;
     let loc = ty.loc;
-    match &ty.value {
-        T::Unit | T::Ref(_, _) => (None, AbilitySet::references(loc), vec![]),
-        T::Var(_) => {
+    match &ty.value.inner() {
+        TI::Unit | TI::Ref(_, _) => (None, AbilitySet::references(loc), vec![]),
+        TI::Var(_) => {
             let diag = ice!((
                 loc,
                 "ICE did not call unfold_type before debug_abiliites_info"
@@ -1532,19 +1664,19 @@ fn debug_abilities_info(context: &mut Context, ty: &Type) -> (Option<Loc>, Abili
             context.add_diag(diag);
             (None, AbilitySet::all(loc), vec![])
         }
-        T::UnresolvedError | T::Anything | T::Void => (None, AbilitySet::all(loc), vec![]),
-        T::Param(TParam {
+        TI::UnresolvedError | TI::Anything | TI::Void => (None, AbilitySet::all(loc), vec![]),
+        TI::Param(TParam {
             abilities,
             user_specified_name,
             ..
         }) => (Some(user_specified_name.loc), abilities.clone(), vec![]),
-        T::Apply(_, sp!(_, TypeName_::Multiple(_)), ty_args) => {
+        TI::Apply(_, sp!(_, TypeName_::Multiple(_)), ty_args) => {
             (None, AbilitySet::collection(loc), ty_args.clone())
         }
-        T::Apply(_, sp!(_, TypeName_::Builtin(b)), ty_args) => {
+        TI::Apply(_, sp!(_, TypeName_::Builtin(b)), ty_args) => {
             (None, b.value.declared_abilities(b.loc), ty_args.clone())
         }
-        T::Apply(_, sp!(_, TypeName_::ModuleType(m, n)), ty_args) => {
+        TI::Apply(_, sp!(_, TypeName_::ModuleType(m, n)), ty_args) => {
             match context.datatype_kind(m, n) {
                 DatatypeKind::Struct => (
                     Some(context.struct_declared_loc(m, n)),
@@ -1558,7 +1690,7 @@ fn debug_abilities_info(context: &mut Context, ty: &Type) -> (Option<Loc>, Abili
                 ),
             }
         }
-        T::Fun(_, _) => (None, AbilitySet::functions(loc), vec![]),
+        TI::Fun(_, _) => (None, AbilitySet::functions(loc), vec![]),
     }
 }
 
@@ -1566,16 +1698,38 @@ pub fn make_divergent_tvar(context: &mut Context, loc: Loc) -> Type {
     let tvar = context
         .subst
         .new_divergent_var(&mut context.tvar_counter, loc);
-    sp(loc, Type_::Var(tvar))
+    sp(loc, TI::Var(tvar).into())
+}
+
+/// Indicates if a type diverges. Note error types are not divergent.
+pub fn is_type_divergent(subst: &Subst, ty: &Type) -> bool {
+    match ty.value.inner() {
+        TI::Anything | TI::Void => true,
+        TI::Var(tvar) => {
+            let last_tvar = forward_tvar(subst, *tvar);
+            subst.get(last_tvar).is_none() && subst.is_divergent_var(&last_tvar)
+        }
+        TI::UnresolvedError
+        | TI::Unit
+        | TI::Apply(_, _, _)
+        | TI::Param(_)
+        | TI::Ref(_, _)
+        | TI::Fun(_, _) => false,
+    }
 }
 
 pub fn make_num_tvar(context: &mut Context, loc: Loc) -> Type {
     let tvar = context.subst.new_num_var(&mut context.tvar_counter, loc);
-    sp(loc, Type_::Var(tvar))
+    sp(loc, TI::Var(tvar).into())
+}
+
+pub fn make_string_tvar(context: &mut Context, loc: Loc) -> Type {
+    let tvar = context.subst.new_string_var(&mut context.tvar_counter, loc);
+    sp(loc, TI::Var(tvar).into())
 }
 
 pub fn make_tvar(context: &mut Context, loc: Loc) -> Type {
-    sp(loc, Type_::Var(context.tvar_counter.next()))
+    sp(loc, TI::Var(context.tvar_counter.next()).into())
 }
 
 //**************************************************************************************************
@@ -1590,7 +1744,7 @@ pub fn make_struct_type(
     ty_args_opt: Option<Vec<Type>>,
 ) -> (Type, Vec<Type>) {
     context.emit_warning_if_deprecated(m, n.0, None);
-    let tn = sp(loc, TypeName_::ModuleType(*m, *n));
+    let tn = sp(loc, TypeName_::ModuleType((*m).into(), *n));
     let sdef = context.struct_definition(m, n);
     match ty_args_opt {
         None => {
@@ -1600,12 +1754,15 @@ pub fn make_struct_type(
                 .map(|tp| (loc, tp.param.abilities.clone()))
                 .collect();
             let ty_args = make_tparams(context, loc, TVarCase::Base, constraints);
-            (sp(loc, Type_::Apply(None, tn, ty_args.clone())), ty_args)
+            (
+                sp(loc, TI::Apply(None, tn, ty_args.clone()).into()),
+                ty_args,
+            )
         }
         Some(ty_args) => {
             let tapply_ = instantiate_apply(context, loc, None, tn, ty_args);
-            let targs = match &tapply_ {
-                Type_::Apply(_, _, targs) => targs.clone(),
+            let targs = match &tapply_.inner() {
+                TI::Apply(_, _, targs) => targs.clone(),
                 _ => unreachable!(),
             };
             (sp(loc, tapply_), targs)
@@ -1655,7 +1812,7 @@ pub fn make_struct_field_types(
             *positional,
             m.ref_map(|_, (idx, (_, field_ty))| {
                 let doc = DocComment::empty();
-                let ty = subst_tparams(tparam_subst, field_ty.clone());
+                let ty = subst_tparams(tparam_subst, field_ty);
                 (*idx, (doc, ty))
             }),
         ),
@@ -1685,7 +1842,7 @@ pub fn make_struct_field_type(
         }
         N::StructFields::Defined(_, m) => m,
     };
-    match fields_map.get(field).cloned() {
+    match fields_map.get(field) {
         None => {
             context.add_diag(diag!(
                 NameResolution::UnboundField,
@@ -1731,7 +1888,7 @@ pub fn make_enum_type(
     ty_args_opt: Option<Vec<Type>>,
 ) -> (Type, Vec<Type>) {
     context.emit_warning_if_deprecated(mident, enum_.0, None);
-    let tn = sp(loc, TypeName_::ModuleType(*mident, *enum_));
+    let tn = sp(loc, TypeName_::ModuleType((*mident).into(), *enum_));
     let edef = context.enum_definition(mident, enum_);
     match ty_args_opt {
         None => {
@@ -1741,12 +1898,15 @@ pub fn make_enum_type(
                 .map(|tp| (loc, tp.param.abilities.clone()))
                 .collect();
             let ty_args = make_tparams(context, loc, TVarCase::Base, constraints);
-            (sp(loc, Type_::Apply(None, tn, ty_args.clone())), ty_args)
+            (
+                sp(loc, TI::Apply(None, tn, ty_args.clone()).into()),
+                ty_args,
+            )
         }
         Some(ty_args) => {
             let tapply_ = instantiate_apply(context, loc, None, tn, ty_args);
-            let targs = match &tapply_ {
-                Type_::Apply(_, _, targs) => targs.clone(),
+            let targs = match &tapply_.inner() {
+                TI::Apply(_, _, targs) => targs.clone(),
                 _ => panic!("ICE instantiate_apply returned non Apply"),
             };
             (sp(loc, tapply_), targs)
@@ -1775,7 +1935,7 @@ pub fn make_variant_field_types(
             *is_positional,
             m.ref_map(|_, (idx, (_, field_ty))| {
                 let doc = DocComment::empty();
-                let ty = subst_tparams(tparam_subst, field_ty.clone());
+                let ty = subst_tparams(tparam_subst, field_ty);
                 (*idx, (doc, ty))
             }),
         ),
@@ -1845,7 +2005,7 @@ pub fn make_method_call_type(
                 return None;
             }
             TypeName_::Builtin(sp!(_, bt_)) => context.env().primitive_definer(*bt_),
-            TypeName_::ModuleType(m, _) => Some(m),
+            TypeName_::ModuleType(m, _) => Some(&**m),
         };
         let finfo_opt = defining_module.and_then(|m| {
             let finfo = context
@@ -1995,9 +2155,9 @@ pub fn make_function_type_no_visibility_check(
         .signature
         .parameters
         .iter()
-        .map(|(_, n, t)| (*n, subst_tparams(tparam_subst, t.clone())))
+        .map(|(_, n, t)| (*n, subst_tparams(tparam_subst, t)))
         .collect();
-    let return_ty = subst_tparams(tparam_subst, finfo.signature.return_type.clone());
+    let return_ty = subst_tparams(tparam_subst, &finfo.signature.return_type);
 
     let defined_loc = finfo.defined_loc;
     ResolvedFunctionType {
@@ -2156,22 +2316,22 @@ fn report_visibility_error_(
         (call_loc, call_msg),
         (vis_loc, vis_msg),
     );
-    if context.env().test_mode() {
-        if let Some(case) = public_for_testing {
-            let (test_loc, test_msg) = match case {
-                PublicForTesting::Entry(entry_loc) => {
-                    let entry_msg = format!(
-                        "'{}' functions can be called in tests, \
+    if context.env().test_mode()
+        && let Some(case) = public_for_testing
+    {
+        let (test_loc, test_msg) = match case {
+            PublicForTesting::Entry(entry_loc) => {
+                let entry_msg = format!(
+                    "'{}' functions can be called in tests, \
                     but only from testing contexts, e.g. '#[{}]' or '#[{}]'",
-                        ENTRY_MODIFIER,
-                        TestingAttribute::TEST,
-                        ModeAttribute::TEST_ONLY,
-                    );
-                    (entry_loc, entry_msg)
-                }
-            };
-            diag.add_secondary_label((test_loc, test_msg))
-        }
+                    ENTRY_MODIFIER,
+                    TestingAttribute::TEST,
+                    ModeAttribute::TEST_ONLY,
+                );
+                (entry_loc, entry_msg)
+            }
+        };
+        diag.add_secondary_label((test_loc, test_msg))
     }
     if let Some(names) = context.expanding_macros_names() {
         let macro_s = if context.macro_expansion.len() > 1 {
@@ -2243,35 +2403,7 @@ pub fn check_call_arity<S: std::fmt::Display, F: Fn() -> S>(
 pub fn solve_constraints(context: &mut Context) {
     use BuiltinTypeName_ as BT;
 
-    let var_constraints = context.subst.tvar_constraints.clone();
-    let mut subst = std::mem::replace(&mut context.subst, Subst::empty());
-
-    for (var, constraint) in var_constraints.into_iter() {
-        match constraint {
-            VarConstraint::Num(loc) => {
-                let tvar = sp(loc, Type_::Var(var));
-                match unfold_type(&subst, tvar.clone()).value {
-                    Type_::UnresolvedError | Type_::Anything => {
-                        let next_subst =
-                            join(&mut context.tvar_counter, subst, &Type_::u64(loc), &tvar)
-                                .unwrap()
-                                .0;
-                        subst = next_subst;
-                    }
-                    _ => (),
-                }
-            }
-            VarConstraint::Divergent(loc) => {
-                let last_tvar = forward_tvar(&subst, var);
-                if subst.get(last_tvar).is_none() {
-                    join_bind_tvar(&mut subst, loc, last_tvar, sp(loc, Type_::Void))
-                        .expect("ICE failed handling unbound divergent type");
-                }
-            }
-        }
-    }
-
-    context.subst = subst;
+    // Solve these constraints first to minimize error reporting.
 
     let constraints = std::mem::take(&mut context.constraints);
     for constraint in constraints {
@@ -2283,13 +2415,13 @@ pub fn solve_constraints(context: &mut Context) {
                 constraints,
             } => solve_ability_constraint(context, loc, msg, ty, constraints),
             Constraint::NumericConstraint(loc, op, t) => {
-                solve_builtin_type_constraint(context, BT::numeric(), loc, op, t)
+                solve_builtin_type_constraint(context, BT::numeric(), loc, op, &t)
             }
             Constraint::BitsConstraint(loc, op, t) => {
-                solve_builtin_type_constraint(context, BT::bits(), loc, op, t)
+                solve_builtin_type_constraint(context, BT::bits(), loc, op, &t)
             }
             Constraint::OrderedConstraint(loc, op, t) => {
-                solve_builtin_type_constraint(context, BT::ordered(), loc, op, t)
+                solve_builtin_type_constraint(context, BT::ordered(), loc, op, &t)
             }
             Constraint::BaseTypeConstraint(loc, msg, t) => {
                 solve_base_type_constraint(context, loc, msg, &t)
@@ -2299,6 +2431,71 @@ pub fn solve_constraints(context: &mut Context) {
             }
         }
     }
+
+    let var_constraints = context.subst.tvar_constraints.clone();
+    let mut subst = std::mem::replace(&mut context.subst, Subst::empty());
+
+    for (var, constraint) in var_constraints.into_iter() {
+        match constraint {
+            VarConstraint::Num(loc) => {
+                let tvar = sp(loc, TI::Var(var).into());
+                let unfolded_ty_ = unfold_type(&subst, &tvar).value;
+                let ti = unfolded_ty_.inner();
+                // Check if we never resolved the type, and emit a warning
+                if matches!(ti, TI::Anything) {
+                    let msg = "Could not determine a concrete type for this numeric \
+                                       literal, so defaulting to 'u64'";
+                    let mut diag = diag!(TypeSafety::MissingLiteralType, (loc, msg));
+                    diag.add_note(
+                        "To avoid this warning, add an explicit type annotation, \
+                                           e.g., '<num>u64'",
+                    );
+                    context.add_diag(diag);
+                }
+                // If type is still unresolved, default to u64
+                if matches!(ti, TI::UnresolvedError | TI::Anything) {
+                    let next_subst =
+                        join(&mut context.tvar_counter, subst, &Type_::u64(loc), &tvar)
+                            .unwrap()
+                            .0;
+                    subst = next_subst;
+                }
+            }
+            VarConstraint::String(loc) => {
+                let tvar = sp(loc, TI::Var(var).into());
+                let unfolded_ty_ = unfold_type(&subst, &tvar).value;
+                let ti = unfolded_ty_.inner();
+                // Check if we never resolved the type, and emit a warning
+                if matches!(ti, TI::Anything) {
+                    let msg = "Could not determine a concrete type for this string \
+                                       literal, so defaulting to 'vector<u8>'";
+                    let mut diag = diag!(TypeSafety::MissingLiteralType, (loc, msg));
+                    diag.add_note(
+                        "To avoid this warning, add an explicit annotation, \
+                                       e.g., 'b\"<const>\"'",
+                    );
+                    context.add_diag(diag);
+                }
+                // If type is still unresolved, default to vector<u8>
+                if matches!(ti, TI::UnresolvedError | TI::Anything) {
+                    let ty = Type_::vector(loc, Type_::u8(loc));
+                    let next_subst = join(&mut context.tvar_counter, subst, &ty, &tvar)
+                        .unwrap()
+                        .0;
+                    subst = next_subst;
+                }
+            }
+            VarConstraint::Divergent(loc) => {
+                let last_tvar = forward_tvar(&subst, var);
+                if subst.get(last_tvar).is_none() {
+                    join_bind_tvar(&mut subst, loc, last_tvar, sp(loc, VOID_TYPE.clone()))
+                        .expect("ICE failed handling unbound divergent type");
+                }
+            }
+        }
+    }
+
+    context.subst = subst;
 }
 
 fn solve_ability_constraint(
@@ -2308,8 +2505,8 @@ fn solve_ability_constraint(
     ty: Type,
     constraints: AbilitySet,
 ) {
-    let ty = unfold_type(&context.subst, ty);
-    let ty_abilities = infer_abilities(context.info(), &context.subst, ty.clone());
+    let ty = unfold_type(&context.subst, &ty);
+    let ty_abilities = infer_abilities(context.info(), &context.subst, &ty);
 
     let (declared_loc_opt, declared_abilities, ty_args) = debug_abilities_info(context, &ty);
     for constraint in constraints {
@@ -2330,7 +2527,7 @@ fn solve_ability_constraint(
             declared_loc_opt,
             &declared_abilities,
             ty_args.iter().map(|ty_arg| {
-                let abilities = infer_abilities(context.info(), &context.subst, ty_arg.clone());
+                let abilities = infer_abilities(context.info(), &context.subst, ty_arg);
                 (ty_arg, abilities)
             }),
         );
@@ -2405,9 +2602,8 @@ fn solve_builtin_type_constraint(
     builtin_set: &BTreeSet<BuiltinTypeName_>,
     loc: Loc,
     op: &'static str,
-    ty: Type,
+    ty: &Type,
 ) {
-    use Type_::*;
     use TypeName_::*;
     let t = unfold_type(&context.subst, ty);
     let tloc = t.loc;
@@ -2426,14 +2622,14 @@ fn solve_builtin_type_constraint(
             set_msg
         )
     };
-    match &t.value {
+    match &t.value.inner() {
         // already failed, ignore
-        UnresolvedError => (),
+        TI::UnresolvedError => (),
         // Will fail later in compiling, either through dead code, or unknown type variable
-        Anything => (),
+        TI::Anything => (),
         // Will never arrive here, so it does not matter
-        Void => (),
-        Apply(abilities_opt, sp!(_, Builtin(sp!(_, b))), args) if builtin_set.contains(b) => {
+        TI::Void => (),
+        TI::Apply(abilities_opt, sp!(_, Builtin(sp!(_, b))), args) if builtin_set.contains(b) => {
             if let Some(abilities) = abilities_opt {
                 assert!(
                     abilities.has_ability_(Ability_::Drop),
@@ -2454,12 +2650,11 @@ fn solve_builtin_type_constraint(
 }
 
 fn solve_base_type_constraint(context: &mut Context, loc: Loc, msg: String, ty: &Type) {
-    use Type_::*;
     use TypeName_::*;
-    let sp!(tyloc, unfolded_) = unfold_type(&context.subst, ty.clone());
-    match unfolded_ {
-        Var(_) => unreachable!(),
-        Unit | Ref(_, _) | Apply(_, sp!(_, Multiple(_)), _) => {
+    let sp!(tyloc, unfolded_) = unfold_type(&context.subst, ty);
+    match unfolded_.inner() {
+        TI::Var(_) => unreachable!(),
+        TI::Unit | TI::Ref(_, _) | TI::Apply(_, sp!(_, Multiple(_)), _) => {
             let tystr = error_format(ty, &context.subst);
             let tmsg = format!("Expected a single non-reference type, but found: {}", tystr);
             context.add_diag(diag!(
@@ -2468,17 +2663,21 @@ fn solve_base_type_constraint(context: &mut Context, loc: Loc, msg: String, ty: 
                 (tyloc, tmsg)
             ))
         }
-        UnresolvedError | Anything | Void | Param(_) | Apply(_, _, _) | Fun(_, _) => (),
+        TI::UnresolvedError
+        | TI::Anything
+        | TI::Void
+        | TI::Param(_)
+        | TI::Apply(_, _, _)
+        | TI::Fun(_, _) => (),
     }
 }
 
 fn solve_single_type_constraint(context: &mut Context, loc: Loc, msg: String, ty: &Type) {
-    use Type_::*;
     use TypeName_::*;
-    let sp!(tyloc, unfolded_) = unfold_type(&context.subst, ty.clone());
-    match unfolded_ {
-        Var(_) => unreachable!(),
-        Unit | Apply(_, sp!(_, Multiple(_)), _) => {
+    let sp!(tyloc, unfolded_) = unfold_type(&context.subst, ty);
+    match unfolded_.inner() {
+        TI::Var(_) => unreachable!(),
+        TI::Unit | TI::Apply(_, sp!(_, Multiple(_)), _) => {
             let tmsg = format!(
                 "Expected a single type, but found expression list type: {}",
                 error_format(ty, &context.subst)
@@ -2489,7 +2688,13 @@ fn solve_single_type_constraint(context: &mut Context, loc: Loc, msg: String, ty
                 (tyloc, tmsg)
             ))
         }
-        UnresolvedError | Anything | Void | Ref(_, _) | Param(_) | Apply(_, _, _) | Fun(_, _) => (),
+        TI::UnresolvedError
+        | TI::Anything
+        | TI::Void
+        | TI::Ref(_, _)
+        | TI::Param(_)
+        | TI::Apply(_, _, _)
+        | TI::Fun(_, _) => (),
     }
 }
 
@@ -2497,41 +2702,45 @@ fn solve_single_type_constraint(context: &mut Context, loc: Loc, msg: String, ty
 // Subst
 //**************************************************************************************************
 
-pub fn unfold_type(subst: &Subst, sp!(loc, t_): Type) -> Type {
-    match t_ {
-        Type_::Var(i) => {
-            let last_tvar = forward_tvar(subst, i);
-            match subst.get(last_tvar) {
-                Some(sp!(_, Type_::Var(_))) => unreachable!(),
-                None => sp(loc, Type_::Anything),
-                Some(inner) => inner.clone(),
+pub fn unfold_type(subst: &Subst, ty @ sp!(loc, t_): &Type) -> Type {
+    match t_.inner() {
+        TI::Var(i) => {
+            let last_tvar = forward_tvar(subst, *i);
+            if let Some(ty) = subst.get(last_tvar) {
+                assert!(!ty.value.is_var());
+                ty.clone()
+            } else {
+                sp(*loc, ANYTHING_TYPE.clone())
             }
         }
-        x => sp(loc, x),
+        _ => ty.clone(),
     }
 }
 
-pub fn unfold_type_recur(subst: &Subst, sp!(_loc, t_): &mut Type) {
-    use Type_ as T;
-    match t_ {
-        T::Var(i) => {
+/// Like unfold_type, but recursiveuly unfolds the whole type.
+/// This is an expensive operation that should only be used for IDE reporting.
+pub fn unfold_type_recur(subst: &Subst, ty @ sp!(loc, t_): &Type) -> Type {
+    match t_.inner() {
+        TI::Var(i) => {
             let last_tvar = forward_tvar(subst, *i);
-            match subst.get(last_tvar) {
-                Some(sp!(_, T::Var(_))) => unreachable!(),
-                None => {
-                    *t_ = T::Anything;
-                }
-                Some(inner) => {
-                    *t_ = inner.value.clone();
-                }
-            }
+            let t_ = if let Some(ty) = subst.get(last_tvar) {
+                assert!(!ty.value.is_var());
+                ty.value.clone()
+            } else {
+                ANYTHING_TYPE.clone()
+            };
+            sp(*loc, t_)
         }
-        T::Unit | T::Param(_) | T::Anything | T::Void | T::UnresolvedError => (),
-        T::Ref(_, inner) => unfold_type_recur(subst, inner),
-        T::Apply(_, _, args) => args.iter_mut().for_each(|ty| unfold_type_recur(subst, ty)),
-        T::Fun(args, ret) => {
-            args.iter_mut().for_each(|ty| unfold_type_recur(subst, ty));
-            unfold_type_recur(subst, ret);
+        TI::Unit | TI::Param(_) | TI::Anything | TI::Void | TI::UnresolvedError => ty.clone(),
+        TI::Ref(mut_, inner) => sp(*loc, TI::Ref(*mut_, unfold_type_recur(subst, inner)).into()),
+        TI::Apply(ab_opt, tn, args) => {
+            let args = args.iter().map(|ty| unfold_type_recur(subst, ty)).collect();
+            sp(*loc, TI::Apply(ab_opt.clone(), tn.clone(), args).into())
+        }
+        TI::Fun(args, ret) => {
+            let args = args.iter().map(|ty| unfold_type_recur(subst, ty)).collect();
+            let ret = unfold_type_recur(subst, ret);
+            sp(*loc, TI::Fun(args, ret).into())
         }
     }
 }
@@ -2540,13 +2749,14 @@ pub fn unfold_type_recur(subst: &Subst, sp!(_loc, t_): &mut Type) {
 // The hope is to point to the last loc in a chain of type var's, giving the loc closest to the
 // actual type in the source code
 pub fn best_loc(subst: &Subst, sp!(loc, t_): &Type) -> Loc {
-    match t_ {
-        Type_::Var(i) => {
+    match t_.inner() {
+        TI::Var(i) => {
             let last_tvar = forward_tvar(subst, *i);
-            match subst.get(last_tvar) {
-                Some(sp!(_, Type_::Var(_))) => unreachable!(),
-                None => *loc,
-                Some(sp!(inner_loc, _)) => *inner_loc,
+            if let Some(sp!(inner_loc, ty_)) = subst.get(last_tvar) {
+                assert!(!ty_.is_var());
+                *inner_loc
+            } else {
+                *loc
             }
         }
         _ => *loc,
@@ -2571,47 +2781,46 @@ where
     subst
 }
 
-pub fn subst_tparams(subst: &TParamSubst, sp!(loc, t_): Type) -> Type {
-    use Type_::*;
-    match t_ {
-        x @ (Unit | UnresolvedError | Anything | Void) => sp(loc, x),
-        Var(_) => panic!("ICE tvar in subst_tparams"),
-        Ref(mut_, t) => sp(loc, Ref(mut_, Box::new(subst_tparams(subst, *t)))),
-        Param(tp) => subst
+pub fn subst_tparams(subst: &TParamSubst, ty @ sp!(loc, t_): &Type) -> Type {
+    if !has_tparams(ty) {
+        return ty.clone();
+    }
+
+    match t_.inner() {
+        TI::Unit | TI::UnresolvedError | TI::Anything | TI::Void => ty.clone(),
+        TI::Var(_) => panic!("ICE tvar in subst_tparams"),
+        TI::Ref(mut_, t) => sp(*loc, TI::Ref(*mut_, subst_tparams(subst, t)).into()),
+        TI::Param(tp) => subst
             .get(&tp.id)
             .expect("ICE unmapped tparam in subst_tparams_base")
             .clone(),
-        Apply(k, n, ty_args) => {
-            let ftys = ty_args
-                .into_iter()
-                .map(|t| subst_tparams(subst, t))
-                .collect();
-            sp(loc, Apply(k, n, ftys))
+        TI::Apply(k, n, ty_args) => {
+            let ftys = ty_args.iter().map(|t| subst_tparams(subst, t)).collect();
+            sp(*loc, TI::Apply(k.clone(), n.clone(), ftys).into())
         }
-        Fun(args, result) => {
-            let ftys = args.into_iter().map(|t| subst_tparams(subst, t)).collect();
-            let fres = Box::new(subst_tparams(subst, *result));
-            sp(loc, Fun(ftys, fres))
+        TI::Fun(args, result) => {
+            let ftys = args.iter().map(|t| subst_tparams(subst, t)).collect();
+            let fres = subst_tparams(subst, result);
+            sp(*loc, TI::Fun(ftys, fres).into())
         }
     }
 }
 
-pub fn all_tparams(sp!(_, t_): Type) -> BTreeSet<TParam> {
-    use Type_::*;
-    match t_ {
-        Unit | UnresolvedError | Anything | Void => BTreeSet::new(),
-        Var(_) => panic!("ICE tvar in all_tparams"),
-        Ref(_, t) => all_tparams(*t),
-        Param(tp) => BTreeSet::from([tp]),
-        Apply(_, _, ty_args) => {
+pub fn all_tparams(sp!(_, t_): &Type) -> BTreeSet<TParam> {
+    match t_.inner() {
+        TI::Unit | TI::UnresolvedError | TI::Anything | TI::Void => BTreeSet::new(),
+        TI::Var(_) => panic!("ICE tvar in all_tparams"),
+        TI::Ref(_, t) => all_tparams(t),
+        TI::Param(tp) => BTreeSet::from([tp.clone()]),
+        TI::Apply(_, _, ty_args) => {
             let mut tparams = BTreeSet::new();
             for arg in ty_args {
                 tparams.append(&mut all_tparams(arg));
             }
             tparams
         }
-        Fun(args, result) => {
-            let mut tparams = all_tparams(*result);
+        TI::Fun(args, result) => {
+            let mut tparams = all_tparams(result);
             for arg in args {
                 tparams.append(&mut all_tparams(arg));
             }
@@ -2620,26 +2829,57 @@ pub fn all_tparams(sp!(_, t_): Type) -> BTreeSet<TParam> {
     }
 }
 
-pub fn ready_tvars(subst: &Subst, sp!(loc, t_): Type) -> Type {
-    use Type_::*;
-    match t_ {
-        x @ (UnresolvedError | Unit | Anything | Void | Param(_)) => sp(loc, x),
-        Ref(mut_, t) => sp(loc, Ref(mut_, Box::new(ready_tvars(subst, *t)))),
-        Apply(k, n, tys) => {
-            let tys = tys.into_iter().map(|t| ready_tvars(subst, t)).collect();
-            sp(loc, Apply(k, n, tys))
+pub fn has_tparams(sp!(_, t_): &Type) -> bool {
+    match t_.inner() {
+        TI::Unit | TI::UnresolvedError | TI::Anything | TI::Void => false,
+        TI::Var(_) => panic!("ICE tvar in has_tparams"),
+        TI::Ref(_, t) => has_tparams(t),
+        TI::Param(_) => true,
+        TI::Apply(_, _, ty_args) => ty_args.iter().any(has_tparams),
+        TI::Fun(args, result) => args.iter().any(has_tparams) || has_tparams(result),
+    }
+}
+
+/// Readies type variables. Note this may not provide a deep copy if there are no type variables.
+pub fn ready_tvars(subst: &Subst, ty @ sp!(loc, t_): &Type) -> Type {
+    // This is an optimization to avoid unnecessary deep clones of types
+    fn has_tvars(t: &Type) -> bool {
+        match t.value.inner() {
+            TI::Var(_) => true,
+            TI::Unit | TI::UnresolvedError | TI::Anything | TI::Void => false,
+            TI::Ref(_, inner) => has_tvars(inner),
+            TI::Param(_) => false,
+            TI::Apply(_, _, tys) => tys.iter().any(has_tvars),
+            TI::Fun(args, result) => args.iter().any(has_tvars) || has_tvars(result),
         }
-        Fun(args, result) => {
-            let args = args.into_iter().map(|t| ready_tvars(subst, t)).collect();
-            let result = Box::new(ready_tvars(subst, *result));
-            sp(loc, Fun(args, result))
+    }
+
+    if !has_tvars(ty) {
+        return ty.clone();
+    }
+
+    // Otherwise, we have to walk it and replace type variables
+    match t_.inner() {
+        TI::UnresolvedError | TI::Unit | TI::Anything | TI::Void | TI::Param(_) => ty.clone(),
+        TI::Ref(mut_, t) => sp(*loc, TI::Ref(*mut_, ready_tvars(subst, t)).into()),
+        TI::Apply(k, n, tys) => {
+            let tys = tys.iter().map(|t| ready_tvars(subst, t)).collect();
+            sp(*loc, TI::Apply(k.clone(), n.clone(), tys).into())
         }
-        Var(i) => {
-            let last_var = forward_tvar(subst, i);
-            match subst.get(last_var) {
-                Some(sp!(_, Var(_))) => unreachable!(),
-                None => sp(loc, Var(last_var)),
-                Some(t) => ready_tvars(subst, t.clone()),
+        TI::Fun(args, result) => {
+            let args = args.iter().map(|t| ready_tvars(subst, t)).collect();
+            let result = ready_tvars(subst, result);
+            sp(*loc, TI::Fun(args, result).into())
+        }
+        TI::Var(i) => {
+            let last_var = forward_tvar(subst, *i);
+            if let Some(ty) = subst.get(last_var) {
+                // If the type variable is already bound, we can just return it
+                assert!(!ty.value.is_var());
+                ready_tvars(subst, ty)
+            } else {
+                // If the type variable is not bound, we create a new one
+                sp(*loc, TI::Var(last_var).into())
             }
         }
     }
@@ -2649,12 +2889,13 @@ pub fn ready_tvars(subst: &Subst, sp!(loc, t_): Type) -> Type {
 // Instantiate
 //**************************************************************************************************
 
-pub fn instantiate(context: &mut Context, ty: Type) -> Type {
+pub fn instantiate(context: &mut Context, ty: &Type) -> Type {
     let keep_tanything = false;
+    instantiation_warnings(context, ty);
     instantiate_impl(context, keep_tanything, ty)
 }
 
-pub fn instantiate_keep_tanything(context: &mut Context, ty: Type) -> Type {
+pub fn instantiate_keep_tanything(context: &mut Context, ty: &Type) -> Type {
     let keep_tanything = true;
     instantiate_impl(context, keep_tanything, ty)
 }
@@ -2682,47 +2923,109 @@ fn instantiate_type_args(
 }
 
 /// Instantiates a type, applying constraints to type arguments, and binding type arguments to
-/// type variables
+/// type variables. May return a copy if no instantiation is needed.
 /// keep_tanything is an annoying case to handle macro signature checking, were we want to delay
 /// instantiating Anything to a type varabile until _after_ the macro is expanded
-fn instantiate_impl(context: &mut Context, keep_tanything: bool, sp!(loc, t_): Type) -> Type {
-    use Type_::*;
-    let it_ = match t_ {
-        x @ (Unit | UnresolvedError | Void) => x,
-        Anything => {
-            if keep_tanything {
-                Anything
+fn instantiate_impl(context: &mut Context, keep_tanything: bool, ty: &Type) -> Type {
+    if let Some(new_ty) = instantiate_impl_opt(context, keep_tanything, ty) {
+        new_ty
+    } else {
+        ty.clone()
+    }
+}
+
+/// Instantiates a type, or returns None if no instantiation is needed.
+/// keep_tanything is an annoying case to handle macro signature checking, were we want to delay
+/// instantiating Anything to a type varabile until _after_ the macro is expanded
+fn instantiate_impl_opt(
+    context: &mut Context,
+    keep_tanything: bool,
+    ty @ sp!(loc, t_): &Type,
+) -> Option<Type> {
+    instantiation_warnings(context, ty);
+    match t_.inner() {
+        TI::Unit | TI::UnresolvedError | TI::Void => None,
+        TI::Anything if keep_tanything => None,
+        TI::Anything => Some(make_tvar(context, *loc)),
+        TI::Ref(mut_, inner) => {
+            if let Some(new_inner) = instantiate_impl_opt(context, keep_tanything, inner) {
+                let ty_ = TI::Ref(*mut_, new_inner).into();
+                Some(sp(*loc, ty_))
             } else {
-                make_tvar(context, loc).value
+                None
             }
         }
+        TI::Apply(abilities_opt, n, ty_args) if !ty_args.is_empty() => {
+            let ty_ = instantiate_apply_impl(
+                context,
+                keep_tanything,
+                *loc,
+                abilities_opt.clone(),
+                n.clone(),
+                ty_args.clone(),
+            );
+            Some(sp(*loc, ty_))
+        }
+        TI::Apply(_, _, _) => None,
+        TI::Fun(args, result) => {
+            // Instantiate arguments and result
+            let new_args = args
+                .iter()
+                .map(|t| instantiate_impl_opt(context, keep_tanything, t))
+                .collect::<Vec<_>>();
+            let new_result = instantiate_impl_opt(context, keep_tanything, result);
 
-        Ref(mut_, b) => {
-            let inner = *b;
-            context.add_base_type_constraint(loc, "Invalid reference type", inner.clone());
-            Ref(
-                mut_,
-                Box::new(instantiate_impl(context, keep_tanything, inner)),
-            )
+            // If nothing changed, return None
+            if new_args.iter().all(|t| t.is_none()) && new_result.is_none() {
+                return None;
+            }
+
+            // Otherwise, build new function type
+            let args: Vec<Type> = new_args
+                .into_iter()
+                .zip(args.iter())
+                .map(|(new_t_opt, old_t)| new_t_opt.unwrap_or_else(|| old_t.clone()))
+                .collect();
+            let result = new_result.unwrap_or_else(|| result.clone());
+            let ty_ = TI::Fun(args, result).into();
+            Some(sp(*loc, ty_))
         }
-        Apply(abilities_opt, n, ty_args) => {
-            instantiate_apply_impl(context, keep_tanything, loc, abilities_opt, n, ty_args)
-        }
-        Fun(args, result) => Fun(
-            args.into_iter()
-                .map(|t| instantiate_impl(context, keep_tanything, t))
-                .collect(),
-            Box::new(instantiate_impl(context, keep_tanything, *result)),
-        ),
-        x @ Param(_) => x,
+        TI::Param(_) => None,
         // instantiating a var really shouldn't happen... but it does because of macro expansion
         // We expand macros before type checking, but after the arguments to the macro are type
         // checked (otherwise we couldn't properly do method syntax macros). As a result, we are
         // substituting type variables into the macro body, and might hit one while expanding a
         // type in the macro where a type parameter's argument had a type variable.
-        x @ Var(_) => x,
-    };
-    sp(loc, it_)
+        TI::Var(_) => None,
+    }
+}
+
+fn instantiation_warnings(context: &mut Context, ty: &Type) {
+    match &ty.value.inner() {
+        TI::Apply(_, n, ty_args) => {
+            match n {
+                sp!(_, N::TypeName_::Builtin(_)) => (),
+                sp!(_, N::TypeName_::Multiple(_)) => (),
+                sp!(_, N::TypeName_::ModuleType(m, n)) => {
+                    context.emit_warning_if_deprecated(m, n.0, None);
+                }
+            }
+            for ty_arg in ty_args {
+                instantiation_warnings(context, ty_arg);
+            }
+        }
+        TI::Ref(_, inner) => {
+            context.add_base_type_constraint(ty.loc, "Invalid reference type", inner.clone());
+            instantiation_warnings(context, inner);
+        }
+        TI::Fun(args, result) => {
+            for arg in args {
+                instantiation_warnings(context, arg);
+            }
+            instantiation_warnings(context, result);
+        }
+        _ => (),
+    }
 }
 
 // abilities_opt is expected to be None for non primitive types
@@ -2759,7 +3062,7 @@ fn instantiate_apply_impl(
         ty_args,
         tparam_constraints,
     );
-    Type_::Apply(abilities_opt, n, tys)
+    TI::Apply(abilities_opt, n, tys).into()
 }
 
 // The type arguments are bound to type variables after intantiation
@@ -2795,7 +3098,7 @@ fn instantiate_type_args_impl(
     let tvars = make_tparams(context, loc, tvar_case, locs_constraints);
     ty_args = ty_args
         .into_iter()
-        .map(|t| instantiate_impl(context, keep_tanything, t))
+        .map(|t| instantiate_impl(context, keep_tanything, &t))
         .collect();
 
     assert!(ty_args.len() == tvars.len());
@@ -2887,23 +3190,29 @@ fn make_tparams(
 
 // used in macros to make the signatures consistent with the bodies, in that we don't check
 // constraints until application
-pub fn give_tparams_all_abilities(sp!(_, ty_): &mut Type) {
-    use Type_ as T;
-    match ty_ {
-        T::Unit | T::Var(_) | T::UnresolvedError | T::Anything | T::Void => (),
-        T::Ref(_, inner) => give_tparams_all_abilities(inner),
-        T::Apply(_, _, ty_args) => {
-            for ty_arg in ty_args {
-                give_tparams_all_abilities(ty_arg)
-            }
+pub fn give_tparams_all_abilities(ty @ sp!(loc, ty_): &Type) -> Type {
+    match ty_.inner() {
+        TI::Unit | TI::Var(_) | TI::UnresolvedError | TI::Anything | TI::Void => ty.clone(),
+        TI::Ref(mut_, inner) => sp(
+            *loc,
+            TI::Ref(*mut_, give_tparams_all_abilities(inner)).into(),
+        ),
+        TI::Apply(k, n, ty_args) => {
+            let ty_ = TI::Apply(
+                k.clone(),
+                n.clone(),
+                ty_args.iter().map(give_tparams_all_abilities).collect(),
+            )
+            .into();
+            sp(*loc, ty_)
         }
-        T::Fun(args, ret) => {
-            for arg in args {
-                give_tparams_all_abilities(arg)
-            }
-            give_tparams_all_abilities(ret)
+        TI::Fun(args, ret) => {
+            let args = args.iter().map(give_tparams_all_abilities).collect();
+            let ret = give_tparams_all_abilities(ret);
+            let ty_ = TI::Fun(args, ret).into();
+            sp(*loc, ty_)
         }
-        T::Param(_) => *ty_ = T::Anything,
+        TI::Param(_) => sp(*loc, ANYTHING_TYPE.clone()),
     }
 }
 
@@ -2919,6 +3228,7 @@ pub enum TypingError {
     ArityMismatch(usize, Box<Type>, usize, Box<Type>),
     FunArityMismatch(usize, Box<Type>, usize, Box<Type>),
     RecursiveType(Loc),
+    IncompatibleConstraints((Loc, Box<String>), (Loc, Box<String>)),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2926,6 +3236,12 @@ enum TypingCase {
     Join,
     Invariant,
     Subtype,
+}
+
+pub fn subtype_check(lhs: &Type, rhs: &Type) -> bool {
+    let mut counter = TVarCounter::new();
+    let subst = Subst::empty();
+    join_impl(&mut counter, subst, TypingCase::Subtype, lhs, rhs).is_ok()
 }
 
 pub fn subtype(
@@ -2962,27 +3278,36 @@ fn join_impl(
     lhs: &Type,
     rhs: &Type,
 ) -> Result<(Subst, Type), TypingError> {
-    use Type_::*;
     use TypeName_::*;
     use TypingCase::*;
-    match (lhs, rhs) {
-        (sp!(_, Anything), other) | (other, sp!(_, Anything)) => Ok((subst, other.clone())),
 
-        (sp!(_, Unit), sp!(loc, Unit)) => Ok((subst, sp(*loc, Unit))),
+    let sp!(lhs_loc, lhs_ty_) = lhs;
+    let sp!(rhs_loc, rhs_ty_) = rhs;
 
-        (sp!(_, Void), sp!(loc, Void)) if matches!(case, Join | Invariant) => {
-            Ok((subst, sp(*loc, Void)))
+    match (lhs_ty_.inner(), rhs_ty_.inner()) {
+        (TI::Anything, _) => Ok((subst, rhs.clone())),
+        (_, TI::Anything) => Ok((subst, lhs.clone())),
+
+        (TI::Unit, TI::Unit) => Ok((subst, sp(*rhs_loc, UNIT_TYPE.clone()))),
+
+        (TI::Void, TI::Void) if matches!(case, Join | Invariant) => {
+            Ok((subst, sp(*rhs_loc, VOID_TYPE.clone())))
         }
-        (sp!(_, Void), other) if matches!(case, Subtype) => Ok((subst, other.clone())),
+        // Void <: t
+        (TI::Void, _) if matches!(case, Subtype) => Ok((subst, rhs.clone())),
 
-        (sp!(loc1, Ref(mut1, t1)), sp!(loc2, Ref(mut2, t2))) => {
-            let (loc, mut_) = match (case, mut1, mut2) {
+        (TI::Ref(lhs_mut, lhs_ty), TI::Ref(rhs_mut, rhs_ty)) => {
+            let (loc, mut_) = match (case, lhs_mut, rhs_mut) {
                 (Join, _, _) => {
                     // if 1 is imm and 2 is mut, use loc1. Else, loc2
-                    let loc = if !*mut1 && *mut2 { *loc1 } else { *loc2 };
-                    (loc, *mut1 && *mut2)
+                    let loc = if !*lhs_mut && *rhs_mut {
+                        *lhs_loc
+                    } else {
+                        *rhs_loc
+                    };
+                    (loc, *lhs_mut && *rhs_mut)
                 }
-                (Invariant, mut1, mut2) if mut1 == mut2 => (*loc1, *mut1),
+                (Invariant, mut1, mut2) if mut1 == mut2 => (*lhs_loc, *mut1),
                 (Invariant, _mut1, _mut2) => {
                     return Err(TypingError::InvariantError(
                         Box::new(lhs.clone()),
@@ -2991,9 +3316,9 @@ fn join_impl(
                 }
                 // imm <: imm
                 // mut <: imm
-                (Subtype, false, false) | (Subtype, true, false) => (*loc2, false),
+                (Subtype, false, false) | (Subtype, true, false) => (*rhs_loc, false),
                 // mut <: mut
-                (Subtype, true, true) => (*loc2, true),
+                (Subtype, true, true) => (*rhs_loc, true),
                 // imm <\: mut
                 (Subtype, false, true) => {
                     return Err(TypingError::SubtypeError(
@@ -3002,15 +3327,13 @@ fn join_impl(
                     ));
                 }
             };
-            let (subst, t) = join_impl(counter, subst, case, t1, t2)?;
-            Ok((subst, sp(loc, Ref(mut_, Box::new(t)))))
+            let (subst, t) = join_impl(counter, subst, case, lhs_ty, rhs_ty)?;
+            Ok((subst, sp(loc, TI::Ref(mut_, t).into())))
         }
-        (sp!(_, Param(TParam { id: id1, .. })), sp!(_, Param(TParam { id: id2, .. })))
-            if id1 == id2 =>
-        {
+        (TI::Param(TParam { id: id1, .. }), TI::Param(TParam { id: id2, .. })) if id1 == id2 => {
             Ok((subst, rhs.clone()))
         }
-        (sp!(_, Apply(_, sp!(_, Multiple(n1)), _)), sp!(_, Apply(_, sp!(_, Multiple(n2)), _)))
+        (TI::Apply(_, sp!(_, Multiple(n1)), _), TI::Apply(_, sp!(_, Multiple(n2)), _))
             if n1 != n2 =>
         {
             Err(TypingError::ArityMismatch(
@@ -3020,7 +3343,7 @@ fn join_impl(
                 Box::new(rhs.clone()),
             ))
         }
-        (sp!(_, Apply(k1, n1, tys1)), sp!(loc, Apply(k2, n2, tys2))) if n1 == n2 => {
+        (TI::Apply(k1, n1, tys1), TI::Apply(k2, n2, tys2)) if n1 == n2 => {
             assert!(
                 k1 == k2,
                 "ICE failed naming: {:#?}kind != {:#?}kind. {:#?} !=  {:#?}",
@@ -3030,9 +3353,12 @@ fn join_impl(
                 k2
             );
             let (subst, tys) = join_impl_types(counter, subst, case, tys1, tys2)?;
-            Ok((subst, sp(*loc, Apply(k2.clone(), *n2, tys))))
+            Ok((
+                subst,
+                sp(*rhs_loc, TI::Apply(k2.clone(), n2.clone(), tys).into()),
+            ))
         }
-        (sp!(_, Fun(a1, _)), sp!(_, Fun(a2, _))) if a1.len() != a2.len() => {
+        (TI::Fun(a1, _), TI::Fun(a2, _)) if a1.len() != a2.len() => {
             Err(TypingError::FunArityMismatch(
                 a1.len(),
                 Box::new(lhs.clone()),
@@ -3040,7 +3366,7 @@ fn join_impl(
                 Box::new(rhs.clone()),
             ))
         }
-        (sp!(_, Fun(a1, r1)), sp!(loc, Fun(a2, r2))) => {
+        (TI::Fun(a1, r1), TI::Fun(a2, r2)) => {
             // TODO this is going to likely lead to some strange error locations/messages
             // since the RHS in subtyping is currently assumed to be an annotation
             let (subst, args) = match case {
@@ -3048,49 +3374,48 @@ fn join_impl(
                 Subtype => join_impl_types(counter, subst, case, a2, a1)?,
             };
             let (subst, result) = join_impl(counter, subst, case, r1, r2)?;
-            Ok((subst, sp(*loc, Fun(args, Box::new(result)))))
+            Ok((subst, sp(*rhs_loc, TI::Fun(args, result).into())))
         }
-        (sp!(loc1, Var(id1)), sp!(loc2, Var(id2))) => {
-            if *id1 == *id2 {
-                Ok((subst, sp(*loc2, Var(*id2))))
+        (TI::Var(lhs_id), TI::Var(rhs_id)) => {
+            if *lhs_id == *rhs_id {
+                Ok((subst, sp(*rhs_loc, TI::Var(*rhs_id).into())))
             } else {
-                join_tvar(counter, subst, case, *loc1, *id1, *loc2, *id2)
+                join_tvar(counter, subst, case, *lhs_loc, *lhs_id, *rhs_loc, *rhs_id)
             }
         }
-        (sp!(loc, Var(id)), other) if subst.get(*id).is_none() => {
-            if join_bind_tvar(&mut subst, *loc, *id, other.clone())? {
-                Ok((subst, sp(*loc, Var(*id))))
+        (TI::Var(id), _) if subst.get(*id).is_none() => {
+            if join_bind_tvar(&mut subst, *lhs_loc, *id, rhs.clone())? {
+                Ok((subst, sp(*lhs_loc, TI::Var(*id).into())))
             } else {
                 Err(TypingError::Incompatible(
-                    Box::new(sp(*loc, Var(*id))),
-                    Box::new(other.clone()),
+                    Box::new(sp(*lhs_loc, TI::Var(*id).into())),
+                    Box::new(rhs.clone()),
                 ))
             }
         }
-        (other, sp!(loc, Var(id))) if subst.get(*id).is_none() => {
-            if join_bind_tvar(&mut subst, *loc, *id, other.clone())? {
-                Ok((subst, sp(*loc, Var(*id))))
+        (_, TI::Var(id)) if subst.get(*id).is_none() => {
+            if join_bind_tvar(&mut subst, *rhs_loc, *id, lhs.clone())? {
+                Ok((subst, sp(*rhs_loc, TI::Var(*id).into())))
             } else {
                 Err(TypingError::Incompatible(
-                    Box::new(other.clone()),
-                    Box::new(sp(*loc, Var(*id))),
+                    Box::new(lhs.clone()),
+                    Box::new(sp(*rhs_loc, TI::Var(*id).into())),
                 ))
             }
         }
-        (sp!(loc, Var(id)), other) => {
+        (TI::Var(id), _) => {
             let new_tvar = counter.next();
-            subst.insert(new_tvar, other.clone());
-            join_tvar(counter, subst, case, *loc, *id, other.loc, new_tvar)
+            subst.insert(new_tvar, rhs.clone());
+            join_tvar(counter, subst, case, *lhs_loc, *id, *rhs_loc, new_tvar)
         }
-        (other, sp!(loc, Var(id))) => {
+        (_, TI::Var(id)) => {
             let new_tvar = counter.next();
-            subst.insert(new_tvar, other.clone());
-            join_tvar(counter, subst, case, other.loc, new_tvar, *loc, *id)
+            subst.insert(new_tvar, lhs.clone());
+            join_tvar(counter, subst, case, *lhs_loc, new_tvar, *rhs_loc, *id)
         }
 
-        (sp!(_, UnresolvedError), other) | (other, sp!(_, UnresolvedError)) => {
-            Ok((subst, other.clone()))
-        }
+        (TI::UnresolvedError, _) => Ok((subst, rhs.clone())),
+        (_, TI::UnresolvedError) => Ok((subst, lhs.clone())),
         _ => Err(TypingError::Incompatible(
             Box::new(lhs.clone()),
             Box::new(rhs.clone()),
@@ -3131,6 +3456,18 @@ pub fn join_var_constraints(
         (Some(C::Num(_)), None) => Ok(lhs),
         (None, Some(C::Num(_))) => Ok(rhs),
 
+        // string constraints propagates if either arms is strings
+        (Some(C::String(_)), Some(C::String(_))) => Ok(rhs),
+        (Some(C::String(_)), None) => Ok(lhs),
+        (None, Some(C::String(_))) => Ok(rhs),
+
+        (Some(lhs @ C::String(_)), Some(rhs @ C::Num(_)))
+        | (Some(lhs @ C::Num(_)), Some(rhs @ C::String(_))) => {
+            let err_lhs = (lhs.loc(), Box::new(lhs.kind()));
+            let err_rhs = (rhs.loc(), Box::new(rhs.kind()));
+            Err(TypingError::IncompatibleConstraints(err_lhs, err_rhs))
+        }
+
         // none case
         (None, None) => Ok(None),
     }
@@ -3145,15 +3482,14 @@ fn join_tvar(
     loc2: Loc,
     id2: TVar,
 ) -> Result<(Subst, Type), TypingError> {
-    use Type_::*;
     let last_id1 = forward_tvar(&subst, id1);
     let last_id2 = forward_tvar(&subst, id2);
     let ty1 = match subst.get(last_id1) {
-        None => sp(loc1, Anything),
+        None => sp(loc1, ANYTHING_TYPE.clone()),
         Some(t) => t.clone(),
     };
     let ty2 = match subst.get(last_id2) {
-        None => sp(loc2, Anything),
+        None => sp(loc2, ANYTHING_TYPE.clone()),
         Some(t) => t.clone(),
     };
 
@@ -3165,23 +3501,23 @@ fn join_tvar(
     let new_constraint_opt = join_var_constraints(constraints_1, constraints_2)?;
     subst.set_constraint_opt(new_tvar, new_constraint_opt);
 
-    subst.insert(last_id1, sp(loc1, Var(new_tvar)));
-    subst.insert(last_id2, sp(loc2, Var(new_tvar)));
+    subst.insert(last_id1, sp(loc1, TI::Var(new_tvar).into()));
+    subst.insert(last_id2, sp(loc2, TI::Var(new_tvar).into()));
 
     let (mut subst, new_ty) = join_impl(counter, subst, case, &ty1, &ty2)?;
     match subst.get(new_tvar) {
         Some(sp!(tloc, _)) => Err(TypingError::RecursiveType(*tloc)),
         None => {
             if join_bind_tvar(&mut subst, loc2, new_tvar, new_ty)? {
-                Ok((subst, sp(loc2, Var(new_tvar))))
+                Ok((subst, sp(loc2, TI::Var(new_tvar).into())))
             } else {
-                let ty1 = match ty1 {
-                    sp!(loc, Anything) => sp(loc, Var(id1)),
-                    t => t,
+                let ty1 = match ty1.value.inner() {
+                    TI::Anything => sp(ty1.loc, TI::Var(id1).into()),
+                    _ => ty1,
                 };
-                let ty2 = match ty2 {
-                    sp!(loc, Anything) => sp(loc, Var(id2)),
-                    t => t,
+                let ty2 = match ty2.value.inner() {
+                    TI::Anything => sp(ty2.loc, TI::Var(id2).into()),
+                    _ => ty2,
                 };
                 Err(TypingError::Incompatible(Box::new(ty1), Box::new(ty2)))
             }
@@ -3193,8 +3529,11 @@ fn forward_tvar(subst: &Subst, id: TVar) -> TVar {
     let mut cur = id;
     loop {
         match subst.get(cur) {
-            Some(sp!(_, Type_::Var(next))) => cur = *next,
-            Some(_) | None => break cur,
+            Some(sp!(_, ty_)) => match ty_.inner() {
+                TI::Var(next) => cur = *next,
+                _ => break cur,
+            },
+            None => break cur,
         }
     }
 }
@@ -3206,21 +3545,20 @@ fn join_bind_tvar(subst: &mut Subst, loc: Loc, tvar: TVar, ty: Type) -> Result<b
     );
 
     fn occurs_check(target_tvar: &TVar, sp!(_, t_): &Type) -> bool {
-        use Type_ as T;
-        match t_ {
-            T::Var(v) => v == target_tvar,
-            T::Ref(_, inner) => occurs_check(target_tvar, inner),
-            T::Apply(_, _, inners) => inners.iter().any(|inner| occurs_check(target_tvar, inner)),
-            T::Fun(inner_args, inner_ret) => {
+        match t_.inner() {
+            TI::Var(v) => v == target_tvar,
+            TI::Ref(_, inner) => occurs_check(target_tvar, inner),
+            TI::Apply(_, _, inners) => inners.iter().any(|inner| occurs_check(target_tvar, inner)),
+            TI::Fun(inner_args, inner_ret) => {
                 inner_args.iter().any(|arg| occurs_check(target_tvar, arg))
                     || occurs_check(target_tvar, inner_ret)
             }
-            T::Unit | T::Param(_) | T::Anything | T::Void | T::UnresolvedError => false,
+            TI::Unit | TI::Param(_) | TI::Anything | TI::Void | TI::UnresolvedError => false,
         }
     }
 
     // check not necessary for soundness but improves error message structure
-    if !check_num_tvar(subst, loc, &tvar, &ty) {
+    if !check_tvar_constraints(subst, loc, &tvar, &ty) {
         return Ok(false);
     }
 
@@ -3228,31 +3566,62 @@ fn join_bind_tvar(subst: &mut Subst, loc: Loc, tvar: TVar, ty: Type) -> Result<b
         return Err(TypingError::RecursiveType(loc));
     }
 
-    match &ty.value {
-        Type_::Anything => (),
+    match &ty.value.inner() {
+        TI::Anything => (),
         _ => subst.insert(tvar, ty),
     }
     Ok(true)
 }
 
-fn check_num_tvar(subst: &Subst, _loc: Loc, tvar: &TVar, ty: &Type) -> bool {
-    !subst.is_num_var(tvar) || check_num_tvar_(subst, ty)
+fn check_tvar_constraints(subst: &Subst, _loc: Loc, tvar: &TVar, ty: &Type) -> bool {
+    (!subst.is_num_var(tvar) || check_num_tvar_(subst, ty))
+        && (!subst.is_string_var(tvar) || check_string_tvar_(subst, ty))
 }
 
 fn check_num_tvar_(subst: &Subst, ty: &Type) -> bool {
-    use Type_::*;
-    match &ty.value {
-        UnresolvedError | Anything => true,
-        Apply(_, sp!(_, TypeName_::Builtin(sp!(_, bt))), _) => bt.is_numeric(),
+    match &ty.value.inner() {
+        TI::UnresolvedError | TI::Anything => true,
+        TI::Apply(_, sp!(_, TypeName_::Builtin(sp!(_, bt))), _) => bt.is_numeric(),
 
-        Var(v) => {
+        TI::Var(v) => {
             let last_tvar = forward_tvar(subst, *v);
-            match subst.get(last_tvar) {
-                Some(sp!(_, Var(_))) => unreachable!(),
-                None => subst.is_num_var(&last_tvar),
-                Some(t) => check_num_tvar_(subst, t),
+            if let Some(ty) = subst.get(last_tvar) {
+                assert!(!ty.value.is_var());
+                check_num_tvar_(subst, ty)
+            } else {
+                subst.is_num_var(&last_tvar)
             }
         }
+        _ => false,
+    }
+}
+
+fn check_string_tvar_(subst: &Subst, ty: &Type) -> bool {
+    use BuiltinTypeName_ as BT;
+    use N::TypeName_ as TN;
+    use stdlib_definitions as SD;
+    match &ty.value.inner() {
+        TI::UnresolvedError | TI::Anything => true,
+        TI::Apply(_, sp!(_, TN::Builtin(sp!(_, BT::Vector))), args) => {
+            args.len() == 1
+                && matches!(
+                    args[0].value.inner(),
+                    TI::Apply(_, sp!(_, TN::Builtin(sp!(_, BT::U8))), _)
+                )
+        }
+        TI::Apply(_, ty_name, args) if args.is_empty() => SD::STDLIB_STRING_TYPES
+            .iter()
+            .any(|(pkg, module, name)| ty_name.value.named_address_is(pkg, module, name)),
+        TI::Var(v) => {
+            let last_tvar = forward_tvar(subst, *v);
+            if let Some(ty) = subst.get(last_tvar) {
+                assert!(!ty.value.is_var());
+                check_string_tvar_(subst, ty)
+            } else {
+                subst.is_string_var(&last_tvar)
+            }
+        }
+        // TODO: what else is permitted here?
         _ => false,
     }
 }

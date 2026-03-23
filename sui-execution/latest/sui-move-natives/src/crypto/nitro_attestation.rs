@@ -1,20 +1,22 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::{NativesCostTable, get_extension, object_runtime::ObjectRuntime};
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::{gas_algebra::InternalGas, vm_status::StatusCode};
-use move_vm_runtime::native_functions::NativeContext;
-use move_vm_types::{
-    loaded_data::runtime_types::Type,
-    natives::function::NativeResult,
+use move_vm_runtime::execution::values::VectorSpecialization;
+use move_vm_runtime::native_charge_gas_early_exit;
+use move_vm_runtime::natives::functions::NativeContext;
+use move_vm_runtime::{
+    execution::{
+        Type,
+        values::{Struct, Value, Vector, VectorRef},
+    },
+    natives::functions::NativeResult,
     pop_arg,
-    values::{Struct, Value, Vector, VectorRef, VectorSpecialization},
 };
 use std::collections::{BTreeMap, VecDeque};
 use sui_types::nitro_attestation::{parse_nitro_attestation, verify_nitro_attestation};
-
-use crate::{object_runtime::ObjectRuntime, NativesCostTable};
-use move_vm_runtime::native_charge_gas_early_exit;
 
 pub const NOT_SUPPORTED_ERROR: u64 = 0;
 pub const PARSE_ERROR: u64 = 1;
@@ -45,19 +47,27 @@ macro_rules! native_charge_gas_early_exit_option {
 }
 
 fn is_supported(context: &NativeContext) -> PartialVMResult<bool> {
-    Ok(context
-        .extensions()
-        .get::<ObjectRuntime>()?
+    Ok(get_extension!(context, ObjectRuntime)?
         .protocol_config
         .enable_nitro_attestation())
 }
 
 fn is_upgraded(context: &NativeContext) -> PartialVMResult<bool> {
-    Ok(context
-        .extensions()
-        .get::<ObjectRuntime>()?
+    Ok(get_extension!(context, ObjectRuntime)?
         .protocol_config
         .enable_nitro_attestation_upgraded_parsing())
+}
+
+fn is_all_nonzero_pcrs_included(context: &NativeContext) -> PartialVMResult<bool> {
+    Ok(get_extension!(context, ObjectRuntime)?
+        .protocol_config
+        .enable_nitro_attestation_all_nonzero_pcrs_parsing())
+}
+
+fn is_always_include_required_pcrs(context: &NativeContext) -> PartialVMResult<bool> {
+    Ok(get_extension!(context, ObjectRuntime)?
+        .protocol_config
+        .enable_nitro_attestation_always_include_required_pcrs_parsing())
 }
 
 pub fn load_nitro_attestation_internal(
@@ -75,11 +85,9 @@ pub fn load_nitro_attestation_internal(
 
     let current_timestamp = pop_arg!(args, u64);
     let attestation_ref = pop_arg!(args, VectorRef);
-    let attestation_bytes = attestation_ref.as_bytes_ref();
+    let attestation_bytes = attestation_ref.as_bytes_ref()?;
 
-    let cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let cost_params = get_extension!(context, NativesCostTable)?
         .nitro_attestation_cost_params
         .clone();
 
@@ -90,7 +98,12 @@ pub fn load_nitro_attestation_internal(
             .map(|per_byte| base_cost + per_byte * (attestation_bytes.len() as u64).into()))
     );
 
-    match parse_nitro_attestation(&attestation_bytes, is_upgraded(context)?) {
+    match parse_nitro_attestation(
+        &attestation_bytes,
+        is_upgraded(context)?,
+        is_all_nonzero_pcrs_included(context)?,
+        is_always_include_required_pcrs(context)?,
+    ) {
         Ok((signature, signed_message, payload)) => {
             let cert_chain_length = payload.get_cert_chain_length();
             native_charge_gas_early_exit_option!(

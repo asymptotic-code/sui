@@ -163,7 +163,8 @@ impl Store for MemStore {
         {
             refs.push_front(BlockRef::new(round, author, digest));
         }
-        let results = self.read_blocks(refs.as_slices().0)?;
+        let refs_slice = refs.make_contiguous();
+        let results = self.read_blocks(refs_slice)?;
         let mut blocks = vec![];
         for (r, block) in refs.into_iter().zip(results.into_iter()) {
             blocks.push(
@@ -222,21 +223,14 @@ impl Store for MemStore {
             .map(|(k, _)| CommitRef::new(k.0, k.1)))
     }
 
-    fn scan_finalized_commits(
+    fn read_rejected_transactions(
         &self,
-        range: CommitRange,
-    ) -> ConsensusResult<Vec<(CommitRef, BTreeMap<BlockRef, Vec<TransactionIndex>>)>> {
+        commit_ref: CommitRef,
+    ) -> ConsensusResult<Option<BTreeMap<BlockRef, Vec<TransactionIndex>>>> {
         let inner = self.inner.read();
-        let mut finalized_commits = vec![];
-        for (commit, rejected_transactions) in inner.finalized_commits.range((
-            Included((range.start(), CommitDigest::MIN)),
-            Included((range.end(), CommitDigest::MAX)),
-        )) {
-            finalized_commits.push((
-                CommitRef::new(commit.0, commit.1),
-                rejected_transactions.clone(),
-            ));
-        }
-        Ok(finalized_commits)
+        Ok(inner
+            .finalized_commits
+            .get(&(commit_ref.index, commit_ref.digest))
+            .cloned())
     }
 }

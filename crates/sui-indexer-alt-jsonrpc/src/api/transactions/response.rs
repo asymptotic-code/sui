@@ -5,35 +5,43 @@ use std::str::FromStr;
 
 use anyhow::Context as _;
 use futures::future::OptionFuture;
-use move_core_types::annotated_value::{MoveDatatypeLayout, MoveTypeLayout};
-use sui_indexer_alt_reader::{
-    kv_loader::TransactionContents, objects::VersionedObjectKey,
-    tx_balance_changes::TxBalanceChangeKey,
-};
-use sui_indexer_alt_schema::transactions::{BalanceChange, StoredTxBalanceChange};
-use sui_json_rpc_types::{
-    BalanceChange as SuiBalanceChange, ObjectChange as SuiObjectChange, SuiEvent,
-    SuiTransactionBlock, SuiTransactionBlockData, SuiTransactionBlockEffects,
-    SuiTransactionBlockEvents, SuiTransactionBlockResponse, SuiTransactionBlockResponseOptions,
-};
-use sui_types::{
-    base_types::{ObjectID, SequenceNumber},
-    digests::{ObjectDigest, TransactionDigest},
-    effects::{IDOperation, ObjectChange, TransactionEffects, TransactionEffectsAPI},
-    event::Event,
-    object::Object,
-    signature::GenericSignature,
-    transaction::{TransactionData, TransactionDataAPI},
-    TypeTag,
-};
+use move_core_types::annotated_value::MoveDatatypeLayout;
+use move_core_types::annotated_value::MoveTypeLayout;
+use sui_indexer_alt_reader::kv_loader::TransactionContents;
+use sui_indexer_alt_reader::objects::VersionedObjectKey;
+use sui_indexer_alt_reader::tx_balance_changes::TxBalanceChangeKey;
+use sui_indexer_alt_schema::transactions::BalanceChange;
+use sui_indexer_alt_schema::transactions::StoredTxBalanceChange;
+use sui_json_rpc_types::BalanceChange as SuiBalanceChange;
+use sui_json_rpc_types::ObjectChange as SuiObjectChange;
+use sui_json_rpc_types::SuiEvent;
+use sui_json_rpc_types::SuiTransactionBlock;
+use sui_json_rpc_types::SuiTransactionBlockData;
+use sui_json_rpc_types::SuiTransactionBlockEffects;
+use sui_json_rpc_types::SuiTransactionBlockEvents;
+use sui_json_rpc_types::SuiTransactionBlockResponse;
+use sui_json_rpc_types::SuiTransactionBlockResponseOptions;
+use sui_types::TypeTag;
+use sui_types::base_types::ObjectID;
+use sui_types::base_types::SequenceNumber;
+use sui_types::digests::ObjectDigest;
+use sui_types::digests::TransactionDigest;
+use sui_types::effects::IDOperation;
+use sui_types::effects::ObjectChange;
+use sui_types::effects::TransactionEffects;
+use sui_types::effects::TransactionEffectsAPI;
+use sui_types::event::Event;
+use sui_types::object::Object;
+use sui_types::signature::GenericSignature;
+use sui_types::transaction::TransactionData;
+use sui_types::transaction::TransactionDataAPI;
 use tokio::join;
 
-use crate::{
-    context::Context,
-    error::{invalid_params, rpc_bail, RpcError},
-};
-
-use super::error::Error;
+use crate::api::transactions::error::Error;
+use crate::context::Context;
+use crate::error::RpcError;
+use crate::error::invalid_params;
+use crate::error::rpc_bail;
 
 /// Fetch the necessary data from the stores in `ctx` and transform it to build a response for the
 /// transaction identified by `digest`, according to the response `options`.
@@ -69,8 +77,8 @@ pub(super) async fn transaction(
 
     let mut response = SuiTransactionBlockResponse::new(digest);
 
-    response.timestamp_ms = Some(tx.timestamp_ms());
-    response.checkpoint = Some(tx.cp_sequence_number());
+    response.timestamp_ms = tx.timestamp_ms();
+    response.checkpoint = tx.cp_sequence_number();
 
     if options.show_input {
         response.transaction = Some(input(ctx, &tx).await?);
@@ -155,9 +163,8 @@ async fn events(
             ),
         };
 
-        let sui_event =
-            SuiEvent::try_from(event, digest, ix as u64, Some(tx.timestamp_ms()), layout)
-                .with_context(|| format!("Failed to convert Event {ix} into response"))?;
+        let sui_event = SuiEvent::try_from(event, digest, ix as u64, tx.timestamp_ms(), layout)
+            .with_context(|| format!("Failed to convert Event {ix} into response"))?;
 
         sui_events.push(sui_event)
     }

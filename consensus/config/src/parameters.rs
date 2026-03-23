@@ -1,9 +1,9 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{path::PathBuf, time::Duration};
-
+use mysten_network::Multiaddr;
 use serde::{Deserialize, Serialize};
+use std::{path::PathBuf, time::Duration};
 
 /// Operational configurations of a consensus authority.
 ///
@@ -92,13 +92,18 @@ pub struct Parameters {
     #[serde(default = "Parameters::default_commit_sync_batches_ahead")]
     pub commit_sync_batches_ahead: usize,
 
-    /// Anemo network settings.
-    #[serde(default = "AnemoParameters::default")]
-    pub anemo: AnemoParameters,
-
     /// Tonic network settings.
     #[serde(default = "TonicParameters::default")]
     pub tonic: TonicParameters,
+
+    /// Internal consensus parameters.
+    #[serde(default = "InternalParameters::default")]
+    pub internal: InternalParameters,
+
+    /// Override for the address to listen on. When set, this is used instead of
+    /// deriving from the committee address.
+    #[serde(skip)]
+    pub listen_address_override: Option<Multiaddr>,
 }
 
 impl Parameters {
@@ -153,28 +158,16 @@ impl Parameters {
     }
 
     pub(crate) fn default_round_prober_interval_ms() -> u64 {
-        if cfg!(msim) {
-            1000
-        } else {
-            5000
-        }
+        if cfg!(msim) { 1000 } else { 5000 }
     }
 
     pub(crate) fn default_round_prober_request_timeout_ms() -> u64 {
-        if cfg!(msim) {
-            800
-        } else {
-            4000
-        }
+        if cfg!(msim) { 800 } else { 4000 }
     }
 
     pub(crate) fn default_propagation_delay_stop_proposal_threshold() -> u32 {
         // Propagation delay is usually 0 round in production.
-        if cfg!(msim) {
-            2
-        } else {
-            5
-        }
+        if cfg!(msim) { 2 } else { 5 }
     }
 
     pub(crate) fn default_dag_state_cached_rounds() -> u32 {
@@ -225,32 +218,9 @@ impl Default for Parameters {
             commit_sync_parallel_fetches: Parameters::default_commit_sync_parallel_fetches(),
             commit_sync_batch_size: Parameters::default_commit_sync_batch_size(),
             commit_sync_batches_ahead: Parameters::default_commit_sync_batches_ahead(),
-            anemo: AnemoParameters::default(),
             tonic: TonicParameters::default(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AnemoParameters {
-    /// Size in bytes above which network messages are considered excessively large. Excessively
-    /// large messages will still be handled, but logged and reported in metrics for debugging.
-    ///
-    /// If unspecified, this will default to 8 MiB.
-    #[serde(default = "AnemoParameters::default_excessive_message_size")]
-    pub excessive_message_size: usize,
-}
-
-impl AnemoParameters {
-    fn default_excessive_message_size() -> usize {
-        8 << 20
-    }
-}
-
-impl Default for AnemoParameters {
-    fn default() -> Self {
-        Self {
-            excessive_message_size: AnemoParameters::default_excessive_message_size(),
+            internal: InternalParameters::default(),
+            listen_address_override: None,
         }
     }
 }
@@ -282,11 +252,28 @@ pub struct TonicParameters {
     /// If unspecified, this will default to 1GiB.
     #[serde(default = "TonicParameters::default_message_size_limit")]
     pub message_size_limit: usize,
+
+    /// Port for the observer server. If configured, then the node will run the observer server on this port.
+    ///
+    /// If unspecified, this will default to `None`.
+    #[serde(default = "TonicParameters::default_observer_server_port")]
+    pub observer_server_port: Option<u16>,
+
+    /// Allowlist of observer public keys (hex encoded). If empty, all observers are allowed.
+    /// If non-empty, only observers with these public keys will be allowed to connect.
+    ///
+    /// If unspecified, this will default to an empty Vec (no allowlist, all observers allowed).
+    #[serde(default = "TonicParameters::default_observer_allowlist")]
+    pub observer_allowlist: Vec<String>,
 }
 
 impl TonicParameters {
+    pub fn is_observer_server_enabled(&self) -> bool {
+        self.observer_server_port.is_some()
+    }
+
     fn default_keepalive_interval() -> Duration {
-        Duration::from_secs(5)
+        Duration::from_secs(10)
     }
 
     fn default_connection_buffer_size() -> usize {
@@ -300,6 +287,14 @@ impl TonicParameters {
     fn default_message_size_limit() -> usize {
         64 << 20
     }
+
+    fn default_observer_server_port() -> Option<u16> {
+        None
+    }
+
+    fn default_observer_allowlist() -> Vec<String> {
+        Vec::new()
+    }
 }
 
 impl Default for TonicParameters {
@@ -309,6 +304,31 @@ impl Default for TonicParameters {
             connection_buffer_size: TonicParameters::default_connection_buffer_size(),
             excessive_message_size: TonicParameters::default_excessive_message_size(),
             message_size_limit: TonicParameters::default_message_size_limit(),
+            observer_server_port: TonicParameters::default_observer_server_port(),
+            observer_allowlist: TonicParameters::default_observer_allowlist(),
+        }
+    }
+}
+
+/// Internal parameters unrelated to operating a consensus node in the real world.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct InternalParameters {
+    /// Whether to skip equivocation validation, when testing with equivocators.
+    #[serde(default = "InternalParameters::default_skip_equivocation_validation")]
+    pub skip_equivocation_validation: bool,
+}
+
+impl InternalParameters {
+    fn default_skip_equivocation_validation() -> bool {
+        false
+    }
+}
+
+impl Default for InternalParameters {
+    fn default() -> Self {
+        Self {
+            skip_equivocation_validation: InternalParameters::default_skip_equivocation_validation(
+            ),
         }
     }
 }

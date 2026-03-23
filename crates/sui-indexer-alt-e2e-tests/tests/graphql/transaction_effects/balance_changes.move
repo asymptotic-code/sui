@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//# init --protocol-version 70 --accounts A B C --addresses test=0x0 --simulator
+//# init --protocol-version 108 --accounts A B C --addresses test=0x0 --simulator
 
 // Transaction with balance changes - transfer SUI from A to B
 //# programmable --sender A --inputs 1000 @B
@@ -29,7 +29,7 @@
         owner {
           address
         }
-        coinType
+        coinType { repr }
         amount
       }
     }
@@ -48,7 +48,7 @@
         owner {
             address
         }
-        coinType
+        coinType { repr }
         amount
       }
     }
@@ -69,7 +69,7 @@
           owner {
             address
           }
-          coinType
+          coinType { repr }
           amount
         }
       }

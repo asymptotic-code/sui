@@ -3,10 +3,15 @@
 
 use std::sync::Arc;
 
-use prometheus::{
-    register_histogram_vec_with_registry, register_histogram_with_registry,
-    register_int_counter_vec_with_registry, Histogram, HistogramVec, IntCounterVec, Registry,
-};
+use prometheus::Histogram;
+use prometheus::HistogramVec;
+use prometheus::IntCounter;
+use prometheus::IntCounterVec;
+use prometheus::Registry;
+use prometheus::register_histogram_vec_with_registry;
+use prometheus::register_histogram_with_registry;
+use prometheus::register_int_counter_vec_with_registry;
+use prometheus::register_int_counter_with_registry;
 
 pub(crate) mod middleware;
 
@@ -30,6 +35,8 @@ pub struct RpcMetrics {
     pub requests_received: IntCounterVec,
     pub requests_succeeded: IntCounterVec,
     pub requests_failed: IntCounterVec,
+    pub requests_cancelled: IntCounterVec,
+    pub requests_panicked: IntCounter,
 
     pub owned_objects_filter_scans: Histogram,
     pub read_retries: IntCounterVec,
@@ -68,6 +75,21 @@ impl RpcMetrics {
                 "jsonrpc_requests_failed",
                 "Number of requests that completed with an error for each JSON-RPC method, by error code",
                 &["method", "code"],
+                registry
+            )
+            .unwrap(),
+
+            requests_cancelled: register_int_counter_vec_with_registry!(
+                "jsonrpc_requests_cancelled",
+                "Number of requests that were cancelled before completion for each JSON-RPC method",
+                &["method"],
+                registry
+            )
+            .unwrap(),
+
+            requests_panicked: register_int_counter_with_registry!(
+                "jsonrpc_requests_panicked",
+                "Number of requests that panicked during processing",
                 registry
             )
             .unwrap(),

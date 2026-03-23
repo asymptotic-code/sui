@@ -2,16 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    workload::{Workload, WorkloadBuilder, MAX_GAS_FOR_TESTING},
     WorkloadBuilderInfo, WorkloadParams,
+    workload::{MAX_GAS_FOR_TESTING, Workload, WorkloadBuilder},
 };
 use crate::drivers::Interval;
 use crate::in_memory_wallet::InMemoryWallet;
 use crate::system_state_observer::{SystemState, SystemStateObserver};
 use crate::workloads::benchmark_move_base_dir;
 use crate::workloads::payload::Payload;
-use crate::workloads::{workload::ExpectedFailureType, Gas, GasCoinConfig};
-use crate::ProgrammableTransactionBuilder;
+use crate::workloads::{Gas, GasCoinConfig, workload::ExpectedFailureType};
 use crate::{ExecutionEffects, ValidatorProxy};
 use async_trait::async_trait;
 use move_core_types::identifier::Identifier;
@@ -22,7 +21,7 @@ use sui_types::{base_types::FullObjectRef, object::Owner};
 use sui_types::{base_types::SuiAddress, crypto::get_key_pair, transaction::Transaction};
 use sui_types::{
     base_types::{FullObjectID, ObjectID},
-    transaction::ObjectArg,
+    transaction::{ObjectArg, SharedObjectMutability},
 };
 use tracing::info;
 
@@ -100,44 +99,45 @@ impl PartyTestPayload {
         // of the current version.
         let next_recipient = self.sender;
 
-        let mut builder = ProgrammableTransactionBuilder::new();
-        let args = vec![
-            builder
-                .obj(match &self.object_ref.0 {
-                    FullObjectID::Fastpath(_) => {
-                        ObjectArg::ImmOrOwnedObject(self.object_ref.as_object_ref())
-                    }
-                    FullObjectID::Consensus((id, initial_shared_version)) => {
-                        ObjectArg::SharedObject {
-                            id: *id,
-                            initial_shared_version: *initial_shared_version,
-                            mutable: true,
-                        }
-                    }
-                })
-                .unwrap(),
-            builder.pure(next_recipient).unwrap(),
-        ];
-        builder.programmable_move_call(
-            self.package_id,
-            Identifier::new("party").unwrap(),
-            // Randomly transfer object to either ConsensusV2 or AddressOwner.
-            [
-                Identifier::new("transfer_party").unwrap(),
-                Identifier::new("transfer_fastpath").unwrap(),
-            ]
-            .into_iter()
-            .choose(&mut rand::thread_rng())
-            .unwrap(),
-            vec![],
-            args,
-        );
-
         let state = self.state.lock().unwrap();
         let account = state.account(&self.sender).unwrap();
-        TestTransactionBuilder::new(self.sender, account.gas, gas_price)
-            .programmable(builder.finish())
-            .build_and_sign(account.key())
+        let mut tx_builder = TestTransactionBuilder::new(self.sender, account.gas, gas_price);
+        {
+            let builder = tx_builder.ptb_builder_mut();
+            let args = vec![
+                builder
+                    .obj(match &self.object_ref.0 {
+                        FullObjectID::Fastpath(_) => {
+                            ObjectArg::ImmOrOwnedObject(self.object_ref.as_object_ref())
+                        }
+                        FullObjectID::Consensus((id, initial_shared_version)) => {
+                            ObjectArg::SharedObject {
+                                id: *id,
+                                initial_shared_version: *initial_shared_version,
+                                mutability: SharedObjectMutability::Mutable,
+                            }
+                        }
+                    })
+                    .unwrap(),
+                builder.pure(next_recipient).unwrap(),
+            ];
+            builder.programmable_move_call(
+                self.package_id,
+                Identifier::new("party").unwrap(),
+                // Randomly transfer object to either ConsensusV2 or AddressOwner.
+                [
+                    Identifier::new("transfer_party").unwrap(),
+                    Identifier::new("transfer_fastpath").unwrap(),
+                ]
+                .into_iter()
+                .choose(&mut rand::thread_rng())
+                .unwrap(),
+                vec![],
+                args,
+            );
+        }
+
+        tx_builder.build_and_sign(account.key())
     }
 }
 
@@ -233,7 +233,8 @@ pub struct PartyWorkload {
 impl Workload<dyn Payload> for PartyWorkload {
     async fn init(
         &mut self,
-        proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        execution_proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        _fullnode_proxies: Vec<Arc<dyn ValidatorProxy + Sync + Send>>,
         system_state_observer: Arc<SystemStateObserver>,
     ) {
         let (first_gas, _) = self
@@ -245,13 +246,14 @@ impl Workload<dyn Payload> for PartyWorkload {
         path.push("src/workloads/data/party");
         let SystemState {
             reference_gas_price,
-            protocol_config: _,
+            ..
         } = system_state_observer.state.borrow().clone();
         let transaction =
             TestTransactionBuilder::new(first_gas.1, first_gas.0, reference_gas_price)
-                .publish(path)
+                .publish_async(path)
+                .await
                 .build_and_sign(first_gas.2.as_ref());
-        let (_, execution_result) = proxy.execute_transaction_block(transaction).await;
+        let (_, execution_result) = execution_proxy.execute_transaction_block(transaction).await;
         let effects = execution_result.unwrap();
         assert!(effects.is_ok(), "Failed to publish party package");
         let created = effects.created();
@@ -259,18 +261,19 @@ impl Workload<dyn Payload> for PartyWorkload {
             .iter()
             .find(|o| matches!(o.1, Owner::Immutable))
             .unwrap();
-        self.package_id = package_obj.0 .0;
+        self.package_id = package_obj.0.0;
         info!("Party package id {:?}", self.package_id);
     }
 
     async fn make_test_payloads(
         &self,
-        proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        execution_proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        _fullnode_proxies: Vec<Arc<dyn ValidatorProxy + Sync + Send>>,
         system_state_observer: Arc<SystemStateObserver>,
     ) -> Vec<Box<dyn Payload>> {
         let SystemState {
             reference_gas_price,
-            protocol_config: _,
+            ..
         } = system_state_observer.state.borrow().clone();
 
         let state = Arc::new(Mutex::new(InMemoryWallet::new_empty()));
@@ -282,9 +285,10 @@ impl Workload<dyn Payload> for PartyWorkload {
                 .build_and_sign(keypair.as_ref());
             let state = state.clone();
             let system_state_observer = system_state_observer.clone();
-            let proxy = proxy.clone();
+            let execution_proxy = execution_proxy.clone();
             futures.push(async move {
-                let (_, execution_result) = proxy.execute_transaction_block(transaction).await;
+                let (_, execution_result) =
+                    execution_proxy.execute_transaction_block(transaction).await;
                 let effects = execution_result.unwrap();
                 let (
                     obj_ref,
@@ -327,9 +331,10 @@ impl Workload<dyn Payload> for PartyWorkload {
                 .build_and_sign(keypair.as_ref());
             let state = state.clone();
             let system_state_observer = system_state_observer.clone();
-            let proxy = proxy.clone();
+            let execution_proxy = execution_proxy.clone();
             futures.push(async move {
-                let (_, execution_result) = proxy.execute_transaction_block(transaction).await;
+                let (_, execution_result) =
+                    execution_proxy.execute_transaction_block(transaction).await;
                 let effects = execution_result.unwrap();
                 let (obj_ref, Owner::AddressOwner(owner)) = effects.created()[0] else {
                     panic!("create_fastpath should always create an AddressOwner object");

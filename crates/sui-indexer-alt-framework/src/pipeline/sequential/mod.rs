@@ -3,19 +3,22 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-use tokio::{sync::mpsc, task::JoinHandle};
-use tokio_util::sync::CancellationToken;
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde::Serialize;
+use sui_futures::service::Service;
+use tokio::sync::mpsc;
+use tracing::info;
 
-use super::{processor::processor, CommitterConfig, Processor, PIPELINE_BUFFER};
-
-use crate::{
-    metrics::IndexerMetrics,
-    store::{CommitterWatermark, Store, TransactionalStore},
-    types::full_checkpoint_content::CheckpointData,
-};
-
-use self::committer::committer;
+use crate::config::ConcurrencyConfig;
+use crate::ingestion::ingestion_client::CheckpointEnvelope;
+use crate::metrics::IndexerMetrics;
+use crate::pipeline::CommitterConfig;
+use crate::pipeline::Processor;
+use crate::pipeline::processor::processor;
+use crate::pipeline::sequential::committer::committer;
+use crate::store::Store;
+use crate::store::TransactionalStore;
 
 mod committer;
 
@@ -36,7 +39,7 @@ mod committer;
 /// for, and in turn the ingestion service will only run ahead by its buffer size. This guarantees
 /// liveness and limits the amount of memory the pipeline can consume, by bounding the number of
 /// checkpoints that can be received before the next checkpoint.
-#[async_trait::async_trait]
+#[async_trait]
 pub trait Handler: Processor {
     type Store: TransactionalStore;
 
@@ -54,25 +57,45 @@ pub trait Handler: Processor {
     type Batch: Default + Send + Sync + 'static;
 
     /// Add `values` from processing a checkpoint to the current `batch`. Checkpoints are
-    /// guaranteed to be presented to the batch in checkpoint order.
-    fn batch(batch: &mut Self::Batch, values: Vec<Self::Value>);
+    /// guaranteed to be presented to the batch in checkpoint order. The handler takes ownership
+    /// of the iterator and consumes all values.
+    ///
+    /// Returns `BatchStatus::Ready` if the batch is full and should be committed,
+    /// or `BatchStatus::Pending` if the batch can accept more values.
+    ///
+    /// Note: The handler can signal batch readiness via `BatchStatus::Ready`, but the framework
+    /// may also decide to commit a batch based on the trait parameters above.
+    fn batch(&self, batch: &mut Self::Batch, values: std::vec::IntoIter<Self::Value>);
 
     /// Take a batch of values and commit them to the database, returning the number of rows
     /// affected.
     async fn commit<'a>(
+        &self,
         batch: &Self::Batch,
         conn: &mut <Self::Store as Store>::Connection<'a>,
     ) -> anyhow::Result<usize>;
 }
 
 /// Configuration for a sequential pipeline
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct SequentialConfig {
     /// Configuration for the writer, that makes forward progress.
     pub committer: CommitterConfig,
 
     /// How many checkpoints to hold back writes for.
     pub checkpoint_lag: u64,
+
+    /// Processor concurrency. Defaults to adaptive scaling up to the number of CPUs.
+    pub fanout: Option<ConcurrencyConfig>,
+
+    /// Override for `Handler::MIN_EAGER_ROWS` (eager batch threshold).
+    pub min_eager_rows: Option<usize>,
+
+    /// Override for `Handler::MAX_BATCH_CHECKPOINTS` (checkpoints per write batch).
+    pub max_batch_checkpoints: Option<usize>,
+
+    /// Size of the channel between the processor and committer.
+    pub processor_channel_size: Option<usize>,
 }
 
 /// Start a new sequential (in-order) indexing pipeline, served by the handler, `H`. Starting
@@ -97,40 +120,61 @@ pub struct SequentialConfig {
 ///
 /// Checkpoint data is fed into the pipeline through the `checkpoint_rx` channel, watermark updates
 /// are communicated to the ingestion service through the `watermark_tx` channel and internal
-/// channels are created to communicate between its various components. The pipeline can be
-/// shutdown using its `cancel` token, and will also shutdown if any of its input or output
-/// channels close, or any of its independent tasks fail.
+/// channels are created to communicate between its various components. The pipeline will shutdown
+/// if any of its input or output channels close, any of its independent tasks fail, or if it is
+/// signalled to shutdown through the returned service handle.
 pub(crate) fn pipeline<H: Handler + Send + Sync + 'static>(
     handler: H,
-    initial_watermark: Option<CommitterWatermark>,
+    next_checkpoint: u64,
     config: SequentialConfig,
     db: H::Store,
-    checkpoint_rx: mpsc::Receiver<Arc<CheckpointData>>,
-    watermark_tx: mpsc::UnboundedSender<(&'static str, u64)>,
+    checkpoint_rx: mpsc::Receiver<Arc<CheckpointEnvelope>>,
+    commit_hi_tx: mpsc::UnboundedSender<(&'static str, u64)>,
     metrics: Arc<IndexerMetrics>,
-    cancel: CancellationToken,
-) -> JoinHandle<()> {
-    let (processor_tx, committer_rx) = mpsc::channel(H::FANOUT + PIPELINE_BUFFER);
+) -> Service {
+    info!(
+        pipeline = H::NAME,
+        "Starting pipeline with config: {config:#?}",
+    );
 
-    let processor = processor(
-        Arc::new(handler),
+    let concurrency = config
+        .fanout
+        .clone()
+        .unwrap_or(ConcurrencyConfig::Adaptive {
+            initial: 1,
+            min: 1,
+            max: num_cpus::get(),
+            dead_band: None,
+        });
+    let min_eager_rows = config.min_eager_rows.unwrap_or(H::MIN_EAGER_ROWS);
+    let max_batch_checkpoints = config
+        .max_batch_checkpoints
+        .unwrap_or(H::MAX_BATCH_CHECKPOINTS);
+
+    let processor_channel_size = config.processor_channel_size.unwrap_or(num_cpus::get() / 2);
+    let (processor_tx, committer_rx) = mpsc::channel(processor_channel_size);
+
+    let handler = Arc::new(handler);
+
+    let s_processor = processor(
+        handler.clone(),
         checkpoint_rx,
         processor_tx,
         metrics.clone(),
-        cancel.clone(),
+        concurrency,
     );
 
-    let committer = committer::<H>(
+    let s_committer = committer::<H>(
+        handler,
         config,
-        initial_watermark,
+        next_checkpoint,
         committer_rx,
-        watermark_tx,
+        commit_hi_tx,
         db,
         metrics.clone(),
-        cancel.clone(),
+        min_eager_rows,
+        max_batch_checkpoints,
     );
 
-    tokio::spawn(async move {
-        let (_, _) = futures::join!(processor, committer);
-    })
+    s_processor.merge(s_committer)
 }

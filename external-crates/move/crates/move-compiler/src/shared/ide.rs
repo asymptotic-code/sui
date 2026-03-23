@@ -10,10 +10,10 @@ use crate::{
     },
     naming::ast as N,
     parser::ast as P,
-    shared::Name,
-    shared::string_utils::format_oxford_list,
+    shared::{
+        Name, stdlib_definitions::UNIT_TEST_POISON_INJECTION_NAME, string_utils::format_oxford_list,
+    },
     typing::ast as T,
-    unit_test::filter_test_members::UNIT_TEST_POISON_FUN_NAME,
 };
 
 use move_core_types::parsing::address::NumericalAddress;
@@ -49,6 +49,8 @@ pub enum IDEAnnotation {
     MissingMatchArms(Box<MissingMatchArmsInfo>),
     /// Ellipsis Match Arm.
     EllipsisMatchEntries(Box<EllipsisMatchEntries>),
+    /// String Value.
+    StringValue(Box<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -223,7 +225,7 @@ impl
 
         for (symbol, entry) in leading_names
             .iter()
-            .filter(|(symbol, _)| symbol.to_string() != UNIT_TEST_POISON_FUN_NAME.to_string())
+            .filter(|(symbol, _)| symbol.to_string() != UNIT_TEST_POISON_INJECTION_NAME.to_string())
         {
             match entry {
                 LeadingAccessEntry::Address(addr) => {
@@ -247,10 +249,10 @@ impl
         // The member names shadow, though this should be no issue as they should be identical.
         for (symbol, entry) in member_names
             .iter()
-            .filter(|(symbol, _)| symbol.to_string() != UNIT_TEST_POISON_FUN_NAME.to_string())
+            .filter(|(symbol, _)| symbol.to_string() != UNIT_TEST_POISON_INJECTION_NAME.to_string())
         {
             match entry {
-                MemberEntry::Member(mident, name) => {
+                MemberEntry::Member(mident, name, _) => {
                     members
                         .entry((*mident, name.value))
                         .or_default()
@@ -259,6 +261,7 @@ impl
                 MemberEntry::TypeParam => {
                     type_params.insert(*symbol);
                 }
+                MemberEntry::LambdaParam => (),
             }
         }
 
@@ -371,6 +374,9 @@ impl From<(Loc, IDEAnnotation)> for Diagnostic {
                 let msg = format!("Ellipsis expansion: {}", entries);
                 diag!(IDE::EllipsisExpansion, (loc, msg))
             }
+            IDEAnnotation::StringValue(s) => {
+                diag!(IDE::StringValue, (loc, format!("String value: {}", s)))
+            }
         }
     }
 }
@@ -388,8 +394,7 @@ impl fmt::Display for PatternSuggestion {
                 field_count,
             } => {
                 write!(f, "{module}::{name}")?;
-                let wildcards = std::iter::repeat("_")
-                    .take(*field_count)
+                let wildcards = std::iter::repeat_n("_", *field_count)
                     .collect::<Vec<_>>()
                     .join(", ");
                 write!(f, "({wildcards})")
@@ -401,8 +406,7 @@ impl fmt::Display for PatternSuggestion {
                 field_count,
             } => {
                 write!(f, "{module}::{enum_name}::{variant_name}")?;
-                let wildcards = std::iter::repeat("_")
-                    .take(*field_count)
+                let wildcards = std::iter::repeat_n("_", *field_count)
                     .collect::<Vec<_>>()
                     .join(", ");
                 write!(f, "({wildcards})")

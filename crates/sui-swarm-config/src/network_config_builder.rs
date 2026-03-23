@@ -5,22 +5,42 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::{num::NonZeroUsize, path::Path, sync::Arc};
 
+use mysten_common::in_test_configuration;
 use rand::rngs::OsRng;
+use sui_config::ExecutionCacheConfig;
 use sui_config::genesis::{TokenAllocation, TokenDistributionScheduleBuilder};
 use sui_config::node::AuthorityOverloadConfig;
-use sui_config::ExecutionCacheConfig;
+#[cfg(msim)]
+use sui_config::node::ExecutionTimeObserverConfig;
+use sui_config::node::FundsWithdrawSchedulerType;
 use sui_protocol_config::Chain;
 use sui_types::base_types::{AuthorityName, SuiAddress};
 use sui_types::committee::{Committee, ProtocolVersion};
-use sui_types::crypto::{get_key_pair_from_rng, AccountKeyPair, KeypairTraits, PublicKey};
+use sui_types::crypto::{
+    AccountKeyPair, AuthorityKeyPair, KeypairTraits, PublicKey, get_key_pair_from_rng,
+};
 use sui_types::object::Object;
 use sui_types::supported_protocol_versions::SupportedProtocolVersions;
 use sui_types::traffic_control::{PolicyConfig, RemoteFirewallConfig};
 
-use crate::genesis_config::{AccountConfig, ValidatorGenesisConfigBuilder, DEFAULT_GAS_AMOUNT};
+use crate::genesis_config::{AccountConfig, DEFAULT_GAS_AMOUNT, ValidatorGenesisConfigBuilder};
 use crate::genesis_config::{GenesisConfig, ValidatorGenesisConfig};
 use crate::network_config::NetworkConfig;
 use crate::node_config_builder::ValidatorConfigBuilder;
+
+pub struct KeyPairWrapper {
+    pub account_key_pair: AccountKeyPair,
+    pub protocol_key_pair: Option<AuthorityKeyPair>,
+}
+
+impl Clone for KeyPairWrapper {
+    fn clone(&self) -> Self {
+        Self {
+            account_key_pair: self.account_key_pair.copy(),
+            protocol_key_pair: self.protocol_key_pair.as_ref().map(|k| k.copy()),
+        }
+    }
+}
 
 pub enum CommitteeConfig {
     Size(NonZeroUsize),
@@ -28,7 +48,7 @@ pub enum CommitteeConfig {
     AccountKeys(Vec<AccountKeyPair>),
     /// Indicates that a committee should be deterministically generated, using the provided rng
     /// as a source of randomness as well as generating deterministic network port information.
-    Deterministic((NonZeroUsize, Option<Vec<AccountKeyPair>>)),
+    Deterministic((NonZeroUsize, Option<Vec<KeyPairWrapper>>)),
 }
 
 pub type SupportedProtocolVersionsCallback = Arc<
@@ -60,6 +80,15 @@ pub enum GlobalStateHashV2EnabledConfig {
     PerValidator(GlobalStateHashV2EnabledCallback),
 }
 
+pub type FundsWithdrawSchedulerTypeCallback =
+    Arc<dyn Fn(usize) -> FundsWithdrawSchedulerType + Send + Sync + 'static>;
+
+#[derive(Clone)]
+pub enum FundsWithdrawSchedulerTypeConfig {
+    Global(FundsWithdrawSchedulerType),
+    PerValidator(FundsWithdrawSchedulerTypeCallback),
+}
+
 pub struct ConfigBuilder<R = OsRng> {
     rng: Option<R>,
     config_directory: PathBuf,
@@ -79,10 +108,31 @@ pub struct ConfigBuilder<R = OsRng> {
     max_submit_position: Option<usize>,
     submit_delay_step_override_millis: Option<u64>,
     global_state_hash_v2_enabled_config: Option<GlobalStateHashV2EnabledConfig>,
+    funds_withdraw_scheduler_type_config: Option<FundsWithdrawSchedulerTypeConfig>,
+    state_sync_config: Option<sui_config::p2p::StateSyncConfig>,
+    #[cfg(msim)]
+    execution_time_observer_config: Option<ExecutionTimeObserverConfig>,
 }
 
 impl ConfigBuilder {
     pub fn new<P: AsRef<Path>>(config_directory: P) -> Self {
+        // In test configuration, alternate scheduler types between validators
+        // so that half use Eager and half use Naive. This allows testing both
+        // scheduler implementations and catching any discrepancies via quorum comparison.
+        let funds_withdraw_scheduler_type_config = if in_test_configuration() {
+            Some(FundsWithdrawSchedulerTypeConfig::PerValidator(Arc::new(
+                |idx| {
+                    if idx % 2 == 0 {
+                        FundsWithdrawSchedulerType::Eager
+                    } else {
+                        FundsWithdrawSchedulerType::Naive
+                    }
+                },
+            )))
+        } else {
+            None
+        };
+
         Self {
             rng: Some(OsRng),
             config_directory: config_directory.as_ref().into(),
@@ -104,6 +154,10 @@ impl ConfigBuilder {
             max_submit_position: None,
             submit_delay_step_override_millis: None,
             global_state_hash_v2_enabled_config: None,
+            funds_withdraw_scheduler_type_config,
+            state_sync_config: None,
+            #[cfg(msim)]
+            execution_time_observer_config: None,
         }
     }
 
@@ -128,7 +182,7 @@ impl<R> ConfigBuilder<R> {
         self
     }
 
-    pub fn deterministic_committee_validators(mut self, keys: Vec<AccountKeyPair>) -> Self {
+    pub fn deterministic_committee_validators(mut self, keys: Vec<KeyPairWrapper>) -> Self {
         self.committee = CommitteeConfig::Deterministic((
             NonZeroUsize::new(keys.len()).expect("Validator keys should be non empty"),
             Some(keys),
@@ -250,6 +304,38 @@ impl<R> ConfigBuilder<R> {
         self
     }
 
+    pub fn with_funds_withdraw_scheduler_type(
+        mut self,
+        scheduler_type: FundsWithdrawSchedulerType,
+    ) -> Self {
+        self.funds_withdraw_scheduler_type_config =
+            Some(FundsWithdrawSchedulerTypeConfig::Global(scheduler_type));
+        self
+    }
+
+    pub fn with_funds_withdraw_scheduler_type_callback(
+        mut self,
+        func: FundsWithdrawSchedulerTypeCallback,
+    ) -> Self {
+        self.funds_withdraw_scheduler_type_config =
+            Some(FundsWithdrawSchedulerTypeConfig::PerValidator(func));
+        self
+    }
+
+    pub fn with_funds_withdraw_scheduler_type_config(
+        mut self,
+        c: FundsWithdrawSchedulerTypeConfig,
+    ) -> Self {
+        self.funds_withdraw_scheduler_type_config = Some(c);
+        self
+    }
+
+    #[cfg(msim)]
+    pub fn with_execution_time_observer_config(mut self, c: ExecutionTimeObserverConfig) -> Self {
+        self.execution_time_observer_config = Some(c);
+        self
+    }
+
     pub fn with_authority_overload_config(mut self, c: AuthorityOverloadConfig) -> Self {
         self.authority_overload_config = Some(c);
         self
@@ -303,7 +389,16 @@ impl<R> ConfigBuilder<R> {
             max_submit_position: self.max_submit_position,
             submit_delay_step_override_millis: self.submit_delay_step_override_millis,
             global_state_hash_v2_enabled_config: self.global_state_hash_v2_enabled_config,
+            funds_withdraw_scheduler_type_config: self.funds_withdraw_scheduler_type_config,
+            state_sync_config: self.state_sync_config,
+            #[cfg(msim)]
+            execution_time_observer_config: self.execution_time_observer_config,
         }
+    }
+
+    pub fn with_state_sync_config(mut self, config: sui_config::p2p::StateSyncConfig) -> Self {
+        self.state_sync_config = Some(config);
+        self
     }
 
     fn get_or_init_genesis_config(&mut self) -> &mut GenesisConfig {
@@ -358,21 +453,27 @@ impl<R: rand::RngCore + rand::CryptoRng> ConfigBuilder<R> {
                     })
                     .collect::<Vec<_>>()
             }
-            CommitteeConfig::Deterministic((size, keys)) => {
+            CommitteeConfig::Deterministic((size, key_pair_wrappers)) => {
                 // If no keys are provided, generate them.
-                let keys = keys.unwrap_or(
+                let keys = key_pair_wrappers.unwrap_or_else(|| {
                     (0..size.get())
-                        .map(|_| get_key_pair_from_rng(&mut rng).1)
-                        .collect(),
-                );
+                        .map(|_| KeyPairWrapper {
+                            account_key_pair: get_key_pair_from_rng(&mut rng).1,
+                            protocol_key_pair: None,
+                        })
+                        .collect()
+                });
 
                 let mut configs = vec![];
                 for (i, key) in keys.into_iter().enumerate() {
                     let port_offset = 8000 + i * 10;
                     let mut builder = ValidatorGenesisConfigBuilder::new()
                         .with_ip("127.0.0.1".to_owned())
-                        .with_account_key_pair(key)
+                        .with_account_key_pair(key.account_key_pair)
                         .with_deterministic_ports(port_offset as u16);
+                    if let Some(protocol_key_pair) = key.protocol_key_pair {
+                        builder = builder.with_protocol_key_pair(protocol_key_pair);
+                    }
                     if let Some(rgp) = self.reference_gas_price {
                         builder = builder.with_gas_price(rgp);
                     }
@@ -479,6 +580,17 @@ impl<R: rand::RngCore + rand::CryptoRng> ConfigBuilder<R> {
                     builder = builder.with_data_ingestion_dir(path.clone());
                 }
 
+                if let Some(state_sync_config) = &self.state_sync_config {
+                    builder = builder.with_state_sync_config(state_sync_config.clone());
+                }
+
+                #[cfg(msim)]
+                if let Some(execution_time_observer_config) = &self.execution_time_observer_config {
+                    builder = builder.with_execution_time_observer_config(
+                        execution_time_observer_config.clone(),
+                    );
+                }
+
                 if let Some(spvc) = &self.supported_protocol_versions_config {
                     let supported_versions = match spvc {
                         ProtocolVersionsConfig::Default => {
@@ -499,10 +611,17 @@ impl<R: rand::RngCore + rand::CryptoRng> ConfigBuilder<R> {
                     builder =
                         builder.with_global_state_hash_v2_enabled(global_state_hash_v2_enabled);
                 }
-                if let Some(num_unpruned_validators) = self.num_unpruned_validators {
-                    if idx < num_unpruned_validators {
-                        builder = builder.with_unpruned_checkpoints();
-                    }
+                if let Some(scheduler_type_config) = &self.funds_withdraw_scheduler_type_config {
+                    let scheduler_type = match scheduler_type_config {
+                        FundsWithdrawSchedulerTypeConfig::Global(t) => *t,
+                        FundsWithdrawSchedulerTypeConfig::PerValidator(func) => func(idx),
+                    };
+                    builder = builder.with_funds_withdraw_scheduler_type(scheduler_type);
+                }
+                if let Some(num_unpruned_validators) = self.num_unpruned_validators
+                    && idx < num_unpruned_validators
+                {
+                    builder = builder.with_unpruned_checkpoints();
                 }
                 builder.build(validator, genesis.clone())
             })
@@ -602,7 +721,7 @@ mod test {
         let genesis_digest = *genesis_transaction.digest();
 
         let silent = true;
-        let executor = sui_execution::executor(&protocol_config, silent, None)
+        let executor = sui_execution::executor(&protocol_config, silent)
             .expect("Creating an executor should not fail here");
 
         // Use a throwaway metrics registry for genesis transaction execution.

@@ -1,24 +1,26 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
-use crate::NativesCostTable;
+use crate::{NativesCostTable, get_extension};
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::hash::{Keccak256, Sha256};
 use fastcrypto::traits::RecoverableSignature;
 use fastcrypto::{
     secp256r1::{
-        recoverable::Secp256r1RecoverableSignature, Secp256r1PublicKey, Secp256r1Signature,
+        Secp256r1PublicKey, Secp256r1Signature, recoverable::Secp256r1RecoverableSignature,
     },
     traits::ToFromBytes,
 };
 use move_binary_format::errors::PartialVMResult;
 use move_core_types::gas_algebra::InternalGas;
 use move_vm_runtime::native_charge_gas_early_exit;
-use move_vm_runtime::native_functions::NativeContext;
-use move_vm_types::{
-    loaded_data::runtime_types::Type,
-    natives::function::NativeResult,
+use move_vm_runtime::natives::functions::NativeContext;
+use move_vm_runtime::{
+    execution::{
+        Type,
+        values::{Value, VectorRef},
+    },
+    natives::functions::NativeResult,
     pop_arg,
-    values::{Value, VectorRef},
 };
 use smallvec::smallvec;
 use std::collections::VecDeque;
@@ -71,7 +73,7 @@ pub fn ecrecover(
 
     // Load the cost parameters from the protocol config
     let (ecdsa_r1_ecrecover_cost_params, crypto_invalid_arguments_cost) = {
-        let cost_table = &context.extensions().get::<NativesCostTable>()?;
+        let cost_table: &NativesCostTable = get_extension!(context)?;
         (
             cost_table.ecdsa_r1_ecrecover_cost_params.clone(),
             cost_table.crypto_invalid_arguments_cost,
@@ -93,7 +95,7 @@ pub fn ecrecover(
         ),
         _ => {
             // Charge for failure but dont fail if we run out of gas otherwise the actual error is masked by OUT_OF_GAS error
-            context.charge_gas(crypto_invalid_arguments_cost);
+            context.charge_gas(crypto_invalid_arguments_cost)?;
 
             return Ok(NativeResult::err(
                 context.gas_used(),
@@ -108,8 +110,8 @@ pub fn ecrecover(
     let msg = pop_arg!(args, VectorRef);
     let signature = pop_arg!(args, VectorRef);
 
-    let msg_ref = msg.as_bytes_ref();
-    let signature_ref = signature.as_bytes_ref();
+    let msg_ref = msg.as_bytes_ref()?;
+    let signature_ref = signature.as_bytes_ref()?;
 
     // Charge the arg size dependent costs
     native_charge_gas_early_exit!(
@@ -175,7 +177,7 @@ pub fn secp256r1_verify(
     debug_assert!(args.len() == 4);
     // Load the cost parameters from the protocol config
     let (ecdsa_r1_secp256_r1_verify_cost_params, crypto_invalid_arguments_cost) = {
-        let cost_table = &context.extensions().get::<NativesCostTable>()?;
+        let cost_table: &NativesCostTable = get_extension!(context)?;
         (
             cost_table.ecdsa_r1_secp256_r1_verify_cost_params.clone(),
             cost_table.crypto_invalid_arguments_cost,
@@ -201,7 +203,7 @@ pub fn secp256r1_verify(
         ),
         _ => {
             // Charge for failure but dont fail if we run out of gas otherwise the actual error is masked by OUT_OF_GAS error
-            context.charge_gas(crypto_invalid_arguments_cost);
+            context.charge_gas(crypto_invalid_arguments_cost)?;
             return Ok(NativeResult::ok(
                 context.gas_used(),
                 smallvec![Value::bool(false)],
@@ -216,9 +218,9 @@ pub fn secp256r1_verify(
     let public_key_bytes = pop_arg!(args, VectorRef);
     let signature_bytes = pop_arg!(args, VectorRef);
 
-    let msg_ref = msg.as_bytes_ref();
-    let public_key_bytes_ref = public_key_bytes.as_bytes_ref();
-    let signature_bytes_ref = signature_bytes.as_bytes_ref();
+    let msg_ref = msg.as_bytes_ref()?;
+    let public_key_bytes_ref = public_key_bytes.as_bytes_ref()?;
+    let signature_bytes_ref = signature_bytes.as_bytes_ref()?;
 
     // Charge the arg size dependent costs
     native_charge_gas_early_exit!(

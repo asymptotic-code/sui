@@ -1,12 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
+use crate::Config;
 use crate::certificate_deny_config::CertificateDenyConfig;
 use crate::genesis;
 use crate::object_storage_config::ObjectStoreConfig;
 use crate::p2p::P2pConfig;
 use crate::transaction_deny_config::TransactionDenyConfig;
+use crate::validator_client_monitor_config::ValidatorClientMonitorConfig;
 use crate::verifier_signing_config::VerifierSigningConfig;
-use crate::Config;
 use anyhow::Result;
 use consensus_config::Parameters as ConsensusParameters;
 use mysten_common::fatal;
@@ -32,7 +33,7 @@ use sui_types::messages_checkpoint::CheckpointSequenceNumber;
 use sui_types::supported_protocol_versions::{Chain, SupportedProtocolVersions};
 use sui_types::traffic_control::{PolicyConfig, RemoteFirewallConfig};
 
-use sui_types::crypto::{get_key_pair_from_rng, AccountKeyPair, AuthorityKeyPair};
+use sui_types::crypto::{AccountKeyPair, AuthorityKeyPair, get_key_pair_from_rng};
 use sui_types::multiaddr::Multiaddr;
 use tracing::info;
 
@@ -44,6 +45,14 @@ pub const DEFAULT_VALIDATOR_GAS_PRICE: u64 = sui_types::transaction::DEFAULT_VAL
 
 /// Default commission rate of 2%
 pub const DEFAULT_COMMISSION_RATE: u64 = 200;
+
+/// The type of funds withdraw scheduler to use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FundsWithdrawSchedulerType {
+    Naive,
+    #[default]
+    Eager,
+}
 
 #[serde_as]
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -77,6 +86,13 @@ pub struct NodeConfig {
 
     #[serde(default = "default_enable_index_processing")]
     pub enable_index_processing: bool,
+
+    /// When true, post-processing (JSON-RPC indexing and event emission) runs
+    /// synchronously on the execution path instead of being spawned to a
+    /// background thread. This is the legacy behavior and can be used as a
+    /// rollback mechanism or for testing.
+    #[serde(default)]
+    pub sync_post_process_one_tx: bool,
 
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remove_deprecated_tables: bool,
@@ -138,6 +154,10 @@ pub struct NodeConfig {
     #[serde(default)]
     pub transaction_deny_config: TransactionDenyConfig,
 
+    /// Whether dev-inspect transaction execution is disabled on this node.
+    #[serde(default)]
+    pub dev_inspect_disabled: bool,
+
     #[serde(default)]
     pub certificate_deny_config: CertificateDenyConfig,
 
@@ -189,11 +209,14 @@ pub struct NodeConfig {
     #[serde(default = "bool_true")]
     pub state_accumulator_v2: bool,
 
-    #[serde(default = "bool_true")]
-    pub enable_soft_bundle: bool,
+    /// The type of funds withdraw scheduler to use.
+    /// Default is Eager. Not exposed to file configuration.
+    #[serde(skip)]
+    #[serde(default)]
+    pub funds_withdraw_scheduler_type: FundsWithdrawSchedulerType,
 
     #[serde(default = "bool_true")]
-    pub enable_validator_tx_finalizer: bool,
+    pub enable_soft_bundle: bool,
 
     #[serde(default)]
     pub verifier_signing_config: VerifierSigningConfig,
@@ -203,6 +226,12 @@ pub struct NodeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_db_write_stall: Option<bool>,
 
+    /// If set, determines whether database writes are synced to disk (fsync).
+    /// Provides stronger durability at the cost of write performance.
+    /// Falls back to SUI_DB_SYNC_TO_DISK env var if not set. Default: disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_db_sync_to_disk: Option<bool>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_time_observer_config: Option<ExecutionTimeObserverConfig>,
 
@@ -211,6 +240,103 @@ pub struct NodeConfig {
     /// override this value on production networks will result in an error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain_override_for_testing: Option<Chain>,
+
+    /// Configuration for validator client monitoring from the client perspective.
+    /// When enabled, tracks client-observed performance metrics for validators.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator_client_monitor_config: Option<ValidatorClientMonitorConfig>,
+
+    /// Fork recovery configuration for handling validator equivocation after forks
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork_recovery: Option<ForkRecoveryConfig>,
+
+    /// Configuration for the transaction driver.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_driver_config: Option<TransactionDriverConfig>,
+
+    /// Configuration for congestion tracker binary logging.
+    /// When set, enables per-commit binary logs of congestion tracker state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub congestion_log: Option<CongestionLogConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct TransactionDriverConfig {
+    /// The list of validators that are allowed to submit MFP transactions to (via the transaction driver).
+    /// Each entry is a validator display name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_submission_validators: Vec<String>,
+
+    /// The list of validators that are blocked from submitting block transactions to (via the transaction driver).
+    /// Each entry is a validator display name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_submission_validators: Vec<String>,
+
+    /// Enable early transaction validation before submission to consensus.
+    /// This checks for non-retriable errors (like old object versions) and rejects
+    /// transactions early to provide fast feedback to clients.
+    /// Note: Currently used in TransactionOrchestrator, but may be moved to TransactionDriver in future.
+    #[serde(default = "bool_true")]
+    pub enable_early_validation: bool,
+}
+
+impl Default for TransactionDriverConfig {
+    fn default() -> Self {
+        Self {
+            allowed_submission_validators: vec![],
+            blocked_submission_validators: vec![],
+            enable_early_validation: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct CongestionLogConfig {
+    pub path: PathBuf,
+    #[serde(default = "default_congestion_log_max_file_size")]
+    pub max_file_size: u64,
+    #[serde(default = "default_congestion_log_max_files")]
+    pub max_files: u32,
+}
+
+fn default_congestion_log_max_file_size() -> u64 {
+    100 * 1024 * 1024 // 100MB
+}
+
+fn default_congestion_log_max_files() -> u32 {
+    10
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ForkCrashBehavior {
+    #[serde(rename = "await-fork-recovery")]
+    #[default]
+    AwaitForkRecovery,
+    /// Return an error instead of blocking forever. This is primarily for testing.
+    #[serde(rename = "return-error")]
+    ReturnError,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ForkRecoveryConfig {
+    /// Map of transaction digest to effects digest overrides
+    /// Used to repoint transactions to correct effects after a fork
+    #[serde(default)]
+    pub transaction_overrides: BTreeMap<String, String>,
+
+    /// Map of checkpoint sequence number to checkpoint digest overrides
+    /// On node start, if we have a locally computed checkpoint with a
+    /// digest mismatch with this table, we will clear any associated local state.
+    #[serde(default)]
+    pub checkpoint_overrides: BTreeMap<u64, String>,
+
+    /// Behavior when a fork is detected after recovery attempts
+    #[serde(default)]
+    pub fork_crash_behavior: ForkCrashBehavior,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -291,6 +417,14 @@ pub struct ExecutionTimeObserverConfig {
     ///
     /// If unspecified, this will default to `20`.
     pub weighted_moving_average_window_size: Option<usize>,
+
+    /// Whether to inject synthetic execution time for testing in simtest.
+    /// When enabled, synthetic timings will be generated for execution time observations
+    /// to enable deterministic testing of congestion control features.
+    ///
+    /// If unspecified, this will default to `false`.
+    #[cfg(msim)]
+    pub inject_synthetic_execution_time: Option<bool>,
 }
 
 impl ExecutionTimeObserverConfig {
@@ -349,6 +483,11 @@ impl ExecutionTimeObserverConfig {
     pub fn weighted_moving_average_window_size(&self) -> usize {
         self.weighted_moving_average_window_size.unwrap_or(20)
     }
+
+    #[cfg(msim)]
+    pub fn inject_synthetic_execution_time(&self) -> bool {
+        self.inject_synthetic_execution_time.unwrap_or(false)
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -381,8 +520,6 @@ pub enum ExecutionCacheConfig {
         /// Number of uncommitted transactions at which to refuse new transaction
         /// submissions. Defaults to backpressure_threshold if unset.
         backpressure_threshold_for_rpc: Option<u64>,
-
-        fastpath_transaction_outputs_cache_size: Option<u64>,
     },
 }
 
@@ -401,7 +538,6 @@ impl Default for ExecutionCacheConfig {
             effect_cache_size: None,
             events_cache_size: None,
             transaction_objects_cache_size: None,
-            fastpath_transaction_outputs_cache_size: None,
         }
     }
 }
@@ -556,19 +692,6 @@ impl ExecutionCacheConfig {
                 } => backpressure_threshold_for_rpc.unwrap_or(self.backpressure_threshold()),
             })
     }
-
-    pub fn fastpath_transaction_outputs_cache_size(&self) -> u64 {
-        std::env::var("SUI_FASTPATH_TRANSACTION_OUTPUTS_CACHE_SIZE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| match self {
-                ExecutionCacheConfig::PassthroughCache => fatal!("invalid cache config"),
-                ExecutionCacheConfig::WritebackCache {
-                    fastpath_transaction_outputs_cache_size,
-                    ..
-                } => fastpath_transaction_outputs_cache_size.unwrap_or(10_000),
-            })
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -629,9 +752,13 @@ pub fn default_zklogin_oauth_providers() -> BTreeMap<Chain, BTreeSet<String>> {
         "Threedos".to_string(),
         "Onefc".to_string(),
         "FanTV".to_string(),
-        "AwsTenant-region:us-east-1-tenant_id:us-east-1_qPsZxYqd8".to_string(), // Ambrus, external partner
-        "Arden".to_string(),                                                    // Arden partner
+        "Arden".to_string(), // Arden partner
         "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es".to_string(), // Trace, external partner
+        "EveFrontier".to_string(),
+        "TestEveFrontier".to_string(),
+        "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz".to_string(), // Decot, external partner
+        "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_rz7IVMOR5".to_string(), // test Gamma Prime, external partner
+        "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_K3XgRburu".to_string(), // Gamma Prime, external partner
     ]);
 
     // providers that are available for mainnet and testnet.
@@ -640,7 +767,6 @@ pub fn default_zklogin_oauth_providers() -> BTreeMap<Chain, BTreeSet<String>> {
         "Facebook".to_string(),
         "Twitch".to_string(),
         "Apple".to_string(),
-        "AwsTenant-region:us-east-1-tenant_id:us-east-1_qPsZxYqd8".to_string(), // Ambrus, external partner
         "KarrierOne".to_string(),
         "Credenza3".to_string(),
         "Playtron".to_string(),
@@ -649,6 +775,9 @@ pub fn default_zklogin_oauth_providers() -> BTreeMap<Chain, BTreeSet<String>> {
         "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es".to_string(), // Trace, external partner
         "Arden".to_string(),
         "FanTV".to_string(),
+        "EveFrontier".to_string(),
+        "TestEveFrontier".to_string(),
+        "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz".to_string(), // Decot, external partner
     ]);
     map.insert(Chain::Mainnet, providers.clone());
     map.insert(Chain::Testnet, providers);
@@ -834,6 +963,19 @@ pub struct ConsensusConfig {
     pub submit_delay_step_override_millis: Option<u64>,
 
     pub parameters: Option<ConsensusParameters>,
+
+    /// Override for the consensus network listen address.
+    /// When set, Mysticeti binds to this address instead of deriving from the committee.
+    /// Address override is advertised via the discovery protocol.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listen_address: Option<Multiaddr>,
+
+    /// External consensus address that should be advertised via the discovery protocol,
+    /// if it is different from `listen_address` above.
+    ///
+    /// When neither this nor `listen_address` is set, peers use the on-chain committee address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_address: Option<Multiaddr>,
 }
 
 impl ConsensusConfig {
@@ -928,6 +1070,13 @@ impl ExpensiveSafetyCheckConfig {
             enable_state_consistency_check: true,
             force_disable_state_consistency_check: false,
             enable_secondary_index_checks: false, // Disable by default for now
+        }
+    }
+
+    pub fn new_enable_all_with_secondary_index_checks() -> Self {
+        Self {
+            enable_secondary_index_checks: true,
+            ..Self::new_enable_all()
         }
     }
 
@@ -1027,13 +1176,6 @@ pub struct AuthorityStorePruningConfig {
     pub killswitch_tombstone_pruning: bool,
     #[serde(default = "default_smoothing", skip_serializing_if = "is_true")]
     pub smooth: bool,
-    /// Enables the compaction filter for pruning the objects table.
-    /// If disabled, a range deletion approach is used instead.
-    /// While it is generally safe to switch between the two modes,
-    /// switching from the compaction filter approach back to range deletion
-    /// may result in some old versions that will never be pruned.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub enable_compaction_filter: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub num_epochs_to_retain_for_indexes: Option<u64>,
 }
@@ -1075,7 +1217,6 @@ impl Default for AuthorityStorePruningConfig {
             num_epochs_to_retain_for_checkpoints: if cfg!(msim) { Some(2) } else { None },
             killswitch_tombstone_pruning: false,
             smooth: true,
-            enable_compaction_filter: cfg!(test) || cfg!(msim),
             num_epochs_to_retain_for_indexes: None,
         }
     }
@@ -1162,6 +1303,11 @@ pub struct StateSnapshotConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object_store_config: Option<ObjectStoreConfig>,
     pub concurrency: usize,
+    /// Archive snapshots every N epochs. If set to 0, archival is disabled.
+    /// Archived snapshots are copied to `archive/epoch_<N>/` in the same bucket
+    /// and are intended to be kept indefinitely.
+    #[serde(default)]
+    pub archive_interval_epochs: u64,
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
@@ -1233,7 +1379,7 @@ pub struct AuthorityOverloadConfig {
 }
 
 fn default_max_txn_age_in_queue() -> Duration {
-    Duration::from_millis(500)
+    Duration::from_millis(1000)
 }
 
 fn default_overload_monitor_interval() -> Duration {
@@ -1269,7 +1415,7 @@ fn default_max_transaction_manager_queue_length() -> usize {
 }
 
 fn default_max_transaction_manager_per_object_queue_length() -> usize {
-    20
+    2000
 }
 
 impl Default for AuthorityOverloadConfig {
@@ -1340,6 +1486,7 @@ impl Genesis {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Eq)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 enum GenesisLocation {
     InPlace {
         genesis: genesis::Genesis,
@@ -1509,15 +1656,31 @@ where
     let mut processed_options = Vec::new();
 
     for (key, value) in raw_options {
-        match read_credential_from_path_or_literal(&value) {
-            Ok(processed_value) => processed_options.push((key, processed_value)),
-            Err(e) => {
-                return Err(D::Error::custom(format!(
-                    "Failed to read credential for key '{}': {}",
-                    key, e
-                )))
+        // GCS service_account keys expect a file path, not the file content
+        // All other keys (AWS credentials, service_account_key) should read file content
+        let is_service_account_path = matches!(
+            key.as_str(),
+            "google_service_account"
+                | "service_account"
+                | "google_service_account_path"
+                | "service_account_path"
+        );
+
+        let processed_value = if is_service_account_path {
+            value
+        } else {
+            match read_credential_from_path_or_literal(&value) {
+                Ok(processed) => processed,
+                Err(e) => {
+                    return Err(D::Error::custom(format!(
+                        "Failed to read credential for key '{}': {}",
+                        key, e
+                    )));
+                }
             }
-        }
+        };
+
+        processed_options.push((key, processed_value));
     }
 
     Ok(processed_options)
@@ -1528,9 +1691,9 @@ mod tests {
     use std::path::PathBuf;
 
     use fastcrypto::traits::KeyPair;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
     use sui_keys::keypair_file::{write_authority_keypair_to_file, write_keypair_to_file};
-    use sui_types::crypto::{get_key_pair_from_rng, AuthorityKeyPair, NetworkKeyPair, SuiKeyPair};
+    use sui_types::crypto::{AuthorityKeyPair, NetworkKeyPair, SuiKeyPair, get_key_pair_from_rng};
 
     use super::{Genesis, StateArchiveConfig};
     use crate::NodeConfig;
@@ -1668,6 +1831,66 @@ remote-store-options:
         assert_eq!(config.remote_store_options.len(), 2);
         assert_eq!(config.remote_store_options[0].1, "literal_access_key");
         assert_eq!(config.remote_store_options[1].1, "literal_secret_key");
+    }
+
+    #[test]
+    fn test_remote_store_options_gcs_service_account_path_preserved() {
+        let temp_dir = std::env::temp_dir();
+        let service_account_file = temp_dir.join("test_service_account.json");
+        let aws_key_file = temp_dir.join("test_aws_key");
+
+        std::fs::write(&service_account_file, r#"{"type": "service_account"}"#).unwrap();
+        std::fs::write(&aws_key_file, "aws_key_value").unwrap();
+
+        let yaml_config = format!(
+            r#"
+object-store-config: null
+concurrency: 5
+ingestion-url: "gs://my-bucket"
+remote-store-options:
+  - ["service_account", "{}"]
+  - ["google_service_account_path", "{}"]
+  - ["aws_access_key_id", "{}"]
+"#,
+            service_account_file.to_string_lossy(),
+            service_account_file.to_string_lossy(),
+            aws_key_file.to_string_lossy()
+        );
+
+        let config: StateArchiveConfig = serde_yaml::from_str(&yaml_config).unwrap();
+
+        assert_eq!(config.remote_store_options.len(), 3);
+
+        // service_account should preserve the file path, not read the content
+        let service_account_option = config
+            .remote_store_options
+            .iter()
+            .find(|(key, _)| key == "service_account")
+            .unwrap();
+        assert_eq!(
+            service_account_option.1,
+            service_account_file.to_string_lossy()
+        );
+
+        // google_service_account_path should also preserve the file path
+        let gcs_path_option = config
+            .remote_store_options
+            .iter()
+            .find(|(key, _)| key == "google_service_account_path")
+            .unwrap();
+        assert_eq!(gcs_path_option.1, service_account_file.to_string_lossy());
+
+        // AWS key should read the file content
+        let aws_option = config
+            .remote_store_options
+            .iter()
+            .find(|(key, _)| key == "aws_access_key_id")
+            .unwrap();
+        assert_eq!(aws_option.1, "aws_key_value");
+
+        // Clean up
+        std::fs::remove_file(&service_account_file).ok();
+        std::fs::remove_file(&aws_key_file).ok();
     }
 }
 

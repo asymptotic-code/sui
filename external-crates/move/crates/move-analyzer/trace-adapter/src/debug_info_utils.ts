@@ -10,7 +10,9 @@ import { JSON_FILE_EXT } from './utils';
 // Data types corresponding to debug info file JSON schema.
 
 interface JSONSrcDefinitionLocation {
-    file_hash: number[];
+    // in an earlier version of the compiler it's a byte array,
+    // in the latest version it's a hex string
+    file_hash: number[] | string;
     start: number;
     end: number;
 }
@@ -47,6 +49,19 @@ interface JSONSrcRootObject {
     enum_map: Record<string, JSONSrcEnumSourceMapEntry>;
     function_map: Record<string, JSONSrcFunctionMapEntry>;
     constant_map: Record<string, string>;
+}
+
+/**
+ * Converts a file hash from JSON (either a hex string or a byte array)
+ * to the canonical version.
+ */
+function fileHashFromJSON(fileHash: number[] | string): string {
+    if (typeof fileHash === 'string') {
+        // later version: hex string like "d71f1b77..."
+        return Buffer.from(fileHash, 'hex').toString('base64');
+    }
+    // earlier version: byte array like [255, 42, 7, ...]
+    return Buffer.from(fileHash).toString('base64');
 }
 
 // Runtime data types.
@@ -110,8 +125,8 @@ export interface IDebugInfoFunction {
 export interface IFileInfo {
     // File path.
     path: string;
-    // File content.
-    content: string;
+    // File content as bytes.
+    content: Uint8Array;
     // File content split into lines (for efficient line/column calculations).
     lines: string[];
 }
@@ -137,19 +152,25 @@ export interface IDebugInfo {
  * is true, only debug infos whose respective source files are present in the filesMap
  * are included in the result.
  * @param directory directory containing debug info files.
+ * @param debugInfosMap map from stringified module info to debug info.
+ * @param allDebugInfoLinesMap map from file hash to set of lines present
+ * in all debug infos for a given file (a given debug info may contain
+ * source lines for different files due to inlining).
  * @param filesMap map from file hash to file information.
  * @param mustHaveSourceFile indicates whether resulting debug infos must have their
  * respective source files present in the filesMap.
+ * @param pkgVersionID optional on-chain package version ID to be used when
+ * building debug info for packages coming from the chain.
  * @returns map from stringified module info to debug info.
  */
 export function readAllDebugInfos(
     directory: string,
+    debugInfosMap: Map<string, IDebugInfo>,
+    allDebugInfoLinesMap: Map<string, Set<number>>,
     filesMap: Map<string, IFileInfo>,
     mustHaveSourceFile: boolean,
-): Map<string, IDebugInfo> {
-    const debugInfosMap = new Map<string, IDebugInfo>();
-    const allDebugInfoLinesMap = new Map<string, Set<number>>;
-
+    pkgVersionID?: string,
+): void {
     const processDirectory = (dir: string) => {
         const files = fs.readdirSync(dir);
         for (const f of files) {
@@ -159,7 +180,7 @@ export function readAllDebugInfos(
                 processDirectory(filePath);
             } else if (path.extname(f) === JSON_FILE_EXT) {
                 const debugInfo =
-                    readDebugInfo(filePath, filesMap, allDebugInfoLinesMap, mustHaveSourceFile);
+                    readDebugInfo(filePath, filesMap, allDebugInfoLinesMap, mustHaveSourceFile, pkgVersionID);
                 if (debugInfo) {
                     debugInfosMap.set(JSON.stringify(debugInfo.modInfo), debugInfo);
                 }
@@ -168,7 +189,21 @@ export function readAllDebugInfos(
     };
 
     processDirectory(directory);
+}
 
+/**
+ * Computes optimized lines for each debug info.
+ *
+ * @param debugInfosMap map from stringified module info to debug info.
+ * @param allDebugInfoLinesMap map from file hash to set of lines present
+ * in all debug infos for a given file (a given debug info may contain
+ * source lines for different files due to inlining).
+ */
+export function computeOptimizedLines(
+    debugInfosMap: Map<string, IDebugInfo>,
+    allDebugInfoLinesMap: Map<string, Set<number>>,
+    filesMap: Map<string, IFileInfo>,
+): void {
     for (const debugInfo of debugInfosMap.values()) {
         const fileHash = debugInfo.fileHash;
         const debugInfoLines = allDebugInfoLinesMap.get(fileHash);
@@ -181,9 +216,6 @@ export function readAllDebugInfos(
             }
         }
     }
-
-
-    return debugInfosMap;
 }
 
 /**
@@ -197,6 +229,8 @@ export function readAllDebugInfos(
  * source lines for different files due to inlining).
  * @param failOnNoSourceFile indicates if debug info retrieval should fail if the
  * source file is not present in the filesMap or if it should return `undefined`.
+ * @param pkgVersionID optional on-chain package version ID to be used when
+ * building debug info for packages coming from the chain.
  *
  * @returns debug info or `undefined` if `failOnNoSourceFile` is true and the source file
  * is not present in the filesMap.
@@ -207,10 +241,11 @@ function readDebugInfo(
     filesMap: Map<string, IFileInfo>,
     debugInfoLinesMap: Map<string, Set<number>>,
     failOnNoSourceFile: boolean,
+    pkgVersionID?: string,
 ): IDebugInfo | undefined {
     const debugInfoJSON: JSONSrcRootObject = JSON.parse(fs.readFileSync(debugInfoPath, 'utf8'));
 
-    let fileHash = Buffer.from(debugInfoJSON.definition_location.file_hash).toString('base64');
+    let fileHash = fileHashFromJSON(debugInfoJSON.definition_location.file_hash);
     let fileInfo = filesMap.get(fileHash);
     if (!fileInfo) {
         if (failOnNoSourceFile) {
@@ -233,9 +268,18 @@ function readDebugInfo(
         filesMap.set(fileHash, fileInfo);
     }
 
+    // if package version ID is available, use it to override module address
+    // found in the debug info if this module address is 0 (which is the case
+    // when a package is build locally from sources).
+    const debugInfoAddrStr = debugInfoJSON.module_name[0];
+    const debugInfoModAddr = parseInt(debugInfoAddrStr, 16);
+
+    const addr = pkgVersionID && debugInfoModAddr === 0 ? pkgVersionID : debugInfoAddrStr;
+    const name = debugInfoJSON.module_name[1];
+
     const modInfo: ModuleInfo = {
-        addr: debugInfoJSON.module_name[0],
-        name: debugInfoJSON.module_name[1]
+        addr,
+        name,
     };
     const functions = new Map<string, IDebugInfoFunction>();
     const debugInfoLines = debugInfoLinesMap.get(fileHash) ?? new Set<number>;
@@ -245,7 +289,8 @@ function readDebugInfo(
     for (const funEntry of Object.values(functionMap)) {
         let nameStart = funEntry.definition_location.start;
         let nameEnd = funEntry.definition_location.end;
-        const funName = fileInfo.content.slice(nameStart, nameEnd);
+        const nameBytes = fileInfo.content.slice(nameStart, nameEnd);
+        const funName = Buffer.from(nameBytes).toString('utf8');
         const pcLocs: IFileLoc[] = [];
         let prevPC = 0;
         // we need to initialize `prevFileLoc` to make the compiler happy but it's never
@@ -259,7 +304,7 @@ function readDebugInfo(
         // in the source map
         for (const [pc, defLocation] of Object.entries(funEntry.code_map)) {
             const currentPC = parseInt(pc);
-            const defLocFileHash = Buffer.from(defLocation.file_hash).toString('base64');
+            const defLocFileHash = fileHashFromJSON(defLocation.file_hash);
             const fileInfo = filesMap.get(defLocFileHash);
             if (!fileInfo) {
                 throw new Error('Could not find file with hash: '
@@ -310,7 +355,6 @@ function readDebugInfo(
     return { filePath: fileInfo.path, fileHash, modInfo, functions, optimizedLines: [] };
 }
 
-
 /**
  * Creates IFileInfo for a file on a given path and returns it along with
  * the file hash.
@@ -319,9 +363,10 @@ function readDebugInfo(
  * @returns a tuple with the file hash and the file info.
  */
 export function createFileInfo(filePath: string): [string, IFileInfo] {
-    const content = fs.readFileSync(filePath, 'utf8');
+    const content = new Uint8Array(fs.readFileSync(filePath));
     const numFileHash = computeFileHash(content);
-    const lines = content.split('\n');
+    const contentString = Buffer.from(content).toString('utf8');
+    const lines = contentString.split('\n');
     const fileInfo = { path: filePath, content, lines };
     const fileHash = Buffer.from(numFileHash).toString('base64');
     return [fileHash, fileInfo];
@@ -332,7 +377,7 @@ export function createFileInfo(filePath: string): [string, IFileInfo] {
  *
  * @param fileContents contents of the file.
  */
-function computeFileHash(fileContents: string): Uint8Array {
+function computeFileHash(fileContents: Uint8Array): Uint8Array {
     const hash = crypto.createHash('sha256').update(fileContents).digest();
     return new Uint8Array(hash);
 }

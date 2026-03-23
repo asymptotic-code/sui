@@ -1,19 +1,20 @@
 ---
 title: Sui Weather Oracle
 description: Write a module (smart contract) in Move that fetches the weather data from the OpenWeather API every 10 minutes and updates the weather conditions for over 1,000 locations around the world.
+keywords: [ weather app, weather forecast example, weather forecast dapp, sui weather oracle, openweather api, randomness, nfts, example app, example dapp, oracle, create an oracle ] 
 ---
 
-This guide demonstrates writing a module (smart contract) in Move, deploying it on Devnet, and adding a backend, which fetches the weather data from the OpenWeather API every 10 minutes and updates the weather conditions for each city. The dApp created in this guide is called Sui Weather Oracle and it provides real-time weather data for over 1,000 locations around the world.
+This guide demonstrates writing a module (smart contract) in Move, deploying it on Devnet, and adding a backend, which fetches the weather data from the OpenWeather API every 10 minutes and updates the weather conditions for each city. The app created in this guide is called Sui Weather Oracle and it provides real-time weather data for over 1,000 locations around the world.
 
-You can access and use the weather data from the OpenWeather API for various applications, such as randomness, betting, gaming, insurance, travel, education, or research. You can also mint a weather NFT based on the weather data of a city, using the `mint` function of the SUI Weather Oracle smart contract.
+You can access and use the weather data from the OpenWeather API for various applications, such as randomness, betting, gaming, insurance, travel, education, or research. You can also mint a weather NFT based on the weather data of a city, using the `mint` function of the Sui Weather Oracle smart contract.
 
-This guide assumes you have [installed Sui](../getting-started/sui-install.mdx) and understand Sui fundamentals.
+<ImportContent source="prerequisites.mdx" mode="snippet" />
 
 ## Move smart contract
 
-As with all Sui dApps, a Move package on chain powers the logic of Sui Weather Oracle. The following instruction walks you through creating and publishing the module.
+As with all Sui apps, a Move package on chain powers the logic of Sui Weather Oracle. The following instruction walks you through creating and publishing the module.
 
-### Weather Oracle module
+### `weather_oracle` module
 
 Before you get started, you must initialize a Move package. Open a terminal or console in the directory you want to store the example and run the following command to create an empty package with the name `weather_oracle`:
 
@@ -97,7 +98,7 @@ fun init(otw: WEATHER, ctx: &mut TxContext) {
 - The first struct, `AdminCap`, is a capability.
 - The second struct, `WEATHER`, is a one-time witness that ensures only a single instance of this `Weather` ever exists. See [One Time Witness](https://move-book.com/programmability/one-time-witness.html) in The Move Book for more information.
 - The `WeatherOracle` struct works as a registry and stores the `geoname_id`s of the `CityWeatherOracle`s as dynamic fields. See [The Move Book](https://move-book.com/programmability/dynamic-fields.html) to learn more about dynamic fields.
-- The `init` function creates and sends the `Publisher` and `AdminCap` objects to the sender. Also, it creates a [shared object](concepts/object-ownership/shared.mdx) for all the `CityWeatherOracle`s. See [Module Initializer](https://move-book.com/programmability/module-initializer.html) in The Move Book for more information.
+- The `init` function creates and sends the `Publisher` and `AdminCap` objects to the sender. Also, it creates a [shared object](/guides/developer/objects/object-ownership/shared) for all the `CityWeatherOracle`s. See [Module Initializer](https://move-book.com/programmability/module-initializer.html) in The Move Book for more information.
 
 So far, you've set up the data structures within the module.
 Now, create a function that initializes a `CityWeatherOracle` and adds it as dynamic fields to the `WeatherOracle` object:
@@ -140,9 +141,9 @@ public fun add_city(
 }
 ```
 
-The `add_city` function is a public function that allows the owner of the `AdminCap` of the Sui Weather Oracle smart contract to add a new `CityWeatherOracle`. The function requires the admin to provide a capability object that proves their permission to add a city. The function also requires a mutable reference to the oracle object, which is the main object that stores the weather data on the blockchain. The function takes several parameters that describe the city, such as the geoname ID, name, country, latitude, longitude, and positive latitude and longitude. The function then creates a new city weather oracle object, which is a sub-object that stores and updates the weather data for a specific city. The function initializes the city weather oracle object with the parameters provided by the admin, and sets the weather data to be zero or none. The function then adds a new dynamic object field to the oracle object, using the geoname ID as the key and the city weather oracle object as the value. This way, the function adds a new city to the oracle, and makes it ready to receive and update the weather data from the backend service.
+The `add_city` function lets the `AdminCap` holder add a new city to the Sui Weather Oracle. The caller must present their `AdminCap` and pass a mutable reference to the main `Oracle` object. The function accepts city metadata—geoname ID, name, country and coordinates (latitude, longitude, and their positive flags). It then creates a `CityWeatherOracle` sub-object, initializes its weather fields to empty/zero, and inserts it into the oracle’s dynamic fields keyed by the geoname ID. After this, the city is registered and ready to receive updates from the backend.
 
-If you want to delete a city from the Sui Weather Oracle, call the `remove_city` function of the smart contract. The `remove_city` function allows the admin of the smart contract to remove a city from the oracle. The function requires the admin to provide a capability object that proves their permission to remove a city. The function also requires a mutable reference to the oracle object, which is the main object that stores and updates the weather data on the blockchain. The function takes the geoname ID of the city as a parameter, and deletes the city weather oracle object for the city. The function also removes the dynamic object field for the city from the oracle object. This way, the function deletes a city from the oracle, and frees up some storage space on the blockchain.
+To delete a city, call `remove_city`. The admin again provides the `AdminCap` and a **mutable** oracle reference, plus the city’s geoname ID. The function removes the corresponding `CityWeatherOracle` sub-object and deletes its dynamic field entry from the oracle. This cleanly unregisters the city and frees the associated on-chain storage.
 
 ```rust title='weather.move'
 public fun remove_city(
@@ -173,7 +174,10 @@ public fun remove_city(
 }
 ```
 
-Now that you have implemented the `add_city` and `remove_city` functions, you can move on to the next step, which is to see how you can update the weather data for each city. The backend service fetches the weather data from the OpenWeather API every 10 minutes, and then passes the data to the `update` function of the Sui Weather Oracle smart contract. The `update` function takes the geoname ID and the new weather data of the city as parameters, and updates the city weather oracle object with the new data. This way, the weather data on the blockchain is always up to date and accurate.
+After you implement `add_city` and `remove_city`, update each city’s weather data. Every 10 minutes, the backend service fetches conditions from the OpenWeather API and **calls** the `weather_oracle` module's `update` function with the results.
+
+The `update` function accepts the city’s geoname ID and the new weather fields, then **writes** them to the corresponding `CityWeatherOracle` object. This keeps the on-chain weather data current and accurate.
+
 
 ```rust title='weather.move'
 public fun update(
@@ -340,7 +344,9 @@ public fun city_weather_oracle_dt(
 }
 ```
 
-Finally, add an extra feature that allows anyone to mint a `WeatherNFT` with the current conditions of a city by passing the geoname ID. The `mint` function is a public function that allows anyone to mint a weather NFT based on the weather data of a city. The function takes the `WeatherOracle` shared object and the geoname ID of the city as parameters, and returns a new `WeatherNFT` object for the city. The `WeatherNFT` object is a unique and non-fungible token that represents the weather of the city at the time of minting. The `WeatherNFT` object has the same data as the `CityWeatherOracle` object, such as the `geonameID`, `name`, `country`, `latitude`, `longitude`, `positive latitude` and `longitude`, `weather ID`, `temperature`, `pressure`, `humidity`, `visibility`, `wind speed`, `wind degree`, `wind gust`, `clouds`, and `timestamp`. The function creates the `WeatherNFT` object by borrowing a reference to the `CityWeatherOracle` object with the geoname ID as the key, and assigning a unique ID (`UID`) to the `WeatherNFT` object. The function then transfers the ownership of the `WeatherNFT` object to the sender of the transaction. This way, the function allows anyone to mint a weather NFT and own a digital representation of the weather of a city. You can use this feature to create your own collection of weather NFTs, or to use them for other applications that require verifiable and immutable weather data.
+The `mint` function lets anyone create a `WeatherNFT` for a city by passing its geoname ID and the shared `WeatherOracle`. The function looks up the `CityWeatherOracle` for that ID, builds a new NFT from its values, assigns a fresh `UID`, and transfers the NFT to the transaction sender. You don’t need an `AdminCap`.
+
+Each `WeatherNFT` captures the city’s conditions at mint time and **copies** the fields from `CityWeatherOracle`: `geonameID`, `name`, `country`, `latitude`, `longitude`, positive-latitude/longitude flags, `weather_id`, `temperature`, `pressure`, `humidity`, `visibility`, `wind_speed`, `wind_degree`, `wind_gust`, `clouds`, and `timestamp`. Collectors can hold these NFTs as historical weather snapshots, and apps can use them wherever they need verifiable, immutable weather data.
 
 ```rust title='weather.move'
 public struct WeatherNFT has key, store {
@@ -397,9 +403,9 @@ And with that, your `weather.move` code is complete.
 
 ## Deployment
 
-{@include: ../../../snippets/initialize-sui-client-cli.mdx}
+<ImportContent source="initialize-sui-client-cli.mdx" mode="snippet" />
 
-{@include: ../../../snippets/publish-to-devnet-with-coins.mdx}
+<ImportContent source="publish-to-devnet-with-coins.mdx" mode="snippet" />
 
 ## Backend
 
@@ -430,7 +436,7 @@ First, initialize your backend project. To do this, you need to follow these ste
 - Create a new file named `init.ts`
 
 ```typescript title='init.ts'
-import { SuiClient } from '@mysten/sui/client';
+import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import * as dotenv from 'dotenv';
@@ -446,8 +452,9 @@ dotenv.config({ path: '../.env' });
 const phrase = process.env.ADMIN_PHRASE;
 const fullnode = process.env.FULLNODE!;
 const keypair = Ed25519Keypair.deriveKeypair(phrase!);
-const client = new SuiClient({
-	url: fullnode,
+const client = new SuiGrpcClient({
+	baseUrl: fullnode,
+	network: 'mainnet',
 });
 
 const packageId = process.env.PACKAGE_ID;
@@ -505,11 +512,6 @@ async function signAndExecuteTransaction(transaction: Transaction) {
 		.signAndExecuteTransaction({
 			signer: keypair,
 			transaction,
-			requestType: 'WaitForLocalExecution',
-			options: {
-				showObjectChanges: true,
-				showEffects: true,
-			},
 		})
 		.then(function (res) {
 			logger.info(res);
@@ -532,16 +534,16 @@ The code of init.ts does the following:
   - Gets an array of cities from the `getCities` function.
   - Gets an array of 1,000 geonameids from the `get1000Geonameids` function.
   - Gets an array of weather oracle dynamic fields from the `getWeatherOracleDynamicFields` function, which contains the geonameids of the existing cities in the weather oracle.
-  - Initializes a counter and a transaction block object.
+  - Initializes a counter and a transaction object.
   - Loops through the cities array and checks if the city's geonameid is not in the weather oracle dynamic fields array and is in the 1,000 geonameids array.
-  - If the condition is met, adds a `moveCall` to the transaction block, which calls the `add_city` method of the weather oracle contract with the city's information, such as `geonameid`, `asciiname`, `country`, `latitude`, and `longitude`.
-  - Increments the counter and checks if it reaches the `NUMBER_OF_CITIES`. If so, calls another async function, `signAndExecuteTransaction`, with the transaction block as an argument, which signs and executes the transaction block on the blockchain and logs the result. The code then resets the counter and the transaction block.
-  - After the loop ends, calls the `signAndExecuteTransaction` function again with the remaining transaction block.
+  - If the condition is met, adds a `moveCall` command to the transaction, which calls the `add_city` method of the weather oracle contract with the city's information, such as `geonameid`, `asciiname`, `country`, `latitude`, and `longitude`.
+  - Increments the counter and checks if it reaches the `NUMBER_OF_CITIES`. If so, calls another async function, `signAndExecuteTransaction`, with the transaction as an argument, which signs and executes the transaction on the blockchain and logs the result. The code then resets the counter and the transaction.
+  - After the loop ends, calls the `signAndExecuteTransaction` function again with the remaining transaction.
 
 You have now initialized the `WeatherOracle` shared object. The next step is to learn how to update them every 10 minutes with the latest weather data from the OpenWeatherMap API.
 
 ```typescript title='index.ts'
-import { SuiClient } from '@mysten/sui/client';
+import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import * as dotenv from 'dotenv';
@@ -557,8 +559,9 @@ dotenv.config({ path: '../.env' });
 const phrase = process.env.ADMIN_PHRASE;
 const fullnode = process.env.FULLNODE!;
 const keypair = Ed25519Keypair.deriveKeypair(phrase!);
-const client = new SuiClient({
-	url: fullnode,
+const client = new SuiGrpcClient({
+	baseUrl: fullnode,
+	network: 'mainnet',
 });
 
 const packageId = process.env.PACKAGE_ID;
@@ -655,20 +658,20 @@ async function run() {
 run();
 ```
 
-The code in index.ts does the following:
+The code in `index.ts` does the following:
 
 - Uses `dotenv` to load some environment variables from a `.env` file, such as `ADMIN_PHRASE`, `FULLNODE`, `PACKAGE_ID`, `ADMIN_CAP_ID`, `WEATHER_ORACLE_ID`, `APPID`, and `MODULE_NAME`. These variables are used to configure some parameters for the code, such as the key pair, the client, and the target package and module.
 - Defines some constants, such as `CHUNK_SIZE`, `MS`, `MINUTE`, and `TEN_MINUTES`. These constants are used to control the frequency and size of the updates that the code performs.
 - Defines an async function called `performUpdates`, which takes two arguments: `cities` and `weatherOracleDynamicFields`. This function is the main logic of the code, and it does the following:
   - Filters the `cities` array based on the `weatherOracleDynamicFields` array, which contains the names and object IDs of the weather oracle dynamic fields that the code needs to update.
-  - Loops through the filtered cities in chunks of `CHUNK_SIZE`, and for each chunk, it calls another async function called `getTransaction`, which returns a transaction block that contains the Move calls to update the weather oracle dynamic fields with the latest weather data from the OpenWeatherMap API.
-  - Tries to sign and execute the transaction block using the client and keypair, and catches any errors that may occur.
+  - Loops through the filtered cities in chunks of `CHUNK_SIZE`, and for each chunk, it calls another async function called `getTransaction`, which returns a transaction that contains the Move calls to update the weather oracle dynamic fields with the latest weather data from the `OpenWeatherMap` API.
+  - Tries to sign and execute the transaction using the client and key pair, and catches any errors that may occur.
   - Calculates the time it took to perform the updates, and sets a timeout to call itself again after `TEN_MINUTES` minus the elapsed time.
 - The code defines another async function called `getTransaction`, which takes one argument: `cities`. This function does the following:
-  - Creates a new transaction block object.
+  - Creates a new transaction object.
   - Loops through the `cities` array, and for each city, it calls another async function called `getWeatherData`, which takes the `latitude`, `longitude`, and `appid` as arguments, and returns the weather data for the city from the OpenWeatherMap API.
-  - Checks if the weather data is valid, and if so, adds a Move call to the transaction block, which calls the `update` function of the target package and module, and passes the admin cap, the weather oracle id, the geoname id, and the weather data as arguments.
-  - Returns the transaction block object.
+  - Checks if the weather data is valid, and if so, adds a Move call command to the transaction, which calls the `update` function of the target package and module, and passes the admin cap, the weather oracle id, the geoname id, and the weather data as arguments.
+  - Returns the transaction object.
 - An async `run` function is defined, which does the following:
   - Calls another async function called `getCities`, which returns an array of city objects that contain information such as name, geoname id, latitude, and longitude.
   - Calls another async function called `getWeatherOracleDynamicFields`, which takes the package id, the module name, and the client as arguments, and returns an array of weather oracle dynamic field objects that contain information such as name and object id.

@@ -1,34 +1,42 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 
 use anyhow::Context;
 use prometheus::Registry;
 use reqwest::Client;
-use serde_json::{json, Value};
-use sui_indexer_alt_jsonrpc::{
-    args::SystemPackageTaskArgs, config::RpcConfig, start_rpc, NodeArgs, RpcArgs,
-};
+use serde_json::Value;
+use serde_json::json;
+use sui_futures::service::Service;
+use sui_indexer_alt_jsonrpc::NodeArgs;
+use sui_indexer_alt_jsonrpc::RpcArgs;
+use sui_indexer_alt_jsonrpc::args::SystemPackageTaskArgs;
+use sui_indexer_alt_jsonrpc::config::RpcConfig;
+use sui_indexer_alt_jsonrpc::start_rpc;
 use sui_indexer_alt_reader::bigtable_reader::BigtableArgs;
-use sui_json_rpc_types::get_new_package_obj_from_response;
+use sui_indexer_alt_reader::consistent_reader::ConsistentReaderArgs;
 use sui_macros::sim_test;
-use sui_pg_db::{temp::get_available_port, DbArgs};
+use sui_pg_db::DbArgs;
+use sui_pg_db::temp::get_available_port;
 use sui_swarm_config::genesis_config::AccountConfig;
-use sui_test_transaction_builder::{make_publish_transaction, make_staking_transaction};
-use sui_types::{base_types::SuiAddress, transaction::TransactionDataAPI};
-use test_cluster::{TestCluster, TestClusterBuilder};
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use sui_test_transaction_builder::make_staking_transaction;
+use sui_types::base_types::SuiAddress;
+use sui_types::transaction::TransactionDataAPI;
+use test_cluster::TestCluster;
+use test_cluster::TestClusterBuilder;
 use url::Url;
 
 struct FnDelegationTestCluster {
     onchain_cluster: TestCluster,
     rpc_url: Url,
-    rpc_handle: JoinHandle<()>,
+    /// Hold on to the service so it doesn't get dropped (and therefore aborted) until the cluster
+    /// goes out of scope.
+    #[allow(unused)]
+    service: Service,
     client: Client,
-    cancel: CancellationToken,
 }
 
 impl FnDelegationTestCluster {
@@ -36,7 +44,7 @@ impl FnDelegationTestCluster {
     async fn new() -> anyhow::Result<Self> {
         let onchain_cluster = TestClusterBuilder::new()
             .with_num_validators(1)
-            .with_epoch_duration_ms(2000)
+            .with_epoch_duration_ms(300_000) // 5 minutes
             .with_accounts(vec![
                 AccountConfig {
                     address: None,
@@ -49,8 +57,6 @@ impl FnDelegationTestCluster {
 
         // Unwrap since we know the URL should be valid.
         let fullnode_rpc_url = Url::parse(onchain_cluster.rpc_url())?;
-
-        let cancel = CancellationToken::new();
 
         let rpc_listen_address =
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), get_available_port());
@@ -65,11 +71,12 @@ impl FnDelegationTestCluster {
             ..Default::default()
         };
 
-        let rpc_handle = start_rpc(
+        let service = start_rpc(
             None,
             None,
             DbArgs::default(),
             BigtableArgs::default(),
+            ConsistentReaderArgs::default(),
             rpc_args,
             NodeArgs {
                 fullnode_rpc_url: Some(fullnode_rpc_url),
@@ -77,7 +84,6 @@ impl FnDelegationTestCluster {
             SystemPackageTaskArgs::default(),
             RpcConfig::default(),
             &registry,
-            cancel.child_token(),
         )
         .await
         .expect("Failed to start JSON-RPC server");
@@ -85,9 +91,8 @@ impl FnDelegationTestCluster {
         Ok(Self {
             onchain_cluster,
             rpc_url,
-            rpc_handle,
+            service,
             client: Client::new(),
-            cancel,
         })
     }
 
@@ -103,7 +108,7 @@ impl FnDelegationTestCluster {
             .transfer_sui(Some(1_000), recipient)
             .build();
         let tx_digest = tx.digest().to_string();
-        let signed_tx = self.onchain_cluster.wallet.sign_transaction(&tx);
+        let signed_tx = self.onchain_cluster.wallet.sign_transaction(&tx).await;
         let (tx_bytes, sigs) = signed_tx.to_tx_bytes_and_signatures();
         let tx_bytes = tx_bytes.encoded();
         let sigs: Vec<_> = sigs.iter().map(|sig| sig.encoded()).collect();
@@ -120,7 +125,7 @@ impl FnDelegationTestCluster {
             .call_request_remove_validator()
             .build();
         let tx_digest = tx.digest().to_string();
-        let signed_tx = self.onchain_cluster.wallet.sign_transaction(&tx);
+        let signed_tx = self.onchain_cluster.wallet.sign_transaction(&tx).await;
         let (tx_bytes, sigs) = signed_tx.to_tx_bytes_and_signatures();
         let tx_bytes = tx_bytes.encoded();
         let sigs: Vec<_> = sigs.iter().map(|sig| sig.encoded()).collect();
@@ -130,9 +135,8 @@ impl FnDelegationTestCluster {
 
     async fn get_validator_address(&self) -> SuiAddress {
         self.onchain_cluster
-            .sui_client()
-            .governance_api()
-            .get_latest_sui_system_state()
+            .grpc_client()
+            .get_system_state_summary(None)
             .await
             .unwrap()
             .active_validators
@@ -163,11 +167,6 @@ impl FnDelegationTestCluster {
             .context("Failed to parse JSON-RPC response")?;
 
         Ok(body)
-    }
-
-    async fn stopped(self) {
-        self.cancel.cancel();
-        let _ = self.rpc_handle.await;
     }
 }
 
@@ -212,8 +211,6 @@ async fn test_execution() {
     assert!(response["result"]["events"].is_array());
     assert!(response["result"]["objectChanges"].is_array());
     assert!(response["result"]["balanceChanges"].is_array());
-
-    test_cluster.stopped().await;
 }
 
 #[sim_test]
@@ -246,8 +243,6 @@ async fn test_execution_with_deprecated_mode() {
         response["error"]["message"],
         "Invalid Params: WaitForLocalExecution mode is deprecated"
     );
-
-    test_cluster.stopped().await;
 }
 
 #[sim_test]
@@ -275,12 +270,12 @@ async fn test_execution_with_no_sigs() {
 
     assert_eq!(response["error"]["code"], -32602);
     assert_eq!(response["error"]["message"], "Invalid params");
-    assert!(response["error"]["data"]
-        .as_str()
-        .unwrap()
-        .starts_with("missing field `signatures`"));
-
-    test_cluster.stopped().await;
+    assert!(
+        response["error"]["data"]
+            .as_str()
+            .unwrap()
+            .starts_with("missing field `signatures`")
+    );
 }
 
 #[sim_test]
@@ -312,8 +307,6 @@ async fn test_execution_with_empty_sigs() {
         response["error"]["message"],
         "Invalid user signature: Expect 1 signer signatures but got 0"
     );
-
-    test_cluster.stopped().await;
 }
 
 #[sim_test]
@@ -344,8 +337,6 @@ async fn test_execution_with_aborted_tx() {
     tracing::info!("execution rpc response is {:?}", response);
 
     assert_eq!(response["result"]["effects"]["status"]["status"], "failure");
-
-    test_cluster.stopped().await;
 }
 
 #[sim_test]
@@ -367,8 +358,6 @@ async fn test_dry_run() {
         .unwrap();
 
     assert_eq!(response["result"]["effects"]["status"]["status"], "success");
-
-    test_cluster.stopped().await;
 }
 
 #[sim_test]
@@ -389,56 +378,12 @@ async fn test_dry_run_with_invalid_tx() {
 
     assert_eq!(response["error"]["code"], -32602);
     assert_eq!(response["error"]["message"], "Invalid params");
-    assert!(response["error"]["data"]
-        .as_str()
-        .unwrap()
-        .starts_with("Invalid value was given to the function"));
-    test_cluster.stopped().await;
-}
-
-#[sim_test]
-async fn test_get_all_balances() {
-    let test_cluster = FnDelegationTestCluster::new()
-        .await
-        .expect("Failed to create test cluster");
-
-    let address = test_cluster.onchain_cluster.wallet.get_addresses()[1];
-    let response = test_cluster
-        .execute_jsonrpc(
-            "suix_getAllBalances".to_string(),
-            json!({ "owner": address.to_string().as_str()}),
-        )
-        .await
-        .unwrap();
-    // Only check that FN can return a valid response and not check the contents;
-    // the contents is FN logic and thus should be tested on the FN side.
-    assert_eq!(response["result"][0]["coinType"], "0x2::sui::SUI");
-    test_cluster.stopped().await;
-}
-
-#[sim_test]
-async fn test_get_all_balances_with_invalid_address() {
-    let test_cluster = FnDelegationTestCluster::new()
-        .await
-        .expect("Failed to create test cluster");
-    let invalid_address = "23333";
-
-    let response = test_cluster
-        .execute_jsonrpc(
-            "suix_getAllBalances".to_string(),
-            json!({ "owner": invalid_address }),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response["error"]["code"], -32602);
-    assert_eq!(response["error"]["message"], "Invalid params");
-    assert!(response["error"]["data"]
-        .as_str()
-        .unwrap()
-        .contains("Deserialization failed"));
-
-    test_cluster.stopped().await;
+    assert!(
+        response["error"]["data"]
+            .as_str()
+            .unwrap()
+            .starts_with("Invalid value was given to the function")
+    );
 }
 
 #[sim_test]
@@ -487,7 +432,6 @@ async fn test_get_stakes_and_by_ids() {
 
     // Two responses should match.
     assert_eq!(get_stakes_response, get_stakes_by_ids_response);
-    test_cluster.stopped().await;
 }
 
 #[sim_test]
@@ -507,10 +451,12 @@ async fn test_get_stakes_invalid_params() {
     // Check that we have all the error information in the response.
     assert_eq!(response["error"]["code"], -32602);
     assert_eq!(response["error"]["message"], "Invalid params");
-    assert!(response["error"]["data"]
-        .as_str()
-        .unwrap()
-        .contains("Deserialization failed"));
+    assert!(
+        response["error"]["data"]
+            .as_str()
+            .unwrap()
+            .contains("Deserialization failed")
+    );
 
     let response = test_cluster
         .execute_jsonrpc(
@@ -522,12 +468,12 @@ async fn test_get_stakes_invalid_params() {
 
     assert_eq!(response["error"]["code"], -32602);
     assert_eq!(response["error"]["message"], "Invalid params");
-    assert!(response["error"]["data"]
-        .as_str()
-        .unwrap()
-        .contains("AccountAddressParseError"));
-
-    test_cluster.stopped().await;
+    assert!(
+        response["error"]["data"]
+            .as_str()
+            .unwrap()
+            .contains("AccountAddressParseError")
+    );
 }
 
 #[sim_test]
@@ -547,83 +493,4 @@ async fn test_get_validators_apy() {
         response["result"]["apys"][0]["address"],
         validator_address.to_string()
     );
-    test_cluster.stopped().await;
-}
-
-#[sim_test]
-async fn test_get_balance() {
-    let test_cluster = FnDelegationTestCluster::new()
-        .await
-        .expect("Failed to create test cluster");
-    let wallet = &test_cluster.onchain_cluster.wallet;
-
-    // Publish another coin to better test the API.
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.extend(["packages", "coin"]);
-    let publish_transaction = make_publish_transaction(wallet, path).await;
-    let owner_address = publish_transaction.data().transaction_data().sender();
-
-    let execution_result = wallet
-        .execute_transaction_must_succeed(publish_transaction)
-        .await;
-
-    let package_id = get_new_package_obj_from_response(&execution_result)
-        .unwrap()
-        .0;
-
-    // Test out the specified coin type.
-    // Parse the coin type so we have the same string representation as the used by fullnode.
-    let coin_type = sui_types::parse_sui_struct_tag(&format!("{}::my_coin::MY_COIN", package_id))
-        .unwrap()
-        .to_string();
-    let response = test_cluster
-        .execute_jsonrpc(
-            "suix_getBalance".to_string(),
-            json!({ "owner": owner_address.to_string().as_str(), "coinType": coin_type}),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response["result"]["totalBalance"], "1230");
-    assert_eq!(response["result"]["coinType"], coin_type);
-
-    // Test out the default coin type.
-    let response = test_cluster
-        .execute_jsonrpc(
-            "suix_getBalance".to_string(),
-            json!({ "owner": owner_address.to_string().as_str()}),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response["result"]["coinType"], "0x2::sui::SUI");
-
-    // Test out the invalid coin type.
-    let response = test_cluster
-        .execute_jsonrpc(
-            "suix_getBalance".to_string(),
-            json!({ "owner": owner_address.to_string().as_str(), "coinType": "invalid_coin_type"}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response["error"]["code"], -32602);
-    assert!(response["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("Invalid struct type: invalid_coin_type"));
-
-    // Test out the invalid address.
-    let response = test_cluster
-        .execute_jsonrpc(
-            "suix_getBalance".to_string(),
-            json!({ "owner": "invalid_address", "coinType": coin_type}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response["error"]["code"], -32602);
-    assert!(response["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("Invalid params"));
-    test_cluster.stopped().await;
 }

@@ -5,10 +5,11 @@
 mod sim_only_tests {
     use std::path::PathBuf;
     use std::time::Duration;
-    use sui_json_rpc_types::{SuiTransactionBlockEffects, SuiTransactionBlockEffectsAPI};
     use sui_macros::sim_test;
     use sui_node::SuiNode;
     use sui_test_transaction_builder::publish_package;
+    use sui_types::effects::TransactionEffects;
+    use sui_types::effects::TransactionEffectsAPI;
     use sui_types::messages_checkpoint::CheckpointSequenceNumber;
     use sui_types::{base_types::ObjectID, digests::TransactionDigest};
     use test_cluster::{TestCluster, TestClusterBuilder};
@@ -20,7 +21,10 @@ mod sim_only_tests {
     // and last delete the root object (tests object deletion).
     #[sim_test]
     async fn object_pruning_test() {
-        let test_cluster = TestClusterBuilder::new().build().await;
+        let test_cluster = TestClusterBuilder::new()
+            .with_num_validators(1)
+            .build()
+            .await;
         let fullnode = &test_cluster.fullnode_handle.sui_node;
 
         // Create a root object and a child object. Wrap the child object inside the root object.
@@ -150,10 +154,9 @@ mod sim_only_tests {
             )
             .await
             .effects
-            .unwrap()
             .created()[0]
-            .reference
-            .object_id;
+            .0
+            .0;
 
         (package_id, object_id)
     }
@@ -169,10 +172,8 @@ mod sim_only_tests {
             )
             .await
             .effects
-            .unwrap()
             .created()[0]
-            .reference
-            .to_object_ref()
+            .0
             .0
     }
 
@@ -181,7 +182,7 @@ mod sim_only_tests {
         package_id: ObjectID,
         object_id: ObjectID,
         child_id: ObjectID,
-    ) -> SuiTransactionBlockEffects {
+    ) -> TransactionEffects {
         let object = test_cluster.wallet.get_object_ref(object_id).await.unwrap();
         let child = test_cluster.wallet.get_object_ref(child_id).await.unwrap();
         let effects = test_cluster
@@ -198,14 +199,8 @@ mod sim_only_tests {
                     .build(),
             )
             .await
-            .effects
-            .unwrap();
+            .effects;
         assert_eq!(effects.wrapped().len(), 1);
-        assert!(test_cluster
-            .get_object_or_tombstone_from_fullnode_store(child_id)
-            .await
-            .2
-            .is_wrapped());
         effects
     }
 
@@ -213,7 +208,7 @@ mod sim_only_tests {
         test_cluster: &TestCluster,
         package_id: ObjectID,
         object_id: ObjectID,
-    ) -> SuiTransactionBlockEffects {
+    ) -> TransactionEffects {
         let object = test_cluster.wallet.get_object_ref(object_id).await.unwrap();
         let effects = test_cluster
             .sign_and_execute_transaction(
@@ -229,8 +224,7 @@ mod sim_only_tests {
                     .build(),
             )
             .await
-            .effects
-            .unwrap();
+            .effects;
         assert!(effects.deleted().is_empty());
         effects
     }
@@ -239,7 +233,7 @@ mod sim_only_tests {
         test_cluster: &TestCluster,
         package_id: ObjectID,
         object_id: ObjectID,
-    ) -> SuiTransactionBlockEffects {
+    ) -> TransactionEffects {
         let object = test_cluster.wallet.get_object_ref(object_id).await.unwrap();
         let effects = test_cluster
             .sign_and_execute_transaction(
@@ -250,8 +244,7 @@ mod sim_only_tests {
                     .build(),
             )
             .await
-            .effects
-            .unwrap();
+            .effects;
         assert_eq!(effects.deleted().len(), 1);
         effects
     }

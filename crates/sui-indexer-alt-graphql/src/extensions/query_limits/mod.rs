@@ -1,30 +1,37 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::BTreeSet,
-    sync::{Arc, Mutex},
-};
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::Mutex;
 
-use async_graphql::{
-    extensions::{
-        Extension, ExtensionContext, ExtensionFactory, NextParseQuery, NextRequest, NextValidation,
-    },
-    parser::types::ExecutableDocument,
-    value, Response, ServerError, ServerResult, ValidationResult, Variables,
-};
+use async_graphql::Response;
+use async_graphql::ServerError;
+use async_graphql::ServerResult;
+use async_graphql::ValidationResult;
+use async_graphql::Variables;
+use async_graphql::extensions::Extension;
+use async_graphql::extensions::ExtensionContext;
+use async_graphql::extensions::ExtensionFactory;
+use async_graphql::extensions::NextParseQuery;
+use async_graphql::extensions::NextRequest;
+use async_graphql::extensions::NextValidation;
+use async_graphql::parser::types::ExecutableDocument;
+use async_graphql::value;
 use headers::ContentLength;
 
-use crate::{metrics::RpcMetrics, pagination::PaginationConfig};
-
-use self::error::{Error, ErrorKind};
-use self::show_usage::ShowUsage;
+use crate::extensions::query_limits::error::Error;
+use crate::extensions::query_limits::error::ErrorKind;
+use crate::extensions::query_limits::show_usage::ShowUsage;
+use crate::metrics::RpcMetrics;
+use crate::pagination::PaginationConfig;
 
 mod chain;
 mod error;
 mod input;
 mod output;
 mod payload;
+pub(crate) mod rich;
 pub(crate) mod show_usage;
 mod visitor;
 
@@ -213,11 +220,18 @@ impl Extension for QueryLimitsCheckerExt {
 mod tests {
     use std::collections::BTreeMap;
 
-    use async_graphql::{connection::Connection, EmptySubscription, Object, Request, Schema};
+    use async_graphql::EmptySubscription;
+    use async_graphql::Object;
+    use async_graphql::Request;
+    use async_graphql::Schema;
+    use async_graphql::connection::Connection;
     use async_graphql_value::ConstValue;
     use axum::http::HeaderValue;
-    use insta::{assert_json_snapshot, assert_snapshot};
+    use insta::assert_json_snapshot;
+    use insta::assert_snapshot;
+    use serde_json::json;
 
+    use crate::api::scalars::json::Json;
     use crate::pagination::PageLimits;
 
     use super::*;
@@ -285,8 +299,9 @@ mod tests {
         }
 
         /// Looks like a transaction execution or dry-run field.
-        async fn tx(&self, bytes: String, other: usize) -> usize {
-            bytes.len() + other
+        async fn tx(&self, _transaction: Json, other: usize) -> usize {
+            // For testing purposes, just return the other value
+            other
         }
 
         /// Looks like a ZkLogin prover endpoint.
@@ -305,8 +320,9 @@ mod tests {
     #[Object]
     impl Mutation {
         /// Looks like a transaction execution or dry-run field.
-        async fn tx(&self, bytes: String, other: usize) -> usize {
-            bytes.len() + other
+        async fn tx(&self, _bytes: Json, other: usize) -> usize {
+            // For testing purposes, just return the other value
+            other
         }
 
         /// Looks like a ZkLogin prover endpoint (this field is not included in `tx_payload_args` to test that configuration).
@@ -324,7 +340,7 @@ mod tests {
             max_tx_payload_size: 1000,
             tx_payload_args: BTreeSet::from_iter([
                 ("Mutation", "tx", "bytes"),
-                ("Query", "tx", "bytes"),
+                ("Query", "tx", "transaction"),
                 ("Query", "zk", "bytes"),
                 ("Query", "zk", "sigs"),
             ]),
@@ -363,14 +379,14 @@ mod tests {
             .finish()
     }
 
+    fn request(query: &str) -> Request {
+        Request::from(query)
+            .data(ShowUsage(HeaderValue::from_static("true")))
+            .data(ContentLength(query.len() as u64))
+    }
+
     async fn execute(schema: &Schema<Query, Mutation, EmptySubscription>, query: &str) -> Response {
-        schema
-            .execute(
-                Request::from(query)
-                    .data(ShowUsage(HeaderValue::from_static("true")))
-                    .data(ContentLength(query.len() as u64)),
-            )
-            .await
+        schema.execute(request(query)).await
     }
 
     /// Extract a particular `kind` of usage information from the response.
@@ -386,8 +402,208 @@ mod tests {
     async fn test_pass_limits() {
         let schema = schema(config(), page());
         let response = execute(&schema, "{ a { b { c { a { z } } } } }").await;
+        let usage = response
+            .extensions
+            .get("usage")
+            .unwrap()
+            .clone()
+            .into_json()
+            .unwrap();
 
-        assert_snapshot!(response.extensions.get("usage").unwrap(), @"{input: {nodes: 5,depth: 5},payload: {query_payload_size: 29,tx_payload_size: 0},output: {nodes: 5}}");
+        assert_json_snapshot!(usage, @r###"
+        {
+          "input": {
+            "nodes": 5,
+            "depth": 5
+          },
+          "payload": {
+            "query_payload_size": 29,
+            "tx_payload_size": 0
+          },
+          "output": {
+            "nodes": 5
+          }
+        }
+        "###);
+    }
+
+    #[tokio::test]
+    async fn test_typename() {
+        let schema = schema(config(), page());
+        let response = execute(&schema, "{ __typename, alias: __typename }").await;
+        let usage = response
+            .extensions
+            .get("usage")
+            .unwrap()
+            .clone()
+            .into_json()
+            .unwrap();
+
+        assert_json_snapshot!(usage, @r###"
+        {
+          "input": {
+            "nodes": 2,
+            "depth": 1
+          },
+          "payload": {
+            "query_payload_size": 33,
+            "tx_payload_size": 0
+          },
+          "output": {
+            "nodes": 2
+          }
+        }
+        "###);
+    }
+
+    #[tokio::test]
+    async fn test_variable_optional() {
+        let schema = schema(config(), page());
+        let response = schema
+            .execute(request(
+                "query ($first: Int) { p(first: $first) { nodes { z } } }",
+            ))
+            .await;
+
+        assert_json_snapshot!(response, @r###"
+        {
+          "data": {
+            "p": {
+              "nodes": []
+            }
+          },
+          "extensions": {
+            "usage": {
+              "input": {
+                "nodes": 3,
+                "depth": 3
+              },
+              "payload": {
+                "query_payload_size": 56,
+                "tx_payload_size": 0
+              },
+              "output": {
+                "nodes": 12
+              }
+            }
+          }
+        }
+        "###);
+    }
+
+    #[tokio::test]
+    async fn test_variable_null() {
+        let schema = schema(config(), page());
+        let response = schema
+            .execute(
+                request("query ($first: Int) { p(first: $first) { nodes { z } } }").variables(
+                    Variables::from_json(json!({
+                        "first": null,
+                    })),
+                ),
+            )
+            .await;
+
+        assert_json_snapshot!(response, @r###"
+        {
+          "data": {
+            "p": {
+              "nodes": []
+            }
+          },
+          "extensions": {
+            "usage": {
+              "input": {
+                "nodes": 3,
+                "depth": 3
+              },
+              "payload": {
+                "query_payload_size": 56,
+                "tx_payload_size": 0
+              },
+              "output": {
+                "nodes": 12
+              }
+            }
+          }
+        }
+        "###);
+    }
+
+    #[tokio::test]
+    async fn test_variable_valid_page() {
+        let schema = schema(config(), page());
+        let response = schema
+            .execute(
+                request("query ($first: Int) { p(first: $first) { nodes { z } } }").variables(
+                    Variables::from_json(json!({
+                        "first": 5,
+                    })),
+                ),
+            )
+            .await;
+
+        assert_json_snapshot!(response, @r###"
+        {
+          "data": {
+            "p": {
+              "nodes": []
+            }
+          },
+          "extensions": {
+            "usage": {
+              "input": {
+                "nodes": 3,
+                "depth": 3
+              },
+              "payload": {
+                "query_payload_size": 56,
+                "tx_payload_size": 0
+              },
+              "output": {
+                "nodes": 12
+              }
+            }
+          }
+        }
+        "###);
+    }
+
+    #[tokio::test]
+    async fn test_variable_huge_page() {
+        let schema = schema(config(), page());
+        let response = schema
+            .execute(
+                request("query ($first: Int) { p(first: $first) { nodes { z } } }").variables(
+                    Variables::from_json(json!({
+                        "first": 1000,
+                    })),
+                ),
+            )
+            .await;
+
+        assert_json_snapshot!(response, @r###"
+        {
+          "data": null,
+          "errors": [
+            {
+              "message": "Page size is too large: 1000 > 10",
+              "locations": [
+                {
+                  "line": 1,
+                  "column": 23
+                }
+              ],
+              "path": [
+                "p"
+              ],
+              "extensions": {
+                "code": "GRAPHQL_VALIDATION_FAILED"
+              }
+            }
+          ]
+        }
+        "###);
     }
 
     #[tokio::test]
@@ -639,7 +855,7 @@ mod tests {
             page(),
         );
 
-        let response = execute(&schema, r#"{ tx(bytes: "hello world", other: 1) }"#).await;
+        let response = execute(&schema, r#"{ tx(transaction: "hello world", other: 1) }"#).await;
 
         assert_json_snapshot!(response, @r###"
         {
@@ -650,7 +866,7 @@ mod tests {
               "locations": [
                 {
                   "line": 1,
-                  "column": 13
+                  "column": 19
                 }
               ],
               "path": [
@@ -673,14 +889,14 @@ mod tests {
             &schema,
             r#"
             {
-              tx(bytes: "hello world", other: 1)
+              tx(transaction: "hello world", other: 1)
               zk(bytes: "hello world", sigs: ["a", "b", "c"])
             }
             "#,
         )
         .await;
 
-        assert_snapshot!(usage(response, "payload"), @"{query_payload_size: 113,tx_payload_size: 39}");
+        assert_snapshot!(usage(response, "payload"), @"{query_payload_size: 119,tx_payload_size: 39}");
     }
 
     /// Transaction payloads that are in nested fields are not counted.
@@ -692,7 +908,7 @@ mod tests {
             r#"
             {
               a {
-                tx(bytes: "hello world", other: 1)
+                tx(transaction: "hello world", other: 1)
                 zk(bytes: "hello world", sigs: ["a", "b", "c"])
               }
             }
@@ -700,7 +916,7 @@ mod tests {
         )
         .await;
 
-        assert_snapshot!(usage(response, "payload"), @"{query_payload_size: 190,tx_payload_size: 0}");
+        assert_snapshot!(usage(response, "payload"), @"{query_payload_size: 196,tx_payload_size: 0}");
     }
 
     /// The test config specifies the Query.zk contains transaction payloads, but `Mutation.zk`
@@ -721,6 +937,72 @@ mod tests {
         .await;
 
         assert_snapshot!(usage(response, "payload"), @"{query_payload_size: 148,tx_payload_size: 13}");
+    }
+
+    /// Test that structured (JSON object) transaction payloads are counted correctly.
+    #[tokio::test]
+    async fn test_tx_payload_structured_inline() {
+        let schema = schema(config(), page());
+        let response = execute(
+            &schema,
+            r#"
+            {
+              tx(transaction: { sender: "0xabc", data: [1, 2, 3], flag: true }, other: 1)
+            }
+            "#,
+        )
+        .await;
+
+        assert_snapshot!(usage(response, "payload"), @"{query_payload_size: 92,tx_payload_size: 39}");
+    }
+
+    /// Test that structured transaction payloads in variables are counted correctly.
+    #[tokio::test]
+    async fn test_tx_payload_structured_variable() {
+        let schema = schema(config(), page());
+        let query = r#"
+            query ($txData: JSON!) {
+              tx(transaction: $txData, other: 1)
+            }
+            "#;
+
+        let variables = BTreeMap::from([(
+            "txData".to_string(),
+            json!({ "sender": "0xdef", "amount": 100, "nested": { "key": "value" } }),
+        )]);
+
+        let request = Request::from(query)
+            .data(ShowUsage(HeaderValue::from_static("true")))
+            .data(ContentLength(query.len() as u64))
+            .variables(Variables::from_json(
+                serde_json::to_value(variables).unwrap(),
+            ));
+
+        let response = schema.execute(request).await;
+        assert_snapshot!(usage(response, "payload"), @"{query_payload_size: 57,tx_payload_size: 56}");
+    }
+
+    /// Accounting for a transaction payload that is part literal, part variable.
+    #[tokio::test]
+    async fn test_tx_payload_structured_mixed() {
+        let schema = schema(config(), page());
+        let query = r#"
+            query ($nested: JSON!) {
+              tx(transaction: { sender: "0xabc", nested: $nested }, other: 1)
+            }
+            "#;
+
+        let variables = BTreeMap::from([("nested".to_string(), json!({ "key": "value" }))]);
+
+        let request = Request::from(query)
+            .data(ShowUsage(HeaderValue::from_static("true")))
+            .data(ContentLength(query.len() as u64))
+            .variables(Variables::from_json(
+                serde_json::to_value(variables).unwrap(),
+            ));
+
+        let response = schema.execute(request).await;
+        assert_snapshot!(usage(response, "payload"), @"{query_payload_size: 103,tx_payload_size: 39}");
     }
 
     #[tokio::test]

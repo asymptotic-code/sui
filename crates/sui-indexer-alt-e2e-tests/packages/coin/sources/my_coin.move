@@ -4,6 +4,8 @@
 module coin::my_coin;
 
 use sui::coin::{Self, TreasuryCap};
+use sui::balance;
+
 
 // The type identifier of coin. The coin will have a type
 // tag of kind: `Coin<package_object::mycoin::MYCOIN>`
@@ -12,6 +14,7 @@ public struct MY_COIN has drop {}
 
 // Module initializer is called once on module publish. A treasury
 // cap is sent to the publisher, who then controls minting and burning.
+#[allow(deprecated_usage)]
 fun init(witness: MY_COIN, ctx: &mut TxContext) {
     let (mut treasury, metadata) = coin::create_currency(
         witness,
@@ -40,4 +43,14 @@ public fun mint(
 ) {
     let coin = coin::mint(treasury_cap, amount, ctx);
     transfer::public_transfer(coin, recipient)
+}
+
+// Mint to address balance
+public fun mint_balance(
+    treasury_cap: &mut TreasuryCap<MY_COIN>,
+    amount: u64,
+    recipient: address,
+    ctx: &mut TxContext,
+) {
+    balance::send_funds(coin::into_balance(coin::mint(treasury_cap, amount, ctx)), recipient);
 }

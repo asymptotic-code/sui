@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    get_nth_struct_field, get_tag_and_layouts, legacy_test_cost,
-    object_runtime::{object_store::ChildObjectEffects, ObjectRuntime, RuntimeResults},
+    get_extension, get_extension_mut, get_nth_struct_field, get_tag_and_layouts, legacy_test_cost,
+    object_runtime::{ObjectRuntime, RuntimeResults, object_store::ChildObjectEffects},
 };
 use better_any::{Tid, TidAble};
 use indexmap::{IndexMap, IndexSet};
@@ -15,21 +15,28 @@ use move_core_types::{
     language_storage::StructTag,
     vm_status::StatusCode,
 };
-use move_vm_runtime::{native_extensions::NativeExtensionMarker, native_functions::NativeContext};
-use move_vm_types::{
-    loaded_data::runtime_types::Type,
-    natives::function::NativeResult,
+use move_vm_runtime::{
+    execution::values::{Vector, VectorSpecialization},
+    natives::{
+        extensions::NativeExtensionMarker,
+        functions::{NativeContext, NativeResult},
+    },
+};
+use move_vm_runtime::{
+    execution::{
+        Type,
+        values::{self, StructRef, Value},
+    },
     pop_arg,
-    values::{self, StructRef, Value, Vector, VectorSpecialization},
 };
 use smallvec::smallvec;
 use std::{
     borrow::Borrow,
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
-    thread::LocalKey,
 };
 use sui_types::{
+    TypeTag,
     base_types::{MoveObjectType, ObjectID, SequenceNumber, SuiAddress},
     config,
     digests::{ObjectDigest, TransactionDigest},
@@ -39,7 +46,6 @@ use sui_types::{
     in_memory_storage::InMemoryStorage,
     object::{MoveObject, Object, Owner},
     storage::ChildObjectResolver,
-    TypeTag,
 };
 
 const E_COULD_NOT_GENERATE_EFFECTS: u64 = 0;
@@ -55,7 +61,7 @@ type Set<K> = IndexSet<K>;
 /// allows this to be used by both the object runtime (for reading) and the test scenario (for
 /// writing) while hiding mutability.
 #[derive(Tid)]
-pub struct InMemoryTestStore(pub &'static LocalKey<RefCell<InMemoryStorage>>);
+pub struct InMemoryTestStore(pub RefCell<InMemoryStorage>);
 impl<'a> NativeExtensionMarker<'a> for &'a InMemoryTestStore {}
 
 impl ChildObjectResolver for InMemoryTestStore {
@@ -65,8 +71,9 @@ impl ChildObjectResolver for InMemoryTestStore {
         child: &ObjectID,
         child_version_upper_bound: SequenceNumber,
     ) -> sui_types::error::SuiResult<Option<Object>> {
-        let l: &'static LocalKey<RefCell<InMemoryStorage>> = self.0;
-        l.with_borrow(|store| store.read_child_object(parent, child, child_version_upper_bound))
+        self.0
+            .borrow()
+            .read_child_object(parent, child, child_version_upper_bound)
     }
 
     fn get_object_received_at_version(
@@ -76,14 +83,12 @@ impl ChildObjectResolver for InMemoryTestStore {
         receive_object_at_version: SequenceNumber,
         epoch_id: sui_types::committee::EpochId,
     ) -> sui_types::error::SuiResult<Option<Object>> {
-        self.0.with_borrow(|store| {
-            store.get_object_received_at_version(
-                owner,
-                receiving_object_id,
-                receive_object_at_version,
-                epoch_id,
-            )
-        })
+        self.0.borrow().get_object_received_at_version(
+            owner,
+            receiving_object_id,
+            receive_object_at_version,
+            epoch_id,
+        )
     }
 }
 
@@ -97,7 +102,7 @@ pub fn end_transaction(
 ) -> PartialVMResult<NativeResult> {
     assert!(ty_args.is_empty());
     assert!(args.is_empty());
-    let object_runtime_ref: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime_ref: &mut ObjectRuntime = get_extension_mut!(context)?;
     let taken_shared_or_imm: BTreeMap<_, _> = object_runtime_ref
         .test_inventories
         .taken
@@ -115,7 +120,7 @@ pub fn end_transaction(
     // * Remove all allocated_tickets in the test inventories.
     // * For each allocated ticket, if the ticket's object ID is loaded, move it to `received`.
     // * Otherwise re-insert the allocated ticket into the objects inventory, and mark it to be
-    //   removed from the backing storage (deferred due to needing to have acces to `context` which
+    //   removed from the backing storage (deferred due to needing to have access to `context` which
     //   has outstanding references at this point).
     let allocated_tickets =
         std::mem::take(&mut object_runtime_ref.test_inventories.allocated_tickets);
@@ -137,9 +142,9 @@ pub fn end_transaction(
 
     let object_runtime_state = object_runtime_ref.take_state();
     // Determine writes and deletes
-    // We pass the received objects since they should be viewed as "loaded" for the purposes of of
+    // We pass the received objects since they should be viewed as "loaded" for the purposes of
     // calculating the effects of the transaction.
-    let results = object_runtime_state.finish(received, ChildObjectEffects::empty());
+    let results = object_runtime_state.finish(received, ChildObjectEffects::new());
     let RuntimeResults {
         writes,
         user_events,
@@ -147,6 +152,8 @@ pub fn end_transaction(
         created_object_ids,
         deleted_object_ids,
         accumulator_events: _,
+        settlement_input_sui: _,
+        settlement_output_sui: _,
     } = match results {
         Ok(res) => res,
         Err(_) => {
@@ -156,7 +163,7 @@ pub fn end_transaction(
             ));
         }
     };
-    let object_runtime_ref: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime_ref: &mut ObjectRuntime = get_extension_mut!(context)?;
     let all_active_child_objects_with_values = object_runtime_ref
         .all_active_child_objects()
         .filter(|child| child.copied_value.is_some())
@@ -194,7 +201,7 @@ pub fn end_transaction(
     let mut written = vec![];
     for (id, (owner, ty, value)) in writes {
         // write configs to cache
-        new_object_values.insert(id, (ty.clone(), value.copy_value().unwrap()));
+        new_object_values.insert(id, (ty.clone(), value.copy_value()));
         transferred.push((id, owner.clone()));
         incorrect_shared_or_imm_handling = incorrect_shared_or_imm_handling
             || taken_shared_or_imm
@@ -244,12 +251,9 @@ pub fn end_transaction(
     }
 
     // For any unused allocated tickets, remove them from the store.
-    let store: &&InMemoryTestStore = context.extensions().get()?;
+    let store: &&InMemoryTestStore = get_extension!(context)?;
     for id in unreceived {
-        if store
-            .0
-            .with_borrow_mut(|store| store.remove_object(id).is_none())
-        {
+        if store.0.borrow_mut().remove_object(id).is_none() {
             return Ok(NativeResult::err(
                 context.gas_used(),
                 E_UNABLE_TO_DEALLOCATE_RECEIVING_TICKET,
@@ -269,7 +273,7 @@ pub fn end_transaction(
     }
     // find all wrapped objects
     let mut all_wrapped = BTreeSet::new();
-    let object_runtime_ref: &ObjectRuntime = context.extensions().get()?;
+    let object_runtime_ref: &ObjectRuntime = get_extension!(context)?;
     find_all_wrapped_objects(
         context,
         &mut all_wrapped,
@@ -303,7 +307,7 @@ pub fn end_transaction(
     }
 
     // new input objects are remaining taken objects not written/deleted
-    let object_runtime_ref: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime_ref: &mut ObjectRuntime = get_extension_mut!(context)?;
     let mut config_settings = vec![];
     for child in object_runtime_ref.all_active_child_objects() {
         let s: StructTag = child.ty.clone().into();
@@ -336,13 +340,12 @@ pub fn end_transaction(
             .taken_immutable_values
             .get(&ty)
             .and_then(|values| values.get(&id))
+            && !value.equals(prev_value)?
         {
-            if !value.equals(prev_value)? {
-                return Ok(NativeResult::err(
-                    legacy_test_cost(),
-                    E_INVALID_SHARED_OR_IMMUTABLE_USAGE,
-                ));
-            }
+            return Ok(NativeResult::err(
+                legacy_test_cost(),
+                E_INVALID_SHARED_OR_IMMUTABLE_USAGE,
+            ));
         }
         object_runtime_ref
             .test_inventories
@@ -381,7 +384,7 @@ pub fn take_from_address_by_id(
     pop_arg!(args, StructRef);
     assert!(args.is_empty());
     let specified_obj_ty = object_type_of_type(context, &specified_ty)?;
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     let inventories = &mut object_runtime.test_inventories;
     let res = take_from_inventory(
         |x| {
@@ -414,7 +417,7 @@ pub fn ids_for_address(
     let account: SuiAddress = pop_arg!(args, AccountAddress).into();
     assert!(args.is_empty());
     let specified_obj_ty = object_type_of_type(context, &specified_ty)?;
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     let inventories = &mut object_runtime.test_inventories;
     let ids = inventories
         .address_inventories
@@ -436,7 +439,7 @@ pub fn most_recent_id_for_address(
     let account: SuiAddress = pop_arg!(args, AccountAddress).into();
     assert!(args.is_empty());
     let specified_obj_ty = object_type_of_type(context, &specified_ty)?;
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     let inventories = &mut object_runtime.test_inventories;
     let most_recent_id = match inventories.address_inventories.get(&account) {
         None => pack_option(vector_specialization(&specified_ty), None),
@@ -458,7 +461,7 @@ pub fn was_taken_from_address(
     let id = pop_id(&mut args)?;
     let account: SuiAddress = pop_arg!(args, AccountAddress).into();
     assert!(args.is_empty());
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     let inventories = &mut object_runtime.test_inventories;
     let was_taken = inventories
         .taken
@@ -482,7 +485,7 @@ pub fn take_immutable_by_id(
     pop_arg!(args, StructRef);
     assert!(args.is_empty());
     let specified_obj_ty = object_type_of_type(context, &specified_ty)?;
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     let inventories = &mut object_runtime.test_inventories;
     let res = take_from_inventory(
         |x| {
@@ -504,7 +507,7 @@ pub fn take_immutable_by_id(
                 .taken_immutable_values
                 .entry(specified_obj_ty)
                 .or_default()
-                .insert(id, value.copy_value().unwrap());
+                .insert(id, value.copy_value());
             NativeResult::ok(legacy_test_cost(), smallvec![value])
         }
         Err(native_err) => native_err,
@@ -520,7 +523,7 @@ pub fn most_recent_immutable_id(
     let specified_ty = get_specified_ty(ty_args);
     assert!(args.is_empty());
     let specified_obj_ty = object_type_of_type(context, &specified_ty)?;
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     let inventories = &mut object_runtime.test_inventories;
     let most_recent_id = most_recent_at_ty(
         &inventories.taken,
@@ -543,7 +546,7 @@ pub fn was_taken_immutable(
     assert!(ty_args.is_empty());
     let id = pop_id(&mut args)?;
     assert!(args.is_empty());
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     let inventories = &mut object_runtime.test_inventories;
     let was_taken = inventories
         .taken
@@ -567,7 +570,7 @@ pub fn take_shared_by_id(
     pop_arg!(args, StructRef);
     assert!(args.is_empty());
     let specified_obj_ty = object_type_of_type(context, &specified_ty)?;
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     let inventories = &mut object_runtime.test_inventories;
     let res = take_from_inventory(
         |x| {
@@ -598,7 +601,7 @@ pub fn most_recent_id_shared(
     let specified_ty = get_specified_ty(ty_args);
     assert!(args.is_empty());
     let specified_obj_ty = object_type_of_type(context, &specified_ty)?;
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     let inventories = &mut object_runtime.test_inventories;
     let most_recent_id = most_recent_at_ty(
         &inventories.taken,
@@ -621,7 +624,7 @@ pub fn was_taken_shared(
     assert!(ty_args.is_empty());
     let id = pop_id(&mut args)?;
     assert!(args.is_empty());
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     let inventories = &mut object_runtime.test_inventories;
     let was_taken = inventories
         .taken
@@ -649,7 +652,7 @@ pub fn allocate_receiving_ticket_for_object(
             E_UNABLE_TO_ALLOCATE_RECEIVING_TICKET,
         ));
     };
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     let object_version = SequenceNumber::new();
     let inventories = &mut object_runtime.test_inventories;
     if inventories.allocated_tickets.contains_key(&id) {
@@ -710,8 +713,8 @@ pub fn allocate_receiving_ticket_for_object(
     );
 
     // NB: Must be a `&&` reference since the extension stores a static ref to the object storage.
-    let store: &&InMemoryTestStore = context.extensions().get()?;
-    store.0.with_borrow_mut(|store| store.insert_object(object));
+    let store: &&InMemoryTestStore = get_extension!(context)?;
+    store.0.borrow_mut().insert_object(object);
 
     Ok(NativeResult::ok(
         legacy_test_cost(),
@@ -726,7 +729,7 @@ pub fn deallocate_receiving_ticket_for_object(
 ) -> PartialVMResult<NativeResult> {
     let id = pop_id(&mut args)?;
 
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     let inventories = &mut object_runtime.test_inventories;
     // Deallocate the ticket -- we should never hit this scenario
     let Some((_, value)) = inventories.allocated_tickets.remove(&id) else {
@@ -741,11 +744,8 @@ pub fn deallocate_receiving_ticket_for_object(
     inventories.objects.insert(id, value);
 
     // Remove the object from storage. We should never hit this scenario either.
-    let store: &&InMemoryTestStore = context.extensions().get()?;
-    if store
-        .0
-        .with_borrow_mut(|store| store.remove_object(id).is_none())
-    {
+    let store: &&InMemoryTestStore = get_extension!(context)?;
+    if store.0.borrow_mut().remove_object(id).is_none() {
         return Ok(NativeResult::err(
             context.gas_used(),
             E_UNABLE_TO_DEALLOCATE_RECEIVING_TICKET,
@@ -776,7 +776,7 @@ fn take_from_inventory(
     taken.insert(id, owner.clone());
     input_objects.insert(id, owner);
     let obj = obj_opt.unwrap();
-    Ok(obj.copy_value().unwrap())
+    Ok(obj.copy_value())
 }
 
 fn vector_specialization(ty: &Type) -> VectorSpecialization {
@@ -807,7 +807,7 @@ fn most_recent_at_ty_opt(
     ty: MoveObjectType,
 ) -> Option<Value> {
     let s = inv.get(&ty)?;
-    let most_recent_id = s.iter().filter(|id| !taken.contains_key(id)).last()?;
+    let most_recent_id = s.iter().rfind(|id| !taken.contains_key(id))?;
     Some(pack_id(*most_recent_id))
 }
 
@@ -822,7 +822,7 @@ fn pop_id(args: &mut VecDeque<Value>) -> PartialVMResult<ObjectID> {
         None => {
             return Err(PartialVMError::new(
                 StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR,
-            ))
+            ));
         }
         Some(v) => v,
     };
@@ -844,13 +844,15 @@ fn pack_ids(items: impl IntoIterator<Item = impl Into<AccountAddress>>) -> Value
 }
 
 fn pack_vec_map(items: impl IntoIterator<Item = (Value, Value)>) -> Value {
-    Value::struct_(values::Struct::pack(vec![Vector::pack(
-        VectorSpecialization::Container,
-        items
-            .into_iter()
-            .map(|(k, v)| Value::struct_(values::Struct::pack(vec![k, v]))),
-    )
-    .unwrap()]))
+    Value::struct_(values::Struct::pack(vec![
+        Vector::pack(
+            VectorSpecialization::Container,
+            items
+                .into_iter()
+                .map(|(k, v)| Value::struct_(values::Struct::pack(vec![k, v]))),
+        )
+        .unwrap(),
+    ]))
 }
 
 fn transaction_effects(
@@ -912,11 +914,9 @@ fn pack_option(specialization: VectorSpecialization, opt: Option<Value>) -> Valu
         Some(v) => vec![v],
         None => vec![],
     };
-    Value::struct_(values::Struct::pack(vec![Vector::pack(
-        specialization,
-        item,
-    )
-    .unwrap()]))
+    Value::struct_(values::Struct::pack(vec![
+        Vector::pack(specialization, item).unwrap(),
+    ]))
 }
 
 fn find_all_wrapped_objects<'a, 'i>(
@@ -1003,14 +1003,12 @@ fn find_all_wrapped_objects<'a, 'i>(
         // associated with all of these types must be in the type/module cache in the VM -- THIS IS
         // BECAUSE WE ARE IN TEST SCENARIO ONLY AND THIS MAY NOT GENERALLY HOLD IN A
         // MULTI-TRANSACTION SETTING.
-        let Ok(Some(layout)) = context.type_tag_to_layout_for_test_scenario_only(&type_tag) else {
+        let Some(layout) = context.type_tag_to_type_layout(&type_tag) else {
             debug_assert!(false);
             continue;
         };
 
-        let Ok(Some(annotated_layout)) =
-            context.type_tag_to_fully_annotated_layout_for_test_scenario_only(&type_tag)
-        else {
+        let Some(annotated_layout) = context.type_tag_to_annotated_type_layout(&type_tag) else {
             debug_assert!(false);
             continue;
         };

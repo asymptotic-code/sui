@@ -1,9 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::DBMetrics;
+use crate::{DBMetrics, StorageType, util::ensure_database_type};
 use bincode::Options;
-use prometheus::Registry;
+use mysten_metrics::RegistryID;
+use prometheus::{HistogramTimer, Registry};
 use serde::de::DeserializeOwned;
 use std::env;
 use std::path::Path;
@@ -14,9 +15,9 @@ use tidehunter::iterators::db_iterator::DbIterator;
 use tidehunter::key_shape::{KeyShape, KeySpace};
 use tidehunter::metrics::Metrics;
 pub use tidehunter::{
+    Decision, WalPosition,
     key_shape::{KeyIndexing, KeyShapeBuilder, KeySpaceConfig, KeyType},
     minibytes::Bytes,
-    IndexWalPosition, WalPosition,
 };
 use typed_store_error::TypedStoreError;
 
@@ -29,16 +30,17 @@ pub struct ThConfig {
     pub prefix: Option<Vec<u8>>,
 }
 
-pub fn open(path: &Path, key_shape: KeyShape, db_name: String) -> Arc<Db> {
+pub fn open(path: &Path, key_shape: KeyShape, db_name: String) -> (Arc<Db>, RegistryID) {
     std::fs::create_dir_all(path).expect("failed to open tidehunter db");
     let registry_service = &DBMetrics::get().registry_serivce;
     let registry = new_db_registry(db_name);
-    registry_service.add(registry.clone());
+    let registry_id = registry_service.add(registry.clone());
     let metrics = Metrics::new_in(&registry);
+    ensure_database_type(path, StorageType::TideHunter).expect("failed to open tidehunter db");
     let db = Db::open(path, key_shape, Arc::new(thdb_config()), metrics)
         .expect("failed to open tidehunter db");
     db.start_periodic_snapshot();
-    db
+    (db, registry_id)
 }
 
 fn new_db_registry(name: String) -> Registry {
@@ -66,8 +68,28 @@ fn thdb_config() -> Config {
         println!("Using frag size from env variable {frag_size}");
         frag_size
     } else {
-        1024 * 1024 * 1024
+        #[cfg(debug_assertions)]
+        {
+            32 * 1024 * 1024
+        } // 32 Mb for tests
+        #[cfg(not(debug_assertions))]
+        {
+            1024 * 1024 * 1024
+        } // 1 Gb for prod
     };
+    #[cfg(debug_assertions)]
+    let max_maps = 4;
+    #[cfg(not(debug_assertions))]
+    let max_maps = 8; // 8Gb of mapped space for prod
+    let max_index_maps = Some(3);
+    #[cfg(debug_assertions)]
+    let commit_pool_size = 0;
+    #[cfg(not(debug_assertions))]
+    let commit_pool_size = 8; // Use thread pool to commit large batches
+    #[cfg(debug_assertions)]
+    let num_flusher_threads = 1;
+    #[cfg(not(debug_assertions))]
+    let num_flusher_threads = 4;
     Config {
         frag_size,
         // run snapshot every 64 Gb written to wal
@@ -76,9 +98,26 @@ fn thdb_config() -> Config {
         snapshot_unload_threshold: 128 * 1024 * 1024 * 1024,
         unload_jitter_pct: 30,
         max_dirty_keys: 1024,
-        max_maps: 8, // 8Gb of mapped space
+        max_maps,
+        max_index_maps,
+        commit_pool_size,
+        num_flusher_threads,
         ..Config::default()
     }
+}
+
+#[cfg(not(debug_assertions))]
+pub fn default_mutex_count() -> usize {
+    1024
+}
+
+#[cfg(debug_assertions)]
+pub fn default_mutex_count() -> usize {
+    16
+}
+
+pub fn default_value_cache_size() -> usize {
+    1000
 }
 
 pub(crate) fn apply_range_bounds(
@@ -96,12 +135,13 @@ pub(crate) fn apply_range_bounds(
 
 pub(crate) fn transform_th_iterator<'a, K, V>(
     iterator: impl Iterator<
-            Item = Result<
-                (tidehunter::minibytes::Bytes, tidehunter::minibytes::Bytes),
-                tidehunter::db::DbError,
-            >,
-        > + 'a,
+        Item = Result<
+            (tidehunter::minibytes::Bytes, tidehunter::minibytes::Bytes),
+            tidehunter::db::DbError,
+        >,
+    > + 'a,
     prefix: &'a Option<Vec<u8>>,
+    timer: HistogramTimer,
 ) -> impl Iterator<Item = Result<(K, V), TypedStoreError>> + 'a
 where
     K: DeserializeOwned,
@@ -113,6 +153,7 @@ where
     iterator.map(move |item| {
         item.map_err(|e| TypedStoreError::RocksDBError(format!("tidehunter error {:?}", e)))
             .and_then(|(raw_key, raw_value)| {
+                let _timer = &timer;
                 let key = match prefix {
                     Some(prefix) => {
                         let mut buffer = Vec::with_capacity(raw_key.len() + prefix.len());
@@ -226,5 +267,5 @@ impl ThConfig {
 }
 
 pub fn default_cells_per_mutex() -> usize {
-    2
+    1
 }

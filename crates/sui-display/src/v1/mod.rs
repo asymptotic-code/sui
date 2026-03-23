@@ -1,22 +1,25 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::BTreeMap, fmt::Write};
+use std::collections::BTreeMap;
+use std::fmt::Write;
 
-use anyhow::{anyhow, bail, Context};
-use move_core_types::{
-    annotated_extractor::Extractor,
-    annotated_value::{MoveTypeLayout, MoveValue},
-};
-use parser::{Parser, Strand};
+use anyhow::Context;
+use anyhow::anyhow;
+use anyhow::bail;
+use move_core_types::annotated_extractor::Extractor;
+use move_core_types::annotated_value::MoveTypeLayout;
+use move_core_types::annotated_value::MoveValue;
 use sui_json_rpc_types::SuiMoveValue;
-use sui_types::{
-    collection_types::{Entry, VecMap},
-    object::bounded_visitor::BoundedVisitor,
-};
+use sui_types::collection_types::Entry;
+use sui_types::collection_types::VecMap;
+use sui_types::object::bounded_visitor::BoundedVisitor;
 
-pub(crate) mod lexer;
-pub(crate) mod parser;
+use crate::v1::parser::Parser;
+use crate::v1::parser::Strand;
+
+mod lexer;
+mod parser;
 
 /// Format strings extracted from a `Display` object or `DisplayVersionUpdated` event on-chain.
 pub struct Format<'s> {

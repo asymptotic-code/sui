@@ -2,19 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    client_commands::{compile_package, upgrade_package},
+    client_commands::{compile_package, load_root_pkg_for_publish_upgrade, upgrade_package},
     client_ptb::{
-        ast::{Argument as PTBArg, ASSIGN, GAS_BUDGET},
+        ast::{ASSIGN, Argument as PTBArg, GAS_BUDGET},
         error::{PTBError, PTBResult, Span, Spanned},
     },
     err, error, sp,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use miette::Severity;
 use move_binary_format::{
-    binary_config::BinaryConfig, file_format::SignatureToken, CompiledModule,
+    CompiledModule, binary_config::BinaryConfig, file_format::SignatureToken,
 };
 use move_core_types::{
     account_address::AccountAddress, annotated_value::MoveTypeLayout, ident_str,
@@ -27,20 +27,19 @@ use move_core_types::{
         types::{ParsedStructType, ParsedType},
     },
 };
-use move_package::BuildConfig as MoveBuildConfig;
+use move_package_alt_compilation::build_config::BuildConfig as MoveBuildConfig;
 use std::{collections::BTreeMap, path::Path};
 use sui_json::{is_receiving_argument, primitive_type};
-use sui_json_rpc_types::{SuiObjectData, SuiObjectDataOptions, SuiRawData};
-use sui_move::manage_package::resolve_lock_file_path;
-use sui_sdk::apis::ReadApi;
+use sui_rpc_api::Client;
+use sui_sdk::wallet_context::WalletContext;
 use sui_types::{
-    base_types::{is_primitive_type_tag, ObjectID, TxContext, TxContextKind},
+    Identifier, SUI_FRAMEWORK_PACKAGE_ID, TypeTag,
+    base_types::{ObjectID, TxContext, TxContextKind, is_primitive_type_tag},
     move_package::MovePackage,
     object::Owner,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
     resolve_address,
     transaction::{self as Tx, ObjectArg},
-    Identifier, TypeTag, SUI_FRAMEWORK_PACKAGE_ID,
 };
 
 use super::{
@@ -123,12 +122,13 @@ impl<'a> Resolver<'a> for ToObject {
         obj_id: ObjectID,
     ) -> PTBResult<Tx::Argument> {
         // Get the object from the reader to get metadata about the object.
-        let obj = builder.get_object(obj_id, loc).await?;
-        let owner = obj
-            .owner
-            .clone()
-            .ok_or_else(|| err!(loc, "Unable to get owner info for object {obj_id}"))?;
-        let object_ref = obj.object_ref();
+        let obj = builder
+            .reader
+            .get_object(obj_id)
+            .await
+            .map_err(|e| err!(loc, "Unable to get owner info for object {obj_id}: {e}"))?;
+        let owner = obj.owner().clone();
+        let object_ref = obj.compute_object_reference();
         // Depending on the ownership of the object, we resolve it to different types of object
         // arguments for the transaction.
         let obj_arg = match owner {
@@ -143,7 +143,11 @@ impl<'a> Resolver<'a> for ToObject {
             } => ObjectArg::SharedObject {
                 id: object_ref.0,
                 initial_shared_version,
-                mutable: self.is_mut,
+                mutability: if self.is_mut {
+                    Tx::SharedObjectMutability::Mutable
+                } else {
+                    Tx::SharedObjectMutability::Immutable
+                },
             },
             Owner::ObjectOwner(_) => {
                 error!(loc => help: {
@@ -230,7 +234,9 @@ pub struct PTBBuilder<'a> {
     /// transaction arguments.
     resolved_arguments: BTreeMap<String, Tx::Argument>,
     /// Read API for reading objects from chain. Needed for object resolution.
-    reader: &'a ReadApi,
+    reader: Client,
+    /// Wallet used to find the active environment for the publish command
+    wallet: &'a WalletContext,
     /// The last command that we have added. This is used to support assignment commands.
     last_command: Option<Tx::Argument>,
     /// The actual PTB that we are building up.
@@ -282,7 +288,11 @@ impl ArgWithHistory {
 }
 
 impl<'a> PTBBuilder<'a> {
-    pub fn new(starting_env: BTreeMap<String, AddressData>, reader: &'a ReadApi) -> Self {
+    pub fn new(
+        starting_env: BTreeMap<String, AddressData>,
+        reader: Client,
+        wallet: &'a WalletContext,
+    ) -> Self {
         Self {
             addresses: starting_env,
             identifiers: BTreeMap::new(),
@@ -290,6 +300,7 @@ impl<'a> PTBBuilder<'a> {
             resolved_arguments: BTreeMap::new(),
             ptb: ProgrammableTransactionBuilder::new(),
             reader,
+            wallet,
             last_command: None,
             errors: Vec::new(),
         }
@@ -389,10 +400,10 @@ impl<'a> PTBBuilder<'a> {
                 // externally-bound address (i.e., one coming in through the initial environment).
                 // This will also handle direct aliasing of addresses throughout the ptb.
                 // Note that we don't do this recursively so no need to worry about loops/cycles.
-                if let Some(addr) = self.addresses.get(i) {
-                    if let Some(a) = addr.address() {
-                        self.addresses.insert(ident, AddressData::AccountAddress(a));
-                    }
+                if let Some(addr) = self.addresses.get(i)
+                    && let Some(a) = addr.address()
+                {
+                    self.addresses.insert(ident, AddressData::AccountAddress(a));
                 }
             }
             // If we encounter a dotted string e.g., "foo.0" or "sui.io" or something like that
@@ -421,7 +432,7 @@ impl<'a> PTBBuilder<'a> {
         package_id: ObjectID,
         loc: Span,
     ) -> PTBResult<MovePackage> {
-        resolve_package(self.reader, package_id, loc).await
+        resolve_package(&mut self.reader, package_id, loc).await
     }
 
     /// Resolves the argument to the move call based on the type information of the function being
@@ -508,10 +519,7 @@ impl<'a> PTBBuilder<'a> {
                 } else {
                     display_did_you_mean(find_did_you_means(
                         module_name.as_str(),
-                        package
-                            .serialized_module_map()
-                            .iter()
-                            .map(|(x, _)| x.as_str()),
+                        package.serialized_module_map().keys().map(|x| x.as_str()),
                     ))
                 };
                 let e = err!(*mloc, "{e}");
@@ -747,21 +755,6 @@ impl<'a> PTBBuilder<'a> {
         }
     }
 
-    /// Fetch the `SuiObjectData` for an object ID -- this is used for object resolution.
-    async fn get_object(&self, object_id: ObjectID, obj_loc: Span) -> PTBResult<SuiObjectData> {
-        let res = self
-            .reader
-            .get_object_with_options(
-                object_id,
-                SuiObjectDataOptions::new().with_type().with_owner(),
-            )
-            .await
-            .map_err(|e| err!(obj_loc, "{e}"))?
-            .into_object()
-            .map_err(|e| err!(obj_loc, "{e}"))?;
-        Ok(res)
-    }
-
     /// Create a "did you mean" message for an identifier with the context of our different binding
     /// environments.
     fn did_you_mean_identifier(&self, ident: &str) -> Option<String> {
@@ -915,38 +908,27 @@ impl<'a> PTBBuilder<'a> {
                 self.last_command = Some(res);
             }
             ParsedPTBCommand::Publish(sp!(pkg_loc, package_path)) => {
-                let chain_id = self.reader.get_chain_identifier().await.ok();
-                let build_config = MoveBuildConfig::default();
                 let package_path = Path::new(&package_path);
-                let build_config = resolve_lock_file_path(build_config.clone(), Some(package_path))
-                    .map_err(|e| err!(pkg_loc, "{e}"))?;
-                let previous_id = if let Some(ref chain_id) = chain_id {
-                    sui_package_management::set_package_id(
-                        package_path,
-                        build_config.install_dir.clone(),
-                        chain_id,
-                        AccountAddress::ZERO,
-                    )
-                    .map_err(|e| err!(pkg_loc, "{e}"))?
-                } else {
-                    None
-                };
-                // Restore original ID, then check result.
-                if let (Some(chain_id), Some(previous_id)) = (chain_id, previous_id) {
-                    let _ = sui_package_management::set_package_id(
-                        package_path,
-                        build_config.install_dir.clone(),
-                        &chain_id,
-                        previous_id,
-                    )
-                    .map_err(|e| err!(pkg_loc, "{e}"))?;
+                if !package_path.exists() {
+                    error!(
+                        pkg_loc,
+                        "Package path '{}' does not exist",
+                        package_path.display()
+                    );
                 }
+
+                let build_config = MoveBuildConfig::default();
+                let root_pkg =
+                    load_root_pkg_for_publish_upgrade(self.wallet, &build_config, package_path)
+                        .await
+                        .map_err(|e| err!(pkg_loc, "Cannot compile package: {e}"))?;
+
                 let compiled_package = compile_package(
-                    self.reader,
-                    build_config.clone(),
+                    self.reader.clone(),
+                    &root_pkg,
+                    build_config,
                     package_path,
-                    false, /* with_unpublished_dependencies */
-                    false, /* skip_dependency_verification */
+                    false, /* with_unpublished_deps */
                 )
                 .await
                 .map_err(|e| err!(pkg_loc, "{e}"))?;
@@ -961,6 +943,15 @@ impl<'a> PTBBuilder<'a> {
             }
             // Update this command to not do as many things. It should result in a single command.
             ParsedPTBCommand::Upgrade(sp!(path_loc, package_path), mut arg) => {
+                let package_path = Path::new(&package_path);
+                if !package_path.exists() {
+                    error!(
+                        path_loc,
+                        "Package path '{}' does not exist",
+                        package_path.display()
+                    );
+                }
+
                 if let sp!(loc, PTBArg::Identifier(id)) = arg {
                     arg = self
                         .arguments_to_resolve
@@ -976,6 +967,13 @@ impl<'a> PTBBuilder<'a> {
                     }
                 };
 
+                let package_path = Path::new(&package_path);
+                let build_config = MoveBuildConfig::default();
+                let root_pkg =
+                    load_root_pkg_for_publish_upgrade(self.wallet, &build_config, package_path)
+                        .await
+                        .map_err(|e| err!(path_loc, "Cannot compile package: {e}"))?;
+
                 let upgrade_cap_arg = self
                     .resolve(
                         cap_loc.wrap(PTBArg::Address(upgrade_cap_id)),
@@ -983,41 +981,15 @@ impl<'a> PTBBuilder<'a> {
                     )
                     .await?;
 
-                let chain_id = self.reader.get_chain_identifier().await.ok();
-                let build_config = MoveBuildConfig::default();
-                let package_path = Path::new(&package_path);
-                let build_config = resolve_lock_file_path(build_config.clone(), Some(package_path))
-                    .map_err(|e| err!(path_loc, "{e}"))?;
-                let previous_id = if let Some(ref chain_id) = chain_id {
-                    sui_package_management::set_package_id(
-                        package_path,
-                        build_config.install_dir.clone(),
-                        chain_id,
-                        AccountAddress::ZERO,
-                    )
-                    .map_err(|e| err!(path_loc, "{e}"))?
-                } else {
-                    None
-                };
-                // Restore original ID, then check result.
-                if let (Some(chain_id), Some(previous_id)) = (chain_id, previous_id) {
-                    let _ = sui_package_management::set_package_id(
-                        package_path,
-                        build_config.install_dir.clone(),
-                        &chain_id,
-                        previous_id,
-                    )
-                    .map_err(|e| err!(path_loc, "{e}"))?;
-                }
-
                 let (upgrade_policy, compiled_package) = upgrade_package(
-                    self.reader,
+                    self.reader.clone(),
+                    &root_pkg,
                     build_config.clone(),
                     package_path,
                     ObjectID::from_address(upgrade_cap_id.into_inner()),
                     false, /* with_unpublished_dependencies */
                     false, /* skip_dependency_verification */
-                    None,
+                           // None,
                 )
                 .await
                 .map_err(|e| err!(path_loc, "{e}"))?;
@@ -1025,8 +997,7 @@ impl<'a> PTBBuilder<'a> {
                 let package_digest = compiled_package.get_package_digest(false);
                 let package_id = compiled_package
                     .published_at
-                    .as_ref()
-                    .map_err(|e| err!(path_loc, "{e}"))?;
+                    .ok_or_else(|| err!(path_loc, "No published-at information"))?;
                 let compiled_modules = compiled_package.get_package_bytes(false);
                 // let (package_id, compiled_modules, dependencies, package_digest, upgrade_policy, _) =
                 //     upgrade_result.map_err(|e| err!(path_loc, "{e}"))?;
@@ -1048,13 +1019,14 @@ impl<'a> PTBBuilder<'a> {
                     vec![upgrade_cap_arg, upgrade_arg, digest_arg],
                 ));
                 let upgrade_receipt = self.ptb.upgrade(
-                    *package_id,
+                    package_id,
                     upgrade_ticket,
                     compiled_package
                         .dependency_ids
                         .published
-                        .into_values()
-                        .collect(),
+                        .values()
+                        .cloned()
+                        .collect::<Vec<_>>(),
                     compiled_modules,
                 );
                 let res = self.ptb.command(Tx::Command::move_call(
@@ -1274,33 +1246,22 @@ fn try_resolve_parsed_address(
 
 /// Try to resolve an ObjectID to a MovePackage
 pub async fn resolve_package(
-    reader: &ReadApi,
+    reader: &mut Client,
     package_id: ObjectID,
     loc: Span,
 ) -> Result<MovePackage, PTBError> {
     let object = reader
-        .get_object_with_options(package_id, SuiObjectDataOptions::bcs_lossless())
+        .get_object(package_id)
         .await
-        .map_err(|e| err!(loc, "{e}"))?
-        .into_object()
-        .map_err(|e| err!(loc, "{e}"))?;
+        .map_err(|e| err!(loc, "{}", e.message()))?;
 
-    let Some(SuiRawData::Package(package)) = object.bcs else {
-        error!(
+    let package = object.data.try_as_package().ok_or_else(|| {
+        err!(
             loc,
-            "BCS field in object '{}' is missing or not a package.", package_id
-        );
-    };
+            "BCS field in object '{}' is missing or not a package.",
+            package_id
+        )
+    })?;
 
-    MovePackage::new(
-        package.id,
-        package.version,
-        package.module_map,
-        // This package came from on-chain and the tool runs locally, so don't worry about
-        // trying to enforce the package size limit.
-        u64::MAX,
-        package.type_origin_table,
-        package.linkage_table,
-    )
-    .map_err(|e| err!(loc, "{e}"))
+    Ok(package.clone())
 }

@@ -5,34 +5,42 @@ use atomic_float::AtomicF64;
 use crossterm::tty::IsTty;
 use once_cell::sync::Lazy;
 use opentelemetry::{
-    trace::{Link, SamplingResult, SpanKind, TraceId, TracerProvider as _},
     Context, KeyValue,
+    trace::{Link, SamplingResult, SpanKind, TraceId, TracerProvider as _},
 };
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::Sampler;
 use opentelemetry_sdk::{
-    self, runtime,
+    self, Resource, runtime,
     trace::{BatchSpanProcessor, ShouldSample, TracerProvider},
-    Resource,
 };
 use span_latency_prom::PrometheusSpanLatencyLayer;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::{
     env,
-    io::{stderr, Write},
+    io::{Write, stderr},
     str::FromStr,
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{Arc, Mutex, atomic::Ordering},
 };
+use tracing::dispatcher::DefaultGuard;
 use tracing::metadata::LevelFilter;
-use tracing::{error, info, Level};
+use tracing::{Level, error, info};
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
-use tracing_subscriber::{filter, fmt, layer::SubscriberExt, reload, EnvFilter, Layer, Registry};
+use tracing_error::ErrorLayer;
+use tracing_subscriber::{
+    EnvFilter, Layer, Registry, filter,
+    fmt::{self, format::Pretty},
+    layer::SubscriberExt,
+    reload,
+};
 
 use crate::file_exporter::{CachedOpenFile, FileExporter};
+use crate::test_layer::TestLayer;
 
 mod file_exporter;
 pub mod span_latency_prom;
+mod test_layer;
 
 /// Alias for a type-erased error type.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -65,6 +73,14 @@ pub struct TelemetryConfig {
     pub sample_rate: f64,
     /// Add directive to include trace logs with provided target
     pub trace_target: Option<Vec<String>>,
+    /// Print unadorned logs from the target on standard error if this is a tty
+    pub user_info_target: Vec<String>,
+    // Sets the subscriber created by this config to be the global default. Defaults to true if not set.
+    pub set_global_default: bool,
+    // Add error layer to capture trace spans. Defaults to false if not set.
+    pub enable_error_layer: bool,
+    // Capture output for tests. Defaults to false if not set.
+    pub enable_test_layer: bool,
 }
 
 #[must_use]
@@ -72,6 +88,7 @@ pub struct TelemetryConfig {
 pub struct TelemetryGuards {
     worker_guard: WorkerGuard,
     provider: Option<TracerProvider>,
+    subscriber: Option<DefaultGuard>,
 }
 
 impl TelemetryGuards {
@@ -79,11 +96,16 @@ impl TelemetryGuards {
         config: TelemetryConfig,
         worker_guard: WorkerGuard,
         provider: Option<TracerProvider>,
+        subscriber: Option<DefaultGuard>,
     ) -> Self {
-        set_global_telemetry_config(config);
+        // Do not set the global config if subscriber is present because a global subscriber was not set.
+        if subscriber.is_none() {
+            set_global_telemetry_config(config);
+        }
         Self {
             worker_guard,
             provider,
+            subscriber,
         }
     }
 }
@@ -115,6 +137,7 @@ pub struct TracingHandle {
     log: FilterHandle,
     trace: Option<FilterHandle>,
     file_output: CachedOpenFile,
+    test_layer: Option<TestLayer>,
     sampler: SamplingFilter,
 }
 
@@ -171,6 +194,13 @@ impl TracingHandle {
                 error!("failed to reset trace filter: {}", e);
             }
         }
+    }
+
+    pub fn get_test_layer_events(&self) -> Vec<String> {
+        self.test_layer
+            .as_ref()
+            .expect("test layer not enabled")
+            .get_events()
     }
 }
 
@@ -256,6 +286,10 @@ impl TelemetryConfig {
             prom_registry: None,
             sample_rate: 1.0,
             trace_target: None,
+            user_info_target: Vec::new(),
+            set_global_default: true,
+            enable_error_layer: false,
+            enable_test_layer: false,
         }
     }
 
@@ -298,6 +332,28 @@ impl TelemetryConfig {
         self
     }
 
+    /// Adds `target` to the list of modules that will have their info & above logs printed
+    /// unadorned to standard error (for non-json output)
+    pub fn with_user_info_target(mut self, target: &str) -> Self {
+        self.user_info_target.push(target.to_owned());
+        self
+    }
+
+    pub fn with_set_global_default(mut self, set_global_default: bool) -> Self {
+        self.set_global_default = set_global_default;
+        self
+    }
+
+    pub fn with_enable_error_layer(mut self, enable_error_layer: bool) -> Self {
+        self.enable_error_layer = enable_error_layer;
+        self
+    }
+
+    pub fn with_enable_test_layer(mut self, enable_test_layer: bool) -> Self {
+        self.enable_test_layer = enable_test_layer;
+        self
+    }
+
     pub fn with_env(mut self) -> Self {
         if env::var("CRASH_ON_PANIC").is_ok() {
             self.crash_on_panic = true
@@ -326,6 +382,12 @@ impl TelemetryConfig {
 
         if let Ok(sample_rate) = env::var("SAMPLE_RATE") {
             self.sample_rate = sample_rate.parse().expect("Cannot parse SAMPLE_RATE");
+        }
+
+        if let Ok(enable_error_layer) = env::var("ENABLE_ERROR_LAYER") {
+            self.enable_error_layer = enable_error_layer
+                .parse()
+                .expect("Cannot parse ENABLE_ERROR_LAYER");
         }
 
         self
@@ -460,15 +522,56 @@ impl TelemetryConfig {
             // Output to file or to stderr with ANSI colors
             let fmt_layer = fmt::layer()
                 .with_ansi(config.log_file.is_none() && stderr().is_tty())
-                .with_writer(nb_output)
+                .with_writer(nb_output.clone())
                 .with_filter(log_filter)
                 .boxed();
+
             layers.push(fmt_layer);
+
+            if config.log_file.is_none() && stderr().is_tty() && !config.user_info_target.is_empty()
+            {
+                // Add another printer that prints unadorned info messages to stderr
+                let mut directives = String::from("none");
+                for target in config.user_info_target {
+                    directives.push_str(&format!(",{target}=info"));
+                }
+
+                let fmt_layer = fmt::layer()
+                    .with_ansi(config.log_file.is_none() && stderr().is_tty())
+                    .event_format(
+                        fmt::format()
+                            .without_time()
+                            .with_target(false)
+                            .with_level(false),
+                    )
+                    .with_writer(nb_output)
+                    .with_filter(EnvFilter::new(directives))
+                    .boxed();
+
+                layers.push(fmt_layer);
+            }
         }
 
+        if config.enable_error_layer {
+            layers.push(ErrorLayer::new(Pretty::default()).boxed())
+        }
+
+        let test_layer = if config.enable_test_layer {
+            let test_layer = TestLayer::new();
+            layers.push(test_layer.clone().boxed());
+            Some(test_layer)
+        } else {
+            None
+        };
+
         let subscriber = tracing_subscriber::registry().with(layers);
-        ::tracing::subscriber::set_global_default(subscriber)
-            .expect("unable to initialize tracing subscriber");
+        let subscriber_guard = if config.set_global_default {
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("unable to initialize tracing subscriber");
+            None
+        } else {
+            Some(tracing::subscriber::set_default(subscriber))
+        };
 
         if config.panic_hook {
             set_panic_hook(config.crash_on_panic);
@@ -476,7 +579,7 @@ impl TelemetryConfig {
 
         // The guard must be returned and kept in the main fn of the app, as when it's dropped then the output
         // gets flushed and closed. If this is dropped too early then no output will appear!
-        let guards = TelemetryGuards::new(config_clone, worker_guard, provider);
+        let guards = TelemetryGuards::new(config_clone, worker_guard, provider, subscriber_guard);
 
         (
             guards,
@@ -484,6 +587,7 @@ impl TelemetryConfig {
                 log: log_filter_handle,
                 trace: trace_filter_handle,
                 file_output,
+                test_layer,
                 sampler,
             },
         )
@@ -589,14 +693,14 @@ mod tests {
         let metrics = registry.gather();
         // There should be 1 metricFamily and 1 metric
         assert_eq!(metrics.len(), 1);
-        assert_eq!(metrics[0].get_name(), "tracing_span_latencies");
+        assert_eq!(metrics[0].name(), "tracing_span_latencies");
         assert_eq!(metrics[0].get_field_type(), MetricType::HISTOGRAM);
         let inner = metrics[0].get_metric();
         assert_eq!(inner.len(), 1);
         let labels = inner[0].get_label();
         assert_eq!(labels.len(), 1);
-        assert_eq!(labels[0].get_name(), "span_name");
-        assert_eq!(labels[0].get_value(), "yo span yo");
+        assert_eq!(labels[0].name(), "span_name");
+        assert_eq!(labels[0].value(), "yo span yo");
 
         panic!("This should cause error logs to be printed out!");
     }

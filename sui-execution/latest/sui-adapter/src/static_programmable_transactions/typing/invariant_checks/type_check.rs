@@ -9,13 +9,21 @@ use crate::{
     static_programmable_transactions::{
         env::Env,
         loading::ast as L,
-        typing::{ast as T, verify::input_arguments},
+        typing::{
+            ast as T,
+            translate::{balance_inner_type, coin_inner_type, withdrawal_inner_type},
+            verify::input_arguments,
+        },
     },
 };
-use sui_types::{coin::RESOLVED_COIN_STRUCT, error::ExecutionError};
+use sui_types::{
+    coin::RESOLVED_COIN_STRUCT, error::ExecutionError,
+    funds_accumulator::RESOLVED_WITHDRAWAL_STRUCT,
+};
 
 struct Context<'txn> {
     objects: Vec<&'txn T::Type>,
+    withdrawals: Vec<&'txn T::Type>,
     pure: Vec<&'txn T::Type>,
     receiving: Vec<&'txn T::Type>,
     result_types: Vec<&'txn [T::Type]>,
@@ -25,13 +33,24 @@ impl<'txn> Context<'txn> {
     fn new(txn: &'txn T::Transaction) -> Self {
         Self {
             objects: txn.objects.iter().map(|o| &o.ty).collect(),
+            withdrawals: txn.withdrawals.iter().map(|w| &w.ty).collect(),
             pure: txn.pure.iter().map(|p| &p.ty).collect(),
             receiving: txn.receiving.iter().map(|r| &r.ty).collect(),
-            result_types: txn.commands.iter().map(|(_, ty)| ty.as_slice()).collect(),
+            result_types: txn
+                .commands
+                .iter()
+                .map(|sp!(_, c)| c.result_type.as_slice())
+                .collect(),
         }
     }
 }
 
+/// Verifies the correctness of the typing on the AST
+/// - All object inputs have key
+/// - All pure inputs are valid types
+/// - All receiving inputs types have key
+/// - All commands are well formed with correct argument/result types
+/// - All dropped result values have the `drop` ability
 pub fn verify<Mode: ExecutionMode>(env: &Env, txn: &T::Transaction) -> Result<(), ExecutionError> {
     verify_::<Mode>(env, txn).map_err(|e| make_invariant_violation!("{}. Transaction {:?}", e, txn))
 }
@@ -39,14 +58,20 @@ pub fn verify<Mode: ExecutionMode>(env: &Env, txn: &T::Transaction) -> Result<()
 fn verify_<Mode: ExecutionMode>(env: &Env, txn: &T::Transaction) -> anyhow::Result<()> {
     let context = Context::new(txn);
     let T::Transaction {
+        gas_payment: _,
         bytes: _,
         objects,
+        withdrawals,
         pure,
         receiving,
+        withdrawal_compatibility_conversions,
         commands,
     } = txn;
     for obj in objects {
         object_input(obj)?;
+    }
+    for w in withdrawals {
+        withdrawal_input(&w.ty)?;
     }
     for p in pure {
         pure_input::<Mode>(p)?;
@@ -54,14 +79,35 @@ fn verify_<Mode: ExecutionMode>(env: &Env, txn: &T::Transaction) -> anyhow::Resu
     for r in receiving {
         receiving_input(r)?;
     }
-    for (c, result_tys) in commands {
-        command::<Mode>(env, &context, c, result_tys)?;
+    for c in commands {
+        command::<Mode>(env, &context, c)?;
+    }
+    for (withdrawal, conversion) in withdrawal_compatibility_conversions {
+        withdrawal_compatibility_conversion(env, &context, *withdrawal, conversion)?;
     }
     Ok(())
 }
 
 fn object_input(obj: &T::ObjectInput) -> anyhow::Result<()> {
     anyhow::ensure!(obj.ty.abilities().has_key(), "object type must have key");
+    Ok(())
+}
+
+fn withdrawal_input(ty: &T::Type) -> anyhow::Result<()> {
+    anyhow::ensure!(ty.abilities().has_drop(), "withdrawal type must have drop");
+    let T::Type::Datatype(dt) = ty else {
+        anyhow::bail!("withdrawal input must be a datatype, got {ty:?}");
+    };
+    anyhow::ensure!(
+        dt.type_arguments.len() == 1,
+        "withdrawal input must have exactly one type argument, got {}",
+        dt.type_arguments.len()
+    );
+    anyhow::ensure!(
+        dt.qualified_ident() == RESOLVED_WITHDRAWAL_STRUCT,
+        "withdrawal input must be sui::funds_accumulator::Withdrawal, got {:?}",
+        dt.qualified_ident()
+    );
     Ok(())
 }
 
@@ -87,10 +133,10 @@ fn command<Mode: ExecutionMode>(
     env: &Env,
     context: &Context,
     sp!(_, c): &T::Command,
-    result_tys: &[T::Type],
 ) -> anyhow::Result<()> {
-    match c {
-        T::Command_::MoveCall(move_call) => {
+    let result_tys = &c.result_type;
+    match &c.command {
+        T::Command__::MoveCall(move_call) => {
             let T::MoveCall {
                 function,
                 arguments,
@@ -122,7 +168,7 @@ fn command<Mode: ExecutionMode>(
                 );
             }
         }
-        T::Command_::TransferObjects(objs, recipient) => {
+        T::Command__::TransferObjects(objs, recipient) => {
             for obj in objs {
                 let ty = &obj.value.1;
                 anyhow::ensure!(
@@ -137,7 +183,7 @@ fn command<Mode: ExecutionMode>(
                 "transfer objects should not return any value, got {result_tys:?}"
             );
         }
-        T::Command_::SplitCoins(ty_coin, coin, amounts) => {
+        T::Command__::SplitCoins(ty_coin, coin, amounts) => {
             let T::Type::Datatype(dt) = ty_coin else {
                 anyhow::bail!("split coins should have a coin type, got {ty_coin:?}");
             };
@@ -166,7 +212,7 @@ fn command<Mode: ExecutionMode>(
                 "split coins should return coin<{ty_coin:?}>, got {result_tys:?}"
             );
         }
-        T::Command_::MergeCoins(ty_coin, target, coins) => {
+        T::Command__::MergeCoins(ty_coin, target, coins) => {
             let T::Type::Datatype(dt) = ty_coin else {
                 anyhow::bail!("split coins should have a coin type, got {ty_coin:?}");
             };
@@ -189,7 +235,7 @@ fn command<Mode: ExecutionMode>(
                 "merge coins should not return any value, got {result_tys:?}"
             );
         }
-        T::Command_::MakeMoveVec(t, args) => {
+        T::Command__::MakeMoveVec(t, args) => {
             for arg in args {
                 argument(env, context, arg, t)?;
             }
@@ -197,7 +243,7 @@ fn command<Mode: ExecutionMode>(
                 result_tys.len() == 1,
                 "make move vec should return exactly one vector"
             );
-            let T::Type::Vector(inner) = &result_tys[0] else {
+            let T::Type::Vector(inner) = result_tys.first().unwrap() else {
                 anyhow::bail!("make move vec should return a vector type, got {result_tys:?}");
             };
             anyhow::ensure!(
@@ -205,7 +251,7 @@ fn command<Mode: ExecutionMode>(
                 "make move vec should return vector<{t:?}>, got {result_tys:?}"
             );
         }
-        T::Command_::Publish(_, _, _) => {
+        T::Command__::Publish(_, _, _) => {
             if Mode::packages_are_predefined() {
                 anyhow::ensure!(
                     result_tys.is_empty(),
@@ -218,12 +264,12 @@ fn command<Mode: ExecutionMode>(
                 );
                 let cap = &env.upgrade_cap_type()?;
                 anyhow::ensure!(
-                    cap == &result_tys[0],
+                    cap == result_tys.first().unwrap(),
                     "publish should return {cap:?}, got {result_tys:?}",
                 );
             }
         }
-        T::Command_::Upgrade(_, _, _, arg, _) => {
+        T::Command__::Upgrade(_, _, _, arg, _) => {
             argument(env, context, arg, &env.upgrade_ticket_type()?)?;
             let receipt = &env.upgrade_receipt_type()?;
             anyhow::ensure!(
@@ -231,10 +277,23 @@ fn command<Mode: ExecutionMode>(
                 "upgrade should return exactly one receipt"
             );
             anyhow::ensure!(
-                receipt == &result_tys[0],
+                receipt == result_tys.first().unwrap(),
                 "upgrade should return {receipt:?}, got {result_tys:?}"
             );
         }
+    }
+    assert_invariant!(
+        c.drop_values.len() == result_tys.len(),
+        "drop values should match result types, expected {} got {}",
+        c.drop_values.len(),
+        result_tys.len()
+    );
+    for (drop_value, result_ty) in c.drop_values.iter().copied().zip(result_tys) {
+        // drop value ==> `ty: drop`
+        assert_invariant!(
+            !drop_value || result_ty.abilities().has_drop(),
+            "result was marked for drop but does not have the `drop` ability"
+        );
     }
     Ok(())
 }
@@ -324,6 +383,12 @@ fn location(env: &Env, context: &Context, l: T::Location) -> anyhow::Result<T::T
             .copied()
             .ok_or_else(|| anyhow::anyhow!("object input {i} out of bounds"))?
             .clone(),
+        T::Location::WithdrawalInput(i) => context
+            .withdrawals
+            .get(i as usize)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("withdrawal input {i} out of bounds"))?
+            .clone(),
         T::Location::PureInput(i) => context
             .pure
             .get(i as usize)
@@ -343,4 +408,48 @@ fn location(env: &Env, context: &Context, l: T::Location) -> anyhow::Result<T::T
             .ok_or_else(|| anyhow::anyhow!("result ({i}, {j}) out of bounds",))?
             .clone(),
     })
+}
+
+fn withdrawal_compatibility_conversion(
+    env: &Env,
+    context: &Context,
+    withdrawal_location: T::Location,
+    conv: &T::WithdrawalCompatibilityConversion,
+) -> anyhow::Result<()> {
+    let T::WithdrawalCompatibilityConversion {
+        owner,
+        conversion_result,
+    } = conv;
+    // checker owner is a pure input of type address
+    anyhow::ensure!(
+        matches!(owner, T::Location::PureInput(_)),
+        "withdrawal compatibility conversion owner should be a pure input"
+    );
+    anyhow::ensure!(
+        location(env, context, *owner)? == T::Type::Address,
+        "withdrawal compatibility conversion owner type should be address"
+    );
+    // check the conversion result type is coin
+    let conversion_location = T::Location::Result(*conversion_result, 0);
+    let conversion_ty = location(env, context, conversion_location)?;
+    let Some(coin_inner) = coin_inner_type(&conversion_ty) else {
+        anyhow::bail!("conversion result should be a coin type");
+    };
+    // check the withdrawal location is a withdrawal input of Withdarawal<Balance<coin_inner>>
+    anyhow::ensure!(
+        matches!(withdrawal_location, T::Location::WithdrawalInput(_)),
+        "withdrawal should be a withdrawal input"
+    );
+    let withdrawal_ty = location(env, context, withdrawal_location)?;
+    let Some(withdrawal_inner_ty) = withdrawal_inner_type(&withdrawal_ty) else {
+        anyhow::bail!("withdrawal input should be a withdrawal type");
+    };
+    let Some(withdrawal_balance_inner) = balance_inner_type(withdrawal_inner_ty) else {
+        anyhow::bail!("withdrawal inner type should be a balance type");
+    };
+    anyhow::ensure!(
+        withdrawal_balance_inner == coin_inner,
+        "withdrawal balance inner type should match conversion coin inner type"
+    );
+    Ok(())
 }

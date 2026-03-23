@@ -9,11 +9,9 @@ use crate::types::IsBridgePaused;
 use arc_swap::ArcSwap;
 use mysten_metrics::spawn_logged_monitored_task;
 use shared_crypto::intent::{Intent, IntentMessage};
-use sui_json_rpc_types::{
-    SuiExecutionStatus, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
-};
-use sui_types::transaction::ObjectArg;
+use sui_json_rpc_types::SuiExecutionStatus;
 use sui_types::TypeTag;
+use sui_types::transaction::ObjectArg;
 use sui_types::{
     base_types::{ObjectID, ObjectRef, SuiAddress},
     crypto::{Signature, SuiKeyPair},
@@ -32,7 +30,7 @@ use crate::{
     client::bridge_authority_aggregator::BridgeAuthorityAggregator,
     error::BridgeError,
     storage::BridgeOrchestratorTables,
-    sui_client::{SuiClient, SuiClientInner},
+    sui_client::{ExecuteTransactionResult, SuiClient, SuiClientInner},
     sui_transaction_builder::build_sui_transaction,
     types::{BridgeAction, BridgeActionStatus, VerifiedCertifiedBridgeAction},
 };
@@ -40,7 +38,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::time::Duration;
-use tracing::{error, info, instrument, warn, Instrument};
+use tracing::{Instrument, error, info, instrument, warn};
 
 pub const CHANNEL_SIZE: usize = 1000;
 pub const SIGNING_CONCURRENCY: usize = 10;
@@ -51,7 +49,7 @@ pub const MAX_SIGNING_ATTEMPTS: u64 = 16;
 pub const MAX_EXECUTION_ATTEMPTS: u64 = 16;
 
 async fn delay(attempt_times: u64) {
-    let delay_ms = 100 * (2 ^ attempt_times);
+    let delay_ms = 100 * 2_u64.pow(attempt_times as u32);
     tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
 }
 
@@ -343,7 +341,11 @@ where
 
         // Only token transfer action should reach here
         match &action {
-            BridgeAction::SuiToEthBridgeAction(_) | BridgeAction::EthToSuiBridgeAction(_) => (),
+            BridgeAction::SuiToEthBridgeAction(_)
+            | BridgeAction::SuiToEthTokenTransfer(_)
+            | BridgeAction::SuiToEthTokenTransferV2(_)
+            | BridgeAction::EthToSuiBridgeAction(_)
+            | BridgeAction::EthToSuiTokenTransferV2(_) => (),
             _ => unreachable!("Non token transfer action should not reach here"),
         };
 
@@ -379,7 +381,10 @@ where
                 // TODO: spawn a task for this
                 if attempt_times >= MAX_SIGNING_ATTEMPTS {
                     metrics.err_signature_aggregation_too_many_failures.inc();
-                    error!("Manual intervention is required. Failed to collect sigs for bridge action after {MAX_SIGNING_ATTEMPTS} attempts: {:?}", e);
+                    error!(
+                        "Manual intervention is required. Failed to collect sigs for bridge action after {MAX_SIGNING_ATTEMPTS} attempts: {:?}",
+                        e
+                    );
                     return;
                 }
                 delay(attempt_times).await;
@@ -487,12 +492,52 @@ where
         let tx_data = match build_sui_transaction(
             *sui_address,
             &gas_object_ref,
-            ceriticate_clone,
+            ceriticate_clone.clone(),
             *bridge_object_arg,
             sui_token_type_tags.load().as_ref(),
             rgp,
         ) {
             Ok(tx_data) => tx_data,
+            Err(BridgeError::UnknownTokenId(token_id)) => {
+                // Token not found in local cache - it might be newly registered.
+                // Refresh token map from chain and retry.
+                info!(
+                    "Unknown token_id {}, refreshing token map from chain and retrying",
+                    token_id
+                );
+                match sui_client.get_token_id_map().await {
+                    Ok(new_token_map) => {
+                        sui_token_type_tags.store(Arc::new(new_token_map));
+                        // Retry building transaction with refreshed token map
+                        match build_sui_transaction(
+                            *sui_address,
+                            &gas_object_ref,
+                            ceriticate_clone,
+                            *bridge_object_arg,
+                            sui_token_type_tags.load().as_ref(),
+                            rgp,
+                        ) {
+                            Ok(tx_data) => tx_data,
+                            Err(err) => {
+                                metrics.err_build_sui_transaction.inc();
+                                error!(
+                                    "Manual intervention is required. Failed to build transaction after token map refresh for action {:?}: {:?}",
+                                    action, err
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        metrics.err_build_sui_transaction.inc();
+                        error!(
+                            "Manual intervention is required. Failed to refresh token map: {:?}",
+                            e
+                        );
+                        return;
+                    }
+                }
+            }
             Err(err) => {
                 metrics.err_build_sui_transaction.inc();
                 error!(
@@ -569,21 +614,15 @@ where
     // TODO: do we need a mechanism to periodically read pending actions from DB?
     async fn handle_execution_effects(
         tx_digest: TransactionDigest,
-        response: SuiTransactionBlockResponse,
+        response: ExecuteTransactionResult,
         store: &Arc<BridgeOrchestratorTables>,
         action: &BridgeAction,
         metrics: &Arc<BridgeMetrics>,
     ) {
-        let effects = response
-            .effects
-            .clone()
-            .expect("We requested effects but got None.");
-        let status = effects.status();
-        match status {
+        match &response.status {
             SuiExecutionStatus::Success => {
-                let events = response.events.expect("We requested events but got None.");
-                let relevant_events = events
-                    .data
+                let relevant_events = response
+                    .events
                     .iter()
                     .filter(|e| {
                         e.type_ == *TokenTransferAlreadyClaimed.get().unwrap()
@@ -596,27 +635,33 @@ where
                     !relevant_events.is_empty(),
                     "Expected TokenTransferAlreadyClaimed, TokenTransferClaimed, TokenTransferApproved \
                     or TokenTransferAlreadyApproved event but got: {:?}",
-                    events
+                    response.events
                 );
                 info!(?tx_digest, "Sui transaction executed successfully");
                 // track successful approval and claim events
                 relevant_events.iter().for_each(|e| {
                     if e.type_ == *TokenTransferClaimed.get().unwrap() {
                         match action {
-                            BridgeAction::EthToSuiBridgeAction(_) => {
+                            BridgeAction::EthToSuiBridgeAction(_)
+                            | BridgeAction::EthToSuiTokenTransferV2(_) => {
                                 metrics.eth_sui_token_transfer_claimed.inc();
                             }
-                            BridgeAction::SuiToEthBridgeAction(_) => {
+                            BridgeAction::SuiToEthBridgeAction(_)
+                            | BridgeAction::SuiToEthTokenTransfer(_)
+                            | BridgeAction::SuiToEthTokenTransferV2(_) => {
                                 metrics.sui_eth_token_transfer_claimed.inc();
                             }
                             _ => error!("Unexpected action type for claimed event: {:?}", action),
                         }
                     } else if e.type_ == *TokenTransferApproved.get().unwrap() {
                         match action {
-                            BridgeAction::EthToSuiBridgeAction(_) => {
+                            BridgeAction::EthToSuiBridgeAction(_)
+                            | BridgeAction::EthToSuiTokenTransferV2(_) => {
                                 metrics.eth_sui_token_transfer_approved.inc();
                             }
-                            BridgeAction::SuiToEthBridgeAction(_) => {
+                            BridgeAction::SuiToEthBridgeAction(_)
+                            | BridgeAction::SuiToEthTokenTransfer(_)
+                            | BridgeAction::SuiToEthTokenTransferV2(_) => {
                                 metrics.sui_eth_token_transfer_approved.inc();
                             }
                             _ => error!("Unexpected action type for approved event: {:?}", action),
@@ -637,7 +682,10 @@ where
                 // After human examination, the node should be restarted and fetch them from WAL.
 
                 metrics.err_sui_transaction_execution.inc();
-                error!(?tx_digest, "Manual intervention is needed. Sui transaction executed and failed with error: {error:?}");
+                error!(
+                    ?tx_digest,
+                    "Manual intervention is needed. Sui transaction executed and failed with error: {error:?}"
+                );
             }
         }
     }
@@ -683,12 +731,10 @@ mod tests {
     use prometheus::Registry;
     use std::collections::{BTreeMap, HashMap};
     use std::str::FromStr;
-    use sui_json_rpc_types::SuiTransactionBlockEffects;
-    use sui_json_rpc_types::SuiTransactionBlockEvents;
-    use sui_json_rpc_types::{SuiEvent, SuiTransactionBlockResponse};
+    use sui_json_rpc_types::SuiEvent;
+    use sui_types::TypeTag;
     use sui_types::crypto::get_key_pair;
     use sui_types::gas_coin::GasCoin;
-    use sui_types::TypeTag;
     use sui_types::{base_types::random_object_ref, transaction::TransactionData};
 
     use crate::{
@@ -766,7 +812,9 @@ mod tests {
             true,
         );
 
-        store.insert_pending_actions(&[action.clone()]).unwrap();
+        store
+            .insert_pending_actions(std::slice::from_ref(&action))
+            .unwrap();
         assert_eq!(
             store.get_all_pending_actions()[&action.digest()],
             action.clone()
@@ -816,7 +864,9 @@ mod tests {
             true,
         );
 
-        store.insert_pending_actions(&[action.clone()]).unwrap();
+        store
+            .insert_pending_actions(std::slice::from_ref(&action))
+            .unwrap();
         assert_eq!(
             store.get_all_pending_actions()[&action.digest()],
             action.clone()
@@ -865,7 +915,9 @@ mod tests {
             true,
         );
 
-        store.insert_pending_actions(&[action.clone()]).unwrap();
+        store
+            .insert_pending_actions(std::slice::from_ref(&action))
+            .unwrap();
         assert_eq!(
             store.get_all_pending_actions()[&action.digest()],
             action.clone()
@@ -881,9 +933,11 @@ mod tests {
         assert_eq!(tx_subscription.recv().await.unwrap(), tx_digest);
 
         // The retry is still going on, action still in WAL
-        assert!(store
-            .get_all_pending_actions()
-            .contains_key(&action.digest()));
+        assert!(
+            store
+                .get_all_pending_actions()
+                .contains_key(&action.digest())
+        );
 
         // Now let it succeed
         let mut event = SuiEvent::random_for_testing();
@@ -900,9 +954,11 @@ mod tests {
         // Give it 1 second to retry and succeed
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         // The action is successful and should be removed from WAL now
-        assert!(!store
-            .get_all_pending_actions()
-            .contains_key(&action.digest()));
+        assert!(
+            !store
+                .get_all_pending_actions()
+                .contains_key(&action.digest())
+        );
     }
 
     #[tokio::test]
@@ -953,7 +1009,9 @@ mod tests {
             gas_object_ref,
             Owner::AddressOwner(sui_address),
         );
-        store.insert_pending_actions(&[action.clone()]).unwrap();
+        store
+            .insert_pending_actions(std::slice::from_ref(&action))
+            .unwrap();
         assert_eq!(
             store.get_all_pending_actions()[&action.digest()],
             action.clone()
@@ -1023,9 +1081,11 @@ mod tests {
         // Expect to see the transaction to be requested and succeed
         assert_eq!(tx_subscription.recv().await.unwrap(), tx_digest);
         // The action is removed from WAL
-        assert!(!store
-            .get_all_pending_actions()
-            .contains_key(&action.digest()));
+        assert!(
+            !store
+                .get_all_pending_actions()
+                .contains_key(&action.digest())
+        );
     }
 
     #[tokio::test]
@@ -1065,7 +1125,9 @@ mod tests {
             sui_tx_digest,
             sui_tx_event_index,
         );
-        store.insert_pending_actions(&[action.clone()]).unwrap();
+        store
+            .insert_pending_actions(std::slice::from_ref(&action))
+            .unwrap();
         assert_eq!(
             store.get_all_pending_actions()[&action.digest()],
             action.clone()
@@ -1152,7 +1214,9 @@ mod tests {
 
         sui_client_mock.set_action_onchain_status(&action, BridgeActionStatus::Pending);
 
-        store.insert_pending_actions(&[action.clone()]).unwrap();
+        store
+            .insert_pending_actions(std::slice::from_ref(&action))
+            .unwrap();
         assert_eq!(
             store.get_all_pending_actions()[&action.digest()],
             action.clone()
@@ -1240,7 +1304,9 @@ mod tests {
         // assert bridge is unpaused now
         assert!(!*bridge_pause_tx.borrow());
 
-        store.insert_pending_actions(&[action.clone()]).unwrap();
+        store
+            .insert_pending_actions(std::slice::from_ref(&action))
+            .unwrap();
         assert_eq!(
             store.get_all_pending_actions()[&action.digest()],
             action.clone()
@@ -1465,12 +1531,10 @@ mod tests {
         events: Option<Vec<SuiEvent>>,
         wildcard: bool,
     ) {
-        let mut response = SuiTransactionBlockResponse::new(tx_digest);
-        let effects = SuiTransactionBlockEffects::new_for_testing(tx_digest, status);
-        if let Some(events) = events {
-            response.events = Some(SuiTransactionBlockEvents { data: events });
-        }
-        response.effects = Some(effects);
+        let response = ExecuteTransactionResult {
+            status,
+            events: events.unwrap_or_default(),
+        };
         if wildcard {
             sui_client_mock.set_wildcard_transaction_response(Ok(response));
         } else {

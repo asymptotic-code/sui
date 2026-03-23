@@ -7,14 +7,14 @@ use move_core_types::{
     language_storage::TypeTag,
     runtime_value::{MoveStructLayout, MoveTypeLayout},
 };
-use move_vm_runtime::{native_charge_gas_early_exit, native_functions::NativeContext};
-use move_vm_types::{
-    loaded_data::runtime_types::Type, natives::function::NativeResult, values::Value,
+use move_vm_runtime::{
+    execution::Type, execution::values::Value, natives::functions::NativeResult,
 };
+use move_vm_runtime::{native_charge_gas_early_exit, natives::functions::NativeContext};
 use smallvec::smallvec;
 use std::collections::VecDeque;
 
-use crate::NativesCostTable;
+use crate::{NativesCostTable, get_extension};
 
 pub(crate) fn is_otw_struct(
     struct_layout: &MoveStructLayout,
@@ -59,9 +59,7 @@ pub fn is_one_time_witness(
     debug_assert!(ty_args.len() == 1);
     debug_assert!(args.len() == 1);
 
-    let type_is_one_time_witness_cost_params = context
-        .extensions_mut()
-        .get::<NativesCostTable>()?
+    let type_is_one_time_witness_cost_params = get_extension!(context, NativesCostTable)?
         .type_is_one_time_witness_cost_params
         .clone();
 

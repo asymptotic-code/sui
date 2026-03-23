@@ -4,18 +4,18 @@
 use crate::drivers::Interval;
 use crate::system_state_observer::SystemStateObserver;
 use crate::util::publish_basics_package;
+use crate::workloads::GasCoinConfig;
 use crate::workloads::payload::Payload;
 use crate::workloads::workload::{
-    ExpectedFailureType, Workload, WorkloadBuilder, ESTIMATED_COMPUTATION_COST,
-    MAX_GAS_FOR_TESTING, STORAGE_COST_PER_COUNTER,
+    ESTIMATED_COMPUTATION_COST, ExpectedFailureType, MAX_GAS_FOR_TESTING, STORAGE_COST_PER_COUNTER,
+    Workload, WorkloadBuilder,
 };
-use crate::workloads::GasCoinConfig;
 use crate::workloads::{Gas, WorkloadBuilderInfo, WorkloadParams};
 use crate::{ExecutionEffects, ValidatorProxy};
 use async_trait::async_trait;
 use futures::future::join_all;
-use rand::seq::SliceRandom;
 use rand::Rng;
+use rand::seq::SliceRandom;
 use std::sync::Arc;
 use sui_test_transaction_builder::TestTransactionBuilder;
 use sui_types::crypto::get_key_pair;
@@ -244,7 +244,8 @@ pub struct SharedCounterDeletionWorkload {
 impl Workload<dyn Payload> for SharedCounterDeletionWorkload {
     async fn init(
         &mut self,
-        proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        execution_proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        _fullnode_proxies: Vec<Arc<dyn ValidatorProxy + Sync + Send>>,
         system_state_observer: Arc<SystemStateObserver>,
     ) {
         if self.basics_package_id.is_some() {
@@ -259,7 +260,7 @@ impl Workload<dyn Payload> for SharedCounterDeletionWorkload {
         // Publish basics package
         info!("Publishing basics package");
         self.basics_package_id = Some(
-            publish_basics_package(head.0, proxy.clone(), head.1, &head.2, gas_price)
+            publish_basics_package(head.0, execution_proxy.clone(), head.1, &head.2, gas_price)
                 .await
                 .0,
         );
@@ -272,7 +273,7 @@ impl Workload<dyn Payload> for SharedCounterDeletionWorkload {
             let transaction = TestTransactionBuilder::new(*sender, *gas, gas_price)
                 .call_counter_create(self.basics_package_id.unwrap())
                 .build_and_sign(keypair.as_ref());
-            let proxy_ref = proxy.clone();
+            let proxy_ref = execution_proxy.clone();
             futures.push(async move {
                 let (_, execution_result) = proxy_ref.execute_transaction_block(transaction).await;
                 execution_result.unwrap().created()[0].0
@@ -283,7 +284,8 @@ impl Workload<dyn Payload> for SharedCounterDeletionWorkload {
 
     async fn make_test_payloads(
         &self,
-        _proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        _execution_proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        _fullnode_proxies: Vec<Arc<dyn ValidatorProxy + Sync + Send>>,
         system_state_observer: Arc<SystemStateObserver>,
     ) -> Vec<Box<dyn Payload>> {
         // create counters using gas objects we created above

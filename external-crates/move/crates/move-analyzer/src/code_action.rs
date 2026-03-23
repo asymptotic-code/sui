@@ -9,11 +9,11 @@ use crate::{
     context::Context,
     symbols::{
         Symbols,
-        compilation::{CompiledPkgInfo, PrecomputedPkgInfo, get_compiled_pkg},
+        compilation::{CachedPackages, CompiledPkgInfo, get_compiled_pkg},
         cursor::{ChainInfo, CursorContext},
         runner::SymbolicatorRunner,
     },
-    utils::loc_start_to_lsp_position_opt,
+    utils::{canonical_path_from_uri, loc_start_to_lsp_position_opt},
 };
 
 use lsp_server::{Message, Request, Response};
@@ -23,8 +23,7 @@ use lsp_types::{
 };
 use move_symbol_pool::Symbol;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
-    path::PathBuf,
+    collections::{BTreeSet, HashMap},
     sync::{Arc, Mutex},
 };
 use strum::IntoEnumIterator;
@@ -33,12 +32,13 @@ use url::Url;
 use vfs::VfsPath;
 
 use move_compiler::{
+    editions::Flavor,
     expansion::ast::ModuleIdent,
     linters::LintLevel,
     parser::ast::{LeadingNameAccess_, NameAccessChain_},
     shared::{Identifier, Name},
 };
-use move_package::source_package::parsed_manifest::Dependencies;
+use move_package_alt::MoveFlavor;
 
 // The following reflects prefixes of error messages for
 // problems with a single-element access chain that are
@@ -80,21 +80,21 @@ impl TwoElementChainDiagPrefix {
 }
 
 /// Handles inlay hints request of the language server
-pub fn on_code_action_request(
+pub fn on_code_action_request<F: MoveFlavor>(
     context: &Context,
     request: &Request,
     ide_files_root: VfsPath,
-    pkg_dependencies: Arc<Mutex<BTreeMap<PathBuf, PrecomputedPkgInfo>>>,
-    implicit_deps: Dependencies,
+    pkg_dependencies: Arc<Mutex<CachedPackages>>,
+    flavor: Option<Flavor>,
 ) {
     let response = Response::new_ok(
         request.id.clone(),
-        access_chain_autofix_actions(
+        access_chain_autofix_actions::<F>(
             context,
             request,
             ide_files_root,
             pkg_dependencies,
-            implicit_deps,
+            flavor,
         ),
     );
     eprintln!("code_action_request: {:?}", request);
@@ -104,12 +104,12 @@ pub fn on_code_action_request(
 }
 
 /// Computes code actions related to access chain autofixes.
-fn access_chain_autofix_actions(
+fn access_chain_autofix_actions<F: MoveFlavor>(
     context: &Context,
     request: &Request,
     ide_files_root: VfsPath,
-    pkg_dependencies: Arc<Mutex<BTreeMap<PathBuf, PrecomputedPkgInfo>>>,
-    implicit_deps: Dependencies,
+    pkg_dependencies: Arc<Mutex<CachedPackages>>,
+    flavor: Option<Flavor>,
 ) -> Vec<CodeAction> {
     let mut code_actions = vec![];
 
@@ -132,18 +132,20 @@ fn access_chain_autofix_actions(
     }
 
     let file_url = params.text_document.uri.clone();
-    let file_path = PathBuf::from(file_url.path());
+    let Some(file_path) = canonical_path_from_uri(&file_url) else {
+        return code_actions;
+    };
     let Some(pkg_path) = SymbolicatorRunner::root_dir(&file_path) else {
         return code_actions;
     };
 
-    let Ok((Some(mut compiled_pkg_info), _)) = get_compiled_pkg(
+    let Ok((Some(mut compiled_pkg_info), _)) = get_compiled_pkg::<F>(
         pkg_dependencies.clone(),
         ide_files_root,
         &pkg_path,
-        Some(vec![]),
         LintLevel::None,
-        implicit_deps,
+        flavor,
+        None,
     ) else {
         return code_actions;
     };
@@ -187,7 +189,9 @@ pub fn access_chain_autofix_actions_for_error(
         return;
     }
     // compute cursor and update symbols with it
-    let file_path: PathBuf = file_url.path().into();
+    let Some(file_path) = canonical_path_from_uri(&file_url) else {
+        return;
+    };
     compute_cursor(symbols, compiled_pkg_info, &file_path, err_pos);
     let Some(ref cursor) = symbols.cursor_context else {
         return;
@@ -237,29 +241,29 @@ pub fn access_chain_autofix_actions_for_error(
             });
         }
         NameAccessChain_::Path(name_path) => {
-            if let LeadingNameAccess_::Name(unbound_name) = name_path.root.name.value {
-                if name_path.entries.len() == 1 {
-                    // we assume that diagnostic reporting unbound chain component
-                    // is on the first element of the chain
-                    if unbound_name.loc.contains(&cursor.loc) {
-                        TwoElementChainDiagPrefix::iter().for_each(|prefix| match prefix {
-                            TwoElementChainDiagPrefix::UnresolvedName => {
-                                if err_msg.starts_with(prefix.as_str()) {
-                                    two_element_access_chain_autofixes(
-                                        code_actions,
-                                        symbols,
-                                        file_url.clone(),
-                                        unbound_name,
-                                        name_path.entries[0].name,
-                                        all_mod_structs_to_import(symbols, cursor)
-                                            .chain(all_mod_enums_to_import(symbols, cursor))
-                                            .chain(all_mod_functions_to_import(symbols, cursor)),
-                                        diag.clone(),
-                                    );
-                                }
+            if let LeadingNameAccess_::Name(unbound_name) = name_path.root.name.value
+                && name_path.entries.len() == 1
+            {
+                // we assume that diagnostic reporting unbound chain component
+                // is on the first element of the chain
+                if unbound_name.loc.contains(&cursor.loc) {
+                    TwoElementChainDiagPrefix::iter().for_each(|prefix| match prefix {
+                        TwoElementChainDiagPrefix::UnresolvedName => {
+                            if err_msg.starts_with(prefix.as_str()) {
+                                two_element_access_chain_autofixes(
+                                    code_actions,
+                                    symbols,
+                                    file_url.clone(),
+                                    unbound_name,
+                                    name_path.entries[0].name,
+                                    all_mod_structs_to_import(symbols, cursor)
+                                        .chain(all_mod_enums_to_import(symbols, cursor))
+                                        .chain(all_mod_functions_to_import(symbols, cursor)),
+                                    diag.clone(),
+                                );
                             }
-                        });
-                    }
+                        }
+                    });
                 }
             }
         }

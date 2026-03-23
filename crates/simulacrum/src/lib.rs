@@ -14,25 +14,33 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{Context, Result, anyhow, ensure};
 use fastcrypto::traits::Signer;
+use prost::Message;
 use rand::rngs::OsRng;
 use sui_config::verifier_signing_config::VerifierSigningConfig;
 use sui_config::{genesis, transaction_deny_config::TransactionDenyConfig};
-use sui_protocol_config::ProtocolVersion;
-use sui_storage::blob::{Blob, BlobEncoding};
+use sui_framework_snapshot::load_bytecode_snapshot;
+use sui_protocol_config::{ProtocolConfig, ProtocolVersion};
+use sui_rpc::field::{FieldMask, FieldMaskUtil};
+use sui_rpc::merge::Merge;
+use sui_rpc::proto::sui::rpc;
 use sui_swarm_config::genesis_config::AccountConfig;
 use sui_swarm_config::network_config::NetworkConfig;
 use sui_swarm_config::network_config_builder::ConfigBuilder;
-use sui_types::base_types::{AuthorityName, ObjectID, ObjectRef, VersionNumber};
-use sui_types::crypto::{get_account_key_pair, AccountKeyPair, AuthoritySignature};
-use sui_types::digests::ConsensusCommitDigest;
+use sui_types::base_types::{AuthorityName, ObjectID, ObjectRef, SequenceNumber, VersionNumber};
+use sui_types::crypto::{
+    AccountKeyPair, AuthoritySignature, SuiKeyPair, get_account_key_pair, get_key_pair,
+};
+use sui_types::digests::{ChainIdentifier, ConsensusCommitDigest};
 use sui_types::effects::TransactionEffectsAPI;
 use sui_types::messages_consensus::ConsensusDeterminedVersionAssignments;
 use sui_types::object::{Object, Owner};
+use sui_types::storage::ObjectKey;
 use sui_types::storage::{ObjectStore, ReadStore, RpcStateReader};
 use sui_types::sui_system_state::epoch_start_sui_system_state::EpochStartSystemState;
-use sui_types::transaction::EndOfEpochTransactionKind;
+use sui_types::transaction::TransactionDataAPI;
+use sui_types::transaction::{EndOfEpochTransactionKind, SenderSignedData};
 use sui_types::{
     base_types::{EpochId, SuiAddress},
     committee::Committee,
@@ -45,17 +53,44 @@ use sui_types::{
     transaction::{Transaction, VerifiedTransaction},
 };
 
-use self::epoch_state::EpochState;
+pub use self::epoch_state::EpochState;
+pub use self::store::SimulatorStore;
 pub use self::store::in_mem_store::InMemoryStore;
 use self::store::in_mem_store::KeyStore;
-pub use self::store::SimulatorStore;
+use sui_core::mock_checkpoint_builder::{MockCheckpointBuilder, ValidatorKeypairProvider};
 use sui_types::messages_checkpoint::{CheckpointContents, CheckpointSequenceNumber};
-use sui_types::mock_checkpoint_builder::{MockCheckpointBuilder, ValidatorKeypairProvider};
+use sui_types::sui_system_state::SuiSystemState;
+pub use sui_types::transaction_executor::TransactionChecks;
 use sui_types::{
     gas_coin::GasCoin,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
     transaction::{GasData, TransactionData, TransactionKind},
 };
+
+/// Configuration for advancing epochs in the Simulacrum.
+///
+/// Controls which special end-of-epoch transactions are created during epoch transitions.
+#[derive(Debug, Clone, Default)]
+pub struct AdvanceEpochConfig {
+    /// Controls whether a `RandomStateCreate` end-of-epoch transaction is included
+    /// (to initialise on-chain randomness for the first time).
+    pub create_random_state: bool,
+    /// Controls whether to create authenticator state.
+    pub create_authenticator_state: bool,
+    /// Controls whether to expire authenticator state.
+    pub create_authenticator_state_expire: bool,
+    /// Controls whether to create deny list state.
+    pub create_deny_list_state: bool,
+    /// Controls whether to create bridge state.
+    pub create_bridge_state: bool,
+    /// Controls whether to create bridge committee.
+    pub create_bridge_committee: bool,
+    /// When specified, loads system packages from a framework snapshot for the given
+    /// protocol version and includes them in the epoch change transaction.
+    /// This provides test stability as snapshot packages don't change when the framework is updated.
+    /// If None, no system packages are included in the epoch change transaction.
+    pub system_packages_snapshot: Option<u64>,
+}
 
 mod epoch_state;
 pub mod store;
@@ -121,6 +156,17 @@ where
         Self::new_with_network_config_in_mem(&config, rng)
     }
 
+    /// Create a new Simulacrum instance with a specific protocol version.
+    pub fn new_with_protocol_version(mut rng: R, protocol_version: ProtocolVersion) -> Self {
+        let config = ConfigBuilder::new_with_temp_dir()
+            .rng(&mut rng)
+            .with_chain_start_timestamp_ms(1)
+            .deterministic_committee_size(NonZeroUsize::new(1).unwrap())
+            .with_protocol_version(protocol_version)
+            .build();
+        Self::new_with_network_config_in_mem(&config, rng)
+    }
+
     pub fn new_with_protocol_version_and_accounts(
         mut rng: R,
         chain_start_timestamp_ms: u64,
@@ -164,6 +210,67 @@ impl<R, S: store::SimulatorStore> Simulacrum<R, S> {
         }
     }
 
+    /// Create a new Simulacrum instance with the provided custom state.
+    ///
+    /// This function creates a Simulacrum with a custom checkpoint and system state, which can
+    /// be useful for testing specific scenarios or starting from a non-genesis state.
+    ///
+    /// Note: The provided `checkpoint` and `system_state` should be consistent with each other, i.e.
+    /// the checkpoint's epoch and sequence number should align with the system state's epoch and
+    /// the objects in the checkpoint should be reflected in the system state. Inconsistencies may
+    /// lead to unexpected behavior.
+    pub fn new_from_custom_state(
+        keystore: KeyStore,
+        checkpoint: VerifiedCheckpoint,
+        system_state: SuiSystemState,
+        config: &NetworkConfig,
+        store: S,
+        rng: R,
+    ) -> Self {
+        let checkpoint_builder = MockCheckpointBuilder::new(checkpoint);
+        let epoch_state = EpochState::new(system_state);
+        Self {
+            rng,
+            keystore,
+            // this genesis is not used whatsoever, but it's required for Simulacrum type
+            genesis: config.genesis.clone(),
+            store,
+            checkpoint_builder,
+            epoch_state,
+            deny_config: TransactionDenyConfig::default(),
+            verifier_signing_config: VerifierSigningConfig::default(),
+            data_ingestion_path: None,
+        }
+    }
+
+    /// Execute a transaction while impersonating a specific sender.
+    ///
+    /// This method allows executing transactions as any account without requiring the private
+    /// keys for that account. This is useful for testing scenarios where you want to simulate
+    /// transactions from accounts you don't control.
+    ///
+    /// # Arguments
+    /// * `transaction_data` - The transaction data to execute
+    ///
+    /// # Returns
+    /// The transaction effects and optional execution error
+    pub fn execute_transaction_impersonating(
+        &mut self,
+        transaction_data: TransactionData,
+    ) -> anyhow::Result<(TransactionEffects, Option<ExecutionError>)> {
+        // Create dummy signatures for each required signer
+        let pk = SuiKeyPair::Ed25519(get_key_pair().1);
+        let sig = pk.sign(transaction_data.sender().as_ref());
+        // Create sender signed data with dummy signatures
+        let sender_signed_data = SenderSignedData::new(transaction_data, vec![sig.into()]);
+
+        // Create transaction and verify signatures
+        let verified_transaction = Transaction::new(sender_signed_data)
+            .try_into_verified_for_testing(self.epoch_state.epoch(), &VerifyParams::default())?;
+
+        self.execute_transaction_impl(verified_transaction)
+    }
+
     /// Attempts to execute the provided Transaction.
     ///
     /// The provided Transaction undergoes the same types of checks that a Validator does prior to
@@ -181,7 +288,13 @@ impl<R, S: store::SimulatorStore> Simulacrum<R, S> {
     ) -> anyhow::Result<(TransactionEffects, Option<ExecutionError>)> {
         let transaction = transaction
             .try_into_verified_for_testing(self.epoch_state.epoch(), &VerifyParams::default())?;
+        self.execute_transaction_impl(transaction)
+    }
 
+    fn execute_transaction_impl(
+        &mut self,
+        transaction: VerifiedTransaction,
+    ) -> anyhow::Result<(TransactionEffects, Option<ExecutionError>)> {
         let (inner_temporary_store, _, effects, execution_error_opt) =
             self.epoch_state.execute_transaction(
                 &self.store,
@@ -207,9 +320,43 @@ impl<R, S: store::SimulatorStore> Simulacrum<R, S> {
         Ok((effects, execution_error_opt.err()))
     }
 
+    fn execute_system_transaction(
+        &mut self,
+        transaction: Transaction,
+    ) -> anyhow::Result<(TransactionEffects, Option<ExecutionError>)> {
+        let transaction = VerifiedTransaction::new_unchecked(transaction);
+        self.execute_transaction_impl(transaction)
+    }
+
     /// Creates the next Checkpoint using the Transactions enqueued since the last checkpoint was
     /// created.
     pub fn create_checkpoint(&mut self) -> VerifiedCheckpoint {
+        if self.epoch_state.protocol_config().enable_accumulators() {
+            let (settlement_txns, checkpoint_height) = self
+                .checkpoint_builder
+                .get_settlement_txns(self.epoch_state.protocol_config());
+
+            // Execute settlement transactions and collect their effects
+            let mut settlement_effects = Vec::with_capacity(settlement_txns.len());
+            for txn in settlement_txns {
+                let (effects, _) = self
+                    .execute_system_transaction(txn)
+                    .expect("settlement txn cannot fail");
+                effects.status().unwrap();
+                settlement_effects.push(effects);
+            }
+
+            // Build and execute the barrier transaction using settlement effects
+            let barrier_tx = self
+                .checkpoint_builder
+                .get_barrier_tx(checkpoint_height, &settlement_effects);
+            self.execute_system_transaction(barrier_tx)
+                .expect("barrier txn cannot fail")
+                .0
+                .status()
+                .unwrap();
+        }
+
         let committee = CommitteeWithKeys::new(&self.keystore, self.epoch_state.committee());
         let (checkpoint, contents, _) = self
             .checkpoint_builder
@@ -250,23 +397,68 @@ impl<R, S: store::SimulatorStore> Simulacrum<R, S> {
     /// epoch. Since it is required to be the final transaction in an epoch, the final checkpoint in
     /// the epoch is also created.
     ///
-    /// create_random_state controls whether a `RandomStateCreate` end of epoch transaction is
-    /// included as part of this epoch change (to initialise on-chain randomness for the first
-    /// time).
+    /// The `config` parameter controls which special end-of-epoch transactions are created
+    /// as part of this epoch change.
     ///
-    /// NOTE: This function does not currently support updating the protocol version or the system
-    /// packages
-    pub fn advance_epoch(&mut self, create_random_state: bool) {
+    /// NOTE: This function does not currently support updating the protocol version
+    pub fn advance_epoch(&mut self, config: AdvanceEpochConfig) {
         let next_epoch = self.epoch_state.epoch() + 1;
         let next_epoch_protocol_version = self.epoch_state.protocol_version();
         let gas_cost_summary = self.checkpoint_builder.epoch_rolling_gas_cost_summary();
         let epoch_start_timestamp_ms = self.store.get_clock().timestamp_ms();
-        let next_epoch_system_package_bytes = vec![];
+
+        let next_epoch_system_package_bytes = if let Some(snapshot_version) =
+            config.system_packages_snapshot
+        {
+            let packages = match load_bytecode_snapshot(snapshot_version) {
+                Ok(snapshot_packages) => snapshot_packages,
+                Err(e) => {
+                    panic!("Failed to load bytecode snapshot for version {snapshot_version}: {e}");
+                }
+            };
+
+            packages
+                .into_iter()
+                .map(|pkg| (SequenceNumber::from(1u64), pkg.bytes, pkg.dependencies))
+                .collect()
+        } else {
+            vec![]
+        };
 
         let mut kinds = vec![];
 
-        if create_random_state {
+        if config.create_random_state {
             kinds.push(EndOfEpochTransactionKind::new_randomness_state_create());
+        }
+
+        if config.create_authenticator_state {
+            kinds.push(EndOfEpochTransactionKind::new_authenticator_state_create());
+        }
+
+        if config.create_authenticator_state_expire {
+            let current_epoch = self.epoch_state.epoch();
+            kinds.push(EndOfEpochTransactionKind::new_authenticator_state_expire(
+                current_epoch,
+                SequenceNumber::from(1),
+            ));
+        }
+
+        if config.create_deny_list_state {
+            kinds.push(EndOfEpochTransactionKind::new_deny_list_state_create());
+        }
+
+        if config.create_bridge_state {
+            // Use a default test chain identifier for bridge state creation
+            let chain_id = ChainIdentifier::default();
+            kinds.push(EndOfEpochTransactionKind::new_bridge_create(chain_id));
+        }
+
+        if config.create_bridge_committee {
+            // Use a default sequence number for bridge committee initialization
+            let bridge_version = SequenceNumber::from(1);
+            kinds.push(EndOfEpochTransactionKind::init_bridge_committee(
+                bridge_version,
+            ));
         }
 
         kinds.push(EndOfEpochTransactionKind::new_change_epoch(
@@ -284,7 +476,10 @@ impl<R, S: store::SimulatorStore> Simulacrum<R, S> {
         self.execute_transaction(tx.into())
             .expect("advancing the epoch cannot fail");
 
-        let new_epoch_state = EpochState::new(self.store.get_system_state());
+        let new_epoch_state = EpochState::new_with_protocol_config(
+            self.store.get_system_state(),
+            self.epoch_state.protocol_config().clone(),
+        );
         let end_of_epoch_data = EndOfEpochData {
             next_epoch_committee: new_epoch_state.committee().voting_rights.clone(),
             next_epoch_protocol_version,
@@ -304,8 +499,16 @@ impl<R, S: store::SimulatorStore> Simulacrum<R, S> {
         self.epoch_state = new_epoch_state;
     }
 
-    pub fn store(&self) -> &dyn SimulatorStore {
+    pub fn store_dyn(&self) -> &dyn SimulatorStore {
         &self.store
+    }
+
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    pub fn store_mut(&mut self) -> &mut S {
+        &mut self.store
     }
 
     pub fn keystore(&self) -> &KeyStore {
@@ -314,6 +517,14 @@ impl<R, S: store::SimulatorStore> Simulacrum<R, S> {
 
     pub fn epoch_start_state(&self) -> &EpochStartSystemState {
         self.epoch_state.epoch_start_state()
+    }
+
+    pub fn system_state(&self) -> SuiSystemState {
+        self.store.get_system_state()
+    }
+
+    pub fn protocol_config(&self) -> &ProtocolConfig {
+        self.epoch_state.protocol_config()
     }
 
     /// Return a handle to the internally held RNG.
@@ -387,7 +598,7 @@ impl<R, S: store::SimulatorStore> Simulacrum<R, S> {
         // explicitly cordon off the faucet account from the rest of the accounts though.
         let (sender, key) = self.keystore().accounts().next().unwrap();
         let object = self
-            .store()
+            .store_dyn()
             .owned_objects(*sender)
             .find(|object| {
                 object.is_gas_coin() && object.get_coin_value_unsafe() > amount + MIST_PER_SUI
@@ -440,11 +651,48 @@ impl<R, S: store::SimulatorStore> Simulacrum<R, S> {
         checkpoint_contents: CheckpointContents,
     ) -> anyhow::Result<()> {
         if let Some(path) = &self.data_ingestion_path {
-            let file_name = format!("{}.chk", checkpoint.sequence_number);
+            let sequence_number = checkpoint.sequence_number;
             let checkpoint_data = self.get_checkpoint_data(checkpoint, checkpoint_contents)?;
+
+            let mask = FieldMask::from_paths([
+                rpc::v2::Checkpoint::path_builder().sequence_number(),
+                rpc::v2::Checkpoint::path_builder().summary().bcs().value(),
+                rpc::v2::Checkpoint::path_builder().signature().finish(),
+                rpc::v2::Checkpoint::path_builder().contents().bcs().value(),
+                rpc::v2::Checkpoint::path_builder()
+                    .transactions()
+                    .transaction()
+                    .bcs()
+                    .value(),
+                rpc::v2::Checkpoint::path_builder()
+                    .transactions()
+                    .effects()
+                    .bcs()
+                    .value(),
+                rpc::v2::Checkpoint::path_builder()
+                    .transactions()
+                    .effects()
+                    .unchanged_loaded_runtime_objects()
+                    .finish(),
+                rpc::v2::Checkpoint::path_builder()
+                    .transactions()
+                    .events()
+                    .bcs()
+                    .value(),
+                rpc::v2::Checkpoint::path_builder()
+                    .objects()
+                    .objects()
+                    .bcs()
+                    .value(),
+            ]);
+
+            let proto_checkpoint = rpc::v2::Checkpoint::merge_from(&checkpoint_data, &mask.into());
+            let proto_bytes = proto_checkpoint.encode_to_vec();
+            let compressed = zstd::encode_all(&proto_bytes[..], 3)?;
+
+            let file_name = format!("{}.binpb.zst", sequence_number);
             std::fs::create_dir_all(path)?;
-            let blob = Blob::encode(&checkpoint_data, BlobEncoding::Bcs)?;
-            std::fs::write(path.join(file_name), blob.to_bytes())?;
+            std::fs::write(path.join(file_name), compressed)?;
         }
         Ok(())
     }
@@ -497,7 +745,7 @@ impl<T, V: store::SimulatorStore> ReadStore for Simulacrum<T, V> {
     }
 
     fn get_latest_checkpoint(&self) -> sui_types::storage::error::Result<VerifiedCheckpoint> {
-        Ok(self.store().get_highest_checkpint().unwrap())
+        Ok(self.store_dyn().get_highest_checkpint().unwrap())
     }
 
     fn get_latest_epoch_id(&self) -> sui_types::storage::error::Result<EpochId> {
@@ -529,14 +777,14 @@ impl<T, V: store::SimulatorStore> ReadStore for Simulacrum<T, V> {
         &self,
         digest: &sui_types::messages_checkpoint::CheckpointDigest,
     ) -> Option<VerifiedCheckpoint> {
-        self.store().get_checkpoint_by_digest(digest)
+        self.store_dyn().get_checkpoint_by_digest(digest)
     }
 
     fn get_checkpoint_by_sequence_number(
         &self,
         sequence_number: sui_types::messages_checkpoint::CheckpointSequenceNumber,
     ) -> Option<VerifiedCheckpoint> {
-        self.store()
+        self.store_dyn()
             .get_checkpoint_by_sequence_number(sequence_number)
     }
 
@@ -544,7 +792,7 @@ impl<T, V: store::SimulatorStore> ReadStore for Simulacrum<T, V> {
         &self,
         digest: &sui_types::messages_checkpoint::CheckpointContentsDigest,
     ) -> Option<sui_types::messages_checkpoint::CheckpointContents> {
-        self.store().get_checkpoint_contents(digest)
+        self.store_dyn().get_checkpoint_contents(digest)
     }
 
     fn get_checkpoint_contents_by_sequence_number(
@@ -558,29 +806,43 @@ impl<T, V: store::SimulatorStore> ReadStore for Simulacrum<T, V> {
         &self,
         tx_digest: &sui_types::digests::TransactionDigest,
     ) -> Option<Arc<VerifiedTransaction>> {
-        self.store().get_transaction(tx_digest).map(Arc::new)
+        self.store_dyn().get_transaction(tx_digest).map(Arc::new)
     }
 
     fn get_transaction_effects(
         &self,
         tx_digest: &sui_types::digests::TransactionDigest,
     ) -> Option<TransactionEffects> {
-        self.store().get_transaction_effects(tx_digest)
+        self.store_dyn().get_transaction_effects(tx_digest)
     }
 
     fn get_events(
         &self,
         event_digest: &sui_types::digests::TransactionDigest,
     ) -> Option<sui_types::effects::TransactionEvents> {
-        self.store().get_transaction_events(event_digest)
+        self.store_dyn().get_transaction_events(event_digest)
     }
 
     fn get_full_checkpoint_contents(
         &self,
         _sequence_number: Option<sui_types::messages_checkpoint::CheckpointSequenceNumber>,
         _digest: &sui_types::messages_checkpoint::CheckpointContentsDigest,
-    ) -> Option<sui_types::messages_checkpoint::FullCheckpointContents> {
+    ) -> Option<sui_types::messages_checkpoint::VersionedFullCheckpointContents> {
         todo!()
+    }
+
+    fn get_unchanged_loaded_runtime_objects(
+        &self,
+        _digest: &sui_types::digests::TransactionDigest,
+    ) -> Option<Vec<ObjectKey>> {
+        None
+    }
+
+    fn get_transaction_checkpoint(
+        &self,
+        _digest: &sui_types::digests::TransactionDigest,
+    ) -> Option<CheckpointSequenceNumber> {
+        None
     }
 }
 
@@ -595,7 +857,7 @@ impl<T: Send + Sync, V: store::SimulatorStore + Send + Sync> RpcStateReader for 
         &self,
     ) -> sui_types::storage::error::Result<sui_types::digests::ChainIdentifier> {
         Ok(self
-            .store()
+            .store_dyn()
             .get_checkpoint_by_sequence_number(0)
             .unwrap()
             .digest()
@@ -607,9 +869,10 @@ impl<T: Send + Sync, V: store::SimulatorStore + Send + Sync> RpcStateReader for 
         None
     }
 
-    fn get_struct_layout(
+    fn get_struct_layout_with_overlay(
         &self,
         _: &move_core_types::language_storage::StructTag,
+        _overlay: &sui_types::full_checkpoint_content::ObjectSet,
     ) -> sui_types::storage::error::Result<Option<move_core_types::annotated_value::MoveTypeLayout>>
     {
         Ok(None)
@@ -626,7 +889,7 @@ impl Simulacrum {
         let sender = *sender;
 
         let object = self
-            .store()
+            .store_dyn()
             .owned_objects(sender)
             .find(|object| object.is_gas_coin())
             .unwrap();
@@ -656,7 +919,7 @@ impl Simulacrum {
 mod tests {
     use std::time::Duration;
 
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
     use sui_types::{
         base_types::SuiAddress, effects::TransactionEffectsAPI, gas_coin::GasCoin,
         transaction::TransactionDataAPI,
@@ -669,7 +932,7 @@ mod tests {
         let rng = StdRng::from_seed([9; 32]);
         let chain1 = Simulacrum::new_with_rng(rng);
         let genesis_checkpoint_digest1 = *chain1
-            .store()
+            .store_dyn()
             .get_checkpoint_by_sequence_number(0)
             .unwrap()
             .digest();
@@ -677,7 +940,7 @@ mod tests {
         let rng = StdRng::from_seed([9; 32]);
         let chain2 = Simulacrum::new_with_rng(rng);
         let genesis_checkpoint_digest2 = *chain2
-            .store()
+            .store_dyn()
             .get_checkpoint_by_sequence_number(0)
             .unwrap()
             .digest();
@@ -689,8 +952,8 @@ mod tests {
         let chain3 = Simulacrum::new_with_rng(rng);
 
         assert_ne!(
-            chain1.store().get_committee_by_epoch(0),
-            chain3.store().get_committee_by_epoch(0),
+            chain1.store_dyn().get_committee_by_epoch(0),
+            chain3.store_dyn().get_committee_by_epoch(0),
         );
     }
 
@@ -699,18 +962,18 @@ mod tests {
         let steps = 10;
         let mut chain = Simulacrum::new();
 
-        let clock = chain.store().get_clock();
+        let clock = chain.store_dyn().get_clock();
         let start_time_ms = clock.timestamp_ms();
         println!("clock: {:#?}", clock);
         for _ in 0..steps {
             chain.advance_clock(Duration::from_millis(1));
             chain.create_checkpoint();
-            let clock = chain.store().get_clock();
+            let clock = chain.store_dyn().get_clock();
             println!("clock: {:#?}", clock);
         }
-        let end_time_ms = chain.store().get_clock().timestamp_ms();
+        let end_time_ms = chain.store_dyn().get_clock().timestamp_ms();
         assert_eq!(end_time_ms - start_time_ms, steps);
-        dbg!(chain.store().get_highest_checkpint());
+        dbg!(chain.store_dyn().get_highest_checkpint());
     }
 
     #[test]
@@ -720,14 +983,14 @@ mod tests {
 
         let start_epoch = chain.store.get_highest_checkpint().unwrap().epoch;
         for i in 0..steps {
-            chain.advance_epoch(/* create_random_state */ false);
+            chain.advance_epoch(AdvanceEpochConfig::default());
             chain.advance_clock(Duration::from_millis(1));
             chain.create_checkpoint();
             println!("{i}");
         }
         let end_epoch = chain.store.get_highest_checkpint().unwrap().epoch;
         assert_eq!(end_epoch - start_epoch, steps);
-        dbg!(chain.store().get_highest_checkpint());
+        dbg!(chain.store_dyn().get_highest_checkpint());
     }
 
     #[test]
@@ -743,7 +1006,7 @@ mod tests {
 
         assert_eq!(
             (transfer_amount as i64 - gas_paid) as u64,
-            store::SimulatorStore::get_object(sim.store(), &gas_id)
+            store::SimulatorStore::get_object(sim.store_dyn(), &gas_id)
                 .and_then(|object| GasCoin::try_from(&object).ok())
                 .unwrap()
                 .value()
@@ -751,7 +1014,7 @@ mod tests {
 
         assert_eq!(
             transfer_amount,
-            sim.store()
+            sim.store_dyn()
                 .owned_objects(recipient)
                 .next()
                 .and_then(|object| GasCoin::try_from(&object).ok())
@@ -762,6 +1025,10 @@ mod tests {
         let checkpoint = sim.create_checkpoint();
 
         assert_eq!(&checkpoint.epoch_rolling_gas_cost_summary, gas_summary);
-        assert_eq!(checkpoint.network_total_transactions, 2); // genesis + 1 txn
+        if sim.epoch_state.protocol_config().enable_accumulators() {
+            assert_eq!(checkpoint.network_total_transactions, 3); // genesis + 1 user txn + 1 settlement txn
+        } else {
+            assert_eq!(checkpoint.network_total_transactions, 2); // genesis + 1 user txn
+        };
     }
 }

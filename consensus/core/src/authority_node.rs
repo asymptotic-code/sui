@@ -3,20 +3,24 @@
 
 use std::{sync::Arc, time::Instant};
 
-use consensus_config::{AuthorityIndex, Committee, NetworkKeyPair, Parameters, ProtocolKeyPair};
+use consensus_config::{
+    AuthorityIndex, Committee, NetworkKeyPair, NetworkPublicKey, Parameters, ProtocolKeyPair,
+};
+use consensus_types::block::Round;
 use itertools::Itertools;
 use mysten_metrics::spawn_logged_monitored_task;
+use mysten_network::Multiaddr;
 use parking_lot::RwLock;
 use prometheus::Registry;
-use sui_protocol_config::{ConsensusNetwork, ProtocolConfig};
+use sui_protocol_config::ProtocolConfig;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::{
+    BlockAPI as _, CommitConsumerArgs,
     authority_service::AuthorityService,
     block_manager::BlockManager,
     block_verifier::SignedBlockVerifier,
-    broadcaster::Broadcaster,
     commit_observer::CommitObserver,
     commit_syncer::{CommitSyncer, CommitSyncerHandle},
     commit_vote_monitor::CommitVoteMonitor,
@@ -28,31 +32,28 @@ use crate::{
     leader_timeout::{LeaderTimeoutTask, LeaderTimeoutTaskHandle},
     metrics::initialise_metrics,
     network::{
-        anemo_network::AnemoManager, tonic_network::TonicManager, NetworkClient as _,
-        NetworkManager,
+        CommitSyncerClient, NetworkManager, SynchronizerClient, tonic_network::TonicManager,
     },
     proposed_block_handler::ProposedBlockHandler,
     round_prober::{RoundProber, RoundProberHandle},
-    round_tracker::PeerRoundTracker,
+    round_tracker::RoundTracker,
     storage::rocksdb_store::RocksDBStore,
     subscriber::Subscriber,
     synchronizer::{Synchronizer, SynchronizerHandle},
     transaction::{TransactionClient, TransactionConsumer, TransactionVerifier},
     transaction_certifier::TransactionCertifier,
-    CommitConsumerArgs,
 };
 
 /// ConsensusAuthority is used by Sui to manage the lifetime of AuthorityNode.
 /// It hides the details of the implementation from the caller, MysticetiManager.
 #[allow(private_interfaces)]
 pub enum ConsensusAuthority {
-    WithAnemo(AuthorityNode<AnemoManager>),
     WithTonic(AuthorityNode<TonicManager>),
 }
 
 impl ConsensusAuthority {
     pub async fn start(
-        network_type: ConsensusNetwork,
+        network_type: NetworkType,
         epoch_start_timestamp_ms: u64,
         own_index: AuthorityIndex,
         committee: Committee,
@@ -64,32 +65,13 @@ impl ConsensusAuthority {
         transaction_verifier: Arc<dyn TransactionVerifier>,
         commit_consumer: CommitConsumerArgs,
         registry: Registry,
-        // A counter that keeps track of how many times the authority node has been booted while the binary
-        // or the component that is calling the `ConsensusAuthority` has been running. It's mostly useful to
-        // make decisions on whether amnesia recovery should run or not. When `boot_counter` is 0, then `ConsensusAuthority`
-        // will initiate the process of amnesia recovery if that's enabled in the parameters.
+        // A counter that keeps track of how many times the consensus authority has been booted while the process
+        // has been running. It's useful for making decisions on whether amnesia recovery should run.
+        // When `boot_counter` is 0, `ConsensusAuthority` will initiate the process of amnesia recovery if that's enabled in the parameters.
         boot_counter: u64,
     ) -> Self {
         match network_type {
-            ConsensusNetwork::Anemo => {
-                let authority = AuthorityNode::start(
-                    epoch_start_timestamp_ms,
-                    own_index,
-                    committee,
-                    parameters,
-                    protocol_config,
-                    protocol_keypair,
-                    network_keypair,
-                    clock,
-                    transaction_verifier,
-                    commit_consumer,
-                    registry,
-                    boot_counter,
-                )
-                .await;
-                Self::WithAnemo(authority)
-            }
-            ConsensusNetwork::Tonic => {
+            NetworkType::Tonic => {
                 let authority = AuthorityNode::start(
                     epoch_start_timestamp_ms,
                     own_index,
@@ -112,14 +94,22 @@ impl ConsensusAuthority {
 
     pub async fn stop(self) {
         match self {
-            Self::WithAnemo(authority) => authority.stop().await,
             Self::WithTonic(authority) => authority.stop().await,
+        }
+    }
+
+    pub fn update_peer_address(
+        &self,
+        network_pubkey: NetworkPublicKey,
+        address: Option<Multiaddr>,
+    ) {
+        match self {
+            Self::WithTonic(authority) => authority.update_peer_address(network_pubkey, address),
         }
     }
 
     pub fn transaction_client(&self) -> Arc<TransactionClient> {
         match self {
-            Self::WithAnemo(authority) => authority.transaction_client(),
             Self::WithTonic(authority) => authority.transaction_client(),
         }
     }
@@ -127,23 +117,19 @@ impl ConsensusAuthority {
     #[cfg(test)]
     fn context(&self) -> &Arc<Context> {
         match self {
-            Self::WithAnemo(authority) => &authority.context,
             Self::WithTonic(authority) => &authority.context,
-        }
-    }
-
-    #[allow(unused)]
-    fn sync_last_known_own_block_enabled(&self) -> bool {
-        match self {
-            Self::WithAnemo(authority) => authority.sync_last_known_own_block,
-            Self::WithTonic(authority) => authority.sync_last_known_own_block,
         }
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NetworkType {
+    Tonic,
+}
+
 pub(crate) struct AuthorityNode<N>
 where
-    N: NetworkManager<AuthorityService<ChannelCoreThreadDispatcher>>,
+    N: NetworkManager,
 {
     context: Arc<Context>,
     start_time: Instant,
@@ -151,30 +137,25 @@ where
     synchronizer: Arc<SynchronizerHandle>,
 
     commit_syncer_handle: CommitSyncerHandle,
-    round_prober_handle: Option<RoundProberHandle>,
+    round_prober_handle: RoundProberHandle,
     proposed_block_handler: JoinHandle<()>,
     leader_timeout_handle: LeaderTimeoutTaskHandle,
     core_thread_handle: CoreThreadHandle,
-    // Only one of broadcaster and subscriber gets created, depending on
-    // if streaming is supported.
-    broadcaster: Option<Broadcaster>,
-    subscriber: Option<Subscriber<N::Client, AuthorityService<ChannelCoreThreadDispatcher>>>,
+    subscriber: Subscriber<N::ValidatorClient, AuthorityService<ChannelCoreThreadDispatcher>>,
     network_manager: N,
-    sync_last_known_own_block: bool,
 }
 
 impl<N> AuthorityNode<N>
 where
-    N: NetworkManager<AuthorityService<ChannelCoreThreadDispatcher>>,
+    N: NetworkManager,
 {
+    // See comments above ConsensusAuthority::start() for details on the input.
     pub(crate) async fn start(
         epoch_start_timestamp_ms: u64,
         own_index: AuthorityIndex,
         committee: Committee,
         parameters: Parameters,
         protocol_config: ProtocolConfig,
-        // To avoid accidentally leaking the private key, the protocol key pair should only be
-        // kept in Core.
         protocol_keypair: ProtocolKeyPair,
         network_keypair: NetworkKeyPair,
         clock: Arc<Clock>,
@@ -237,19 +218,24 @@ where
         let (core_signals, signals_receivers) = CoreSignals::new(context.clone());
 
         let mut network_manager = N::new(context.clone(), network_keypair);
-        let network_client = network_manager.client();
+        let validator_client = network_manager.validator_client();
 
-        // REQUIRED: Broadcaster must be created before Core, to start listening on the
-        // broadcast channel in order to not miss blocks and cause test failures.
-        let broadcaster = if N::Client::SUPPORT_STREAMING {
-            None
-        } else {
-            Some(Broadcaster::new(
-                context.clone(),
-                network_client.clone(),
-                &signals_receivers,
-            ))
-        };
+        let synchronizer_client = Arc::new(SynchronizerClient::<
+            N::ValidatorClient,
+            N::ObserverClient,
+        >::new(
+            context.clone(),
+            Some(validator_client.clone()),
+            None, // TODO: set observer client if want to talk to a peer's observer server.
+        ));
+        let commit_syncer_client = Arc::new(CommitSyncerClient::<
+            N::ValidatorClient,
+            N::ObserverClient,
+        >::new(
+            context.clone(),
+            Some(validator_client.clone()),
+            None, // TODO: set observer client if want to talk to a peer's observer server.
+        ));
 
         let store_path = context.parameters.db_path.as_path().to_str().unwrap();
         let store = Arc::new(RocksDBStore::new(store_path));
@@ -262,13 +248,9 @@ where
 
         let transaction_certifier = TransactionCertifier::new(
             context.clone(),
+            block_verifier.clone(),
             dag_state.clone(),
             commit_consumer.block_sender.clone(),
-        );
-        // TODO(fastpath): recover incrementally by chunk inside CommitObserver::new()
-        transaction_certifier.recover(
-            block_verifier.as_ref(),
-            commit_consumer.replay_after_commit_index,
         );
 
         let mut proposed_block_handler = ProposedBlockHandler::new(
@@ -281,12 +263,16 @@ where
             spawn_logged_monitored_task!(proposed_block_handler.run(), "proposed_block_handler");
 
         let sync_last_known_own_block = boot_counter == 0
-            && dag_state.read().highest_accepted_round() == 0
             && !context
                 .parameters
                 .sync_last_known_own_block_timeout
                 .is_zero();
-        info!("Sync last known own block: {sync_last_known_own_block}");
+        info!(
+            "Sync last known own block: {}. Boot count: {}. Timeout: {:?}.",
+            sync_last_known_own_block,
+            boot_counter,
+            context.parameters.sync_last_known_own_block_timeout
+        );
 
         let block_manager = BlockManager::new(context.clone(), dag_state.clone());
 
@@ -305,18 +291,25 @@ where
         )
         .await;
 
-        let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
+        let initial_received_rounds = dag_state
+            .read()
+            .get_last_cached_block_per_authority(Round::MAX)
+            .into_iter()
+            .map(|(block, _)| block.round())
+            .collect::<Vec<_>>();
+        let round_tracker = Arc::new(RwLock::new(RoundTracker::new(
+            context.clone(),
+            initial_received_rounds,
+        )));
 
+        // To avoid accidentally leaking the private key, the protocol key pair should only be
+        // kept in Core.
         let core = Core::new(
             context.clone(),
             leader_schedule,
             tx_consumer,
             transaction_certifier.clone(),
             block_manager,
-            // For streaming RPC, Core will be notified when consumer is available.
-            // For non-streaming RPC, there is no way to know so default to true.
-            // When there is only one (this) authority, assume subscriber exists.
-            !N::Client::SUPPORT_STREAMING || context.committee.size() == 1,
             commit_observer,
             core_signals,
             protocol_keypair,
@@ -334,12 +327,13 @@ where
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
 
         let synchronizer = Synchronizer::start(
-            network_client.clone(),
+            synchronizer_client.clone(),
             context.clone(),
             core_dispatcher.clone(),
             commit_vote_monitor.clone(),
             block_verifier.clone(),
             transaction_certifier.clone(),
+            round_tracker.clone(),
             dag_state.clone(),
             sync_last_known_own_block,
         );
@@ -351,25 +345,20 @@ where
             commit_consumer_monitor.clone(),
             block_verifier.clone(),
             transaction_certifier.clone(),
-            network_client.clone(),
+            round_tracker.clone(),
+            commit_syncer_client.clone(),
             dag_state.clone(),
         )
         .start();
 
-        let round_prober_handle = if context.protocol_config.consensus_round_prober() {
-            Some(
-                RoundProber::new(
-                    context.clone(),
-                    core_dispatcher.clone(),
-                    round_tracker.clone(),
-                    dag_state.clone(),
-                    network_client.clone(),
-                )
-                .start(),
-            )
-        } else {
-            None
-        };
+        let round_prober_handle = RoundProber::new(
+            context.clone(),
+            core_dispatcher.clone(),
+            round_tracker.clone(),
+            dag_state.clone(),
+            validator_client.clone(),
+        )
+        .start();
 
         let network_service = Arc::new(AuthorityService::new(
             context.clone(),
@@ -384,10 +373,10 @@ where
             store,
         ));
 
-        let subscriber = if N::Client::SUPPORT_STREAMING {
+        let subscriber = {
             let s = Subscriber::new(
                 context.clone(),
-                network_client,
+                validator_client,
                 network_service.clone(),
                 dag_state,
             );
@@ -396,12 +385,15 @@ where
                     s.subscribe(peer);
                 }
             }
-            Some(s)
-        } else {
-            None
+            s
         };
 
-        network_manager.install_service(network_service).await;
+        network_manager
+            .start_validator_server(network_service.clone())
+            .await;
+        if context.parameters.tonic.is_observer_server_enabled() {
+            network_manager.start_observer_server(network_service).await;
+        }
 
         info!(
             "Consensus authority started, took {:?}",
@@ -418,10 +410,8 @@ where
             proposed_block_handler,
             leader_timeout_handle,
             core_thread_handle,
-            broadcaster,
             subscriber,
             network_manager,
-            sync_last_known_own_block,
         }
     }
 
@@ -442,21 +432,13 @@ where
             );
         };
         self.commit_syncer_handle.stop().await;
-        if let Some(round_prober_handle) = self.round_prober_handle.take() {
-            round_prober_handle.stop().await;
-        }
+        self.round_prober_handle.stop().await;
         self.proposed_block_handler.abort();
         self.leader_timeout_handle.stop().await;
         // Shutdown Core to stop block productions and broadcast.
-        // When using streaming, all subscribers to broadcasted blocks stop after this.
         self.core_thread_handle.stop().await;
-        if let Some(mut broadcaster) = self.broadcaster.take() {
-            broadcaster.stop();
-        }
-        // Stop outgoing long lived streams before stopping network server.
-        if let Some(subscriber) = self.subscriber.take() {
-            subscriber.stop();
-        }
+        // Stop block subscriptions before stopping network server.
+        self.subscriber.stop();
         self.network_manager.stop().await;
 
         self.context
@@ -468,6 +450,36 @@ where
 
     pub(crate) fn transaction_client(&self) -> Arc<TransactionClient> {
         self.transaction_client.clone()
+    }
+
+    pub(crate) fn update_peer_address(
+        &self,
+        network_pubkey: NetworkPublicKey,
+        address: Option<Multiaddr>,
+    ) {
+        // Find the peer index for this network key
+        let Some(peer) = self
+            .context
+            .committee
+            .authorities()
+            .find(|(_, authority)| authority.network_key == network_pubkey)
+            .map(|(index, _)| index)
+        else {
+            warn!(
+                "Network public key {:?} not found in committee, ignoring address update",
+                network_pubkey
+            );
+            return;
+        };
+
+        // Update the address in the network manager
+        self.network_manager.update_peer_address(peer, address);
+
+        // Re-subscribe to the peer to force reconnection with new address
+        if peer != self.context.own_index {
+            info!("Re-subscribing to peer {} after address update", peer);
+            self.subscriber.subscribe(peer);
+        }
     }
 }
 
@@ -481,9 +493,9 @@ mod tests {
         time::Duration,
     };
 
-    use consensus_config::{local_committee_and_keys, Parameters};
-    use mysten_metrics::monitored_mpsc::UnboundedReceiver;
+    use consensus_config::{Parameters, local_committee_and_keys};
     use mysten_metrics::RegistryService;
+    use mysten_metrics::monitored_mpsc::UnboundedReceiver;
     use prometheus::Registry;
     use rstest::rstest;
     use sui_protocol_config::ProtocolConfig;
@@ -493,15 +505,15 @@ mod tests {
 
     use super::*;
     use crate::{
-        block::{BlockAPI as _, CertifiedBlocksOutput, GENESIS_ROUND},
-        transaction::NoopTransactionVerifier,
         CommittedSubDag,
+        block::{BlockAPI as _, GENESIS_ROUND},
+        transaction::NoopTransactionVerifier,
     };
 
     #[rstest]
     #[tokio::test]
     async fn test_authority_start_and_stop(
-        #[values(ConsensusNetwork::Anemo, ConsensusNetwork::Tonic)] network_type: ConsensusNetwork,
+        #[values(NetworkType::Tonic)] network_type: NetworkType,
     ) {
         let (committee, keypairs) = local_committee_and_keys(0, vec![1]);
         let registry = Registry::new();
@@ -517,7 +529,7 @@ mod tests {
         let protocol_keypair = keypairs[own_index].1.clone();
         let network_keypair = keypairs[own_index].0.clone();
 
-        let (commit_consumer, _, _) = CommitConsumerArgs::new(0, 0);
+        let (commit_consumer, _) = CommitConsumerArgs::new(0, 0);
 
         let authority = ConsensusAuthority::start(
             network_type,
@@ -547,7 +559,7 @@ mod tests {
     #[rstest]
     #[tokio::test(flavor = "current_thread")]
     async fn test_authority_committee(
-        #[values(ConsensusNetwork::Anemo, ConsensusNetwork::Tonic)] network_type: ConsensusNetwork,
+        #[values(NetworkType::Tonic)] network_type: NetworkType,
         #[values(5, 10)] gc_depth: u32,
     ) {
         telemetry_subscribers::init_for_testing();
@@ -564,12 +576,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut commit_receivers = Vec::with_capacity(committee.size());
-        let mut block_receivers = Vec::with_capacity(committee.size());
         let mut authorities = Vec::with_capacity(committee.size());
         let mut boot_counters = [0; NUM_OF_AUTHORITIES];
 
         for (index, _authority_info) in committee.authorities() {
-            let (authority, commit_receiver, block_receiver) = make_authority(
+            let (authority, commit_receiver) = make_authority(
                 index,
                 &temp_dirs[index.value()],
                 committee.clone(),
@@ -581,7 +592,6 @@ mod tests {
             .await;
             boot_counters[index] += 1;
             commit_receivers.push(commit_receiver);
-            block_receivers.push(block_receiver);
             authorities.push(authority);
         }
 
@@ -627,7 +637,7 @@ mod tests {
         sleep(Duration::from_secs(10)).await;
 
         // Restart authority 1 and let it run.
-        let (authority, commit_receiver, block_receiver) = make_authority(
+        let (authority, commit_receiver) = make_authority(
             index,
             &temp_dirs[index.value()],
             committee.clone(),
@@ -639,7 +649,6 @@ mod tests {
         .await;
         boot_counters[index] += 1;
         commit_receivers[index] = commit_receiver;
-        block_receivers[index] = block_receiver;
         authorities.insert(index.value(), authority);
         sleep(Duration::from_secs(10)).await;
 
@@ -652,7 +661,7 @@ mod tests {
     #[rstest]
     #[tokio::test(flavor = "current_thread")]
     async fn test_small_committee(
-        #[values(ConsensusNetwork::Anemo, ConsensusNetwork::Tonic)] network_type: ConsensusNetwork,
+        #[values(NetworkType::Tonic)] network_type: NetworkType,
         #[values(1, 2, 3)] num_authorities: usize,
     ) {
         telemetry_subscribers::init_for_testing();
@@ -671,7 +680,7 @@ mod tests {
         let mut boot_counters = vec![0; num_authorities];
 
         for (index, _authority_info) in committee.authorities() {
-            let (authority, commit_receiver, _block_receiver) = make_authority(
+            let (authority, commit_receiver) = make_authority(
                 index,
                 &temp_dirs[index.value()],
                 committee.clone(),
@@ -728,7 +737,7 @@ mod tests {
         sleep(Duration::from_secs(10)).await;
 
         // Restart authority 0 and let it run.
-        let (authority, commit_receiver, _block_receiver) = make_authority(
+        let (authority, commit_receiver) = make_authority(
             index,
             &temp_dirs[index.value()],
             committee.clone(),
@@ -759,7 +768,6 @@ mod tests {
         const NUM_OF_AUTHORITIES: usize = 4;
         let (committee, keypairs) = local_committee_and_keys(0, [1; NUM_OF_AUTHORITIES].to_vec());
         let mut commit_receivers = vec![];
-        let mut block_receivers = vec![];
         let mut authorities = BTreeMap::new();
         let mut temp_dirs = BTreeMap::new();
         let mut boot_counters = [0; NUM_OF_AUTHORITIES];
@@ -769,20 +777,18 @@ mod tests {
 
         for (index, _authority_info) in committee.authorities() {
             let dir = TempDir::new().unwrap();
-            let (authority, commit_receiver, block_receiver) = make_authority(
+            let (authority, commit_receiver) = make_authority(
                 index,
                 &dir,
                 committee.clone(),
                 keypairs.clone(),
-                ConsensusNetwork::Tonic,
+                NetworkType::Tonic,
                 boot_counters[index],
                 protocol_config.clone(),
             )
             .await;
-            assert!(authority.sync_last_known_own_block_enabled(), "Expected syncing of last known own block to be enabled as all authorities are of empty db and boot for first time.");
             boot_counters[index] += 1;
             commit_receivers.push(commit_receiver);
-            block_receivers.push(block_receiver);
             authorities.insert(index, authority);
             temp_dirs.insert(index, dir);
         }
@@ -819,20 +825,16 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // We do reset the boot counter for this one to simulate a "binary" restart
         boot_counters[index_1] = 0;
-        let (authority, mut commit_receiver, _block_receiver) = make_authority(
+        let (authority, mut commit_receiver) = make_authority(
             index_1,
             &dir,
             committee.clone(),
             keypairs.clone(),
-            ConsensusNetwork::Tonic,
+            NetworkType::Tonic,
             boot_counters[index_1],
             protocol_config.clone(),
         )
         .await;
-        assert!(
-            authority.sync_last_known_own_block_enabled(),
-            "Authority should have the sync of last own block enabled"
-        );
         boot_counters[index_1] += 1;
         authorities.insert(index_1, authority);
         temp_dirs.insert(index_1, dir);
@@ -840,20 +842,16 @@ mod tests {
 
         // Now spin up authority 2 using its earlier directly - so no amnesia recovery should be forced here.
         // Authority 1 should be able to recover from amnesia successfully.
-        let (authority, _commit_receiver, _block_receiver) = make_authority(
+        let (authority, _commit_receiver) = make_authority(
             index_2,
             &temp_dirs[&index_2],
             committee.clone(),
             keypairs,
-            ConsensusNetwork::Tonic,
+            NetworkType::Tonic,
             boot_counters[index_2],
             protocol_config.clone(),
         )
         .await;
-        assert!(
-            !authority.sync_last_known_own_block_enabled(),
-            "Authority should not have attempted to sync the last own block"
-        );
         boot_counters[index_2] += 1;
         authorities.insert(index_2, authority);
         sleep(Duration::from_secs(5)).await;
@@ -879,14 +877,10 @@ mod tests {
         db_dir: &TempDir,
         committee: Committee,
         keypairs: Vec<(NetworkKeyPair, ProtocolKeyPair)>,
-        network_type: ConsensusNetwork,
+        network_type: NetworkType,
         boot_counter: u64,
         protocol_config: ProtocolConfig,
-    ) -> (
-        ConsensusAuthority,
-        UnboundedReceiver<CommittedSubDag>,
-        UnboundedReceiver<CertifiedBlocksOutput>,
-    ) {
+    ) -> (ConsensusAuthority, UnboundedReceiver<CommittedSubDag>) {
         let registry = Registry::new();
 
         // Cache less blocks to exercise commit sync.
@@ -903,7 +897,7 @@ mod tests {
         let protocol_keypair = keypairs[index].1.clone();
         let network_keypair = keypairs[index].0.clone();
 
-        let (commit_consumer, commit_receiver, block_receiver) = CommitConsumerArgs::new(0, 0);
+        let (commit_consumer, commit_receiver) = CommitConsumerArgs::new(0, 0);
 
         let authority = ConsensusAuthority::start(
             network_type,
@@ -922,6 +916,6 @@ mod tests {
         )
         .await;
 
-        (authority, commit_receiver, block_receiver)
+        (authority, commit_receiver)
     }
 }

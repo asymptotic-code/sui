@@ -5,20 +5,23 @@ use crate::base_types::{AuthorityName, ConsensusObjectSequenceKey, ObjectRef, Tr
 use crate::base_types::{ConciseableName, ObjectID, SequenceNumber};
 use crate::committee::EpochId;
 use crate::digests::{AdditionalConsensusStateDigest, ConsensusCommitDigest};
-use crate::error::SuiError;
+use crate::error::{SuiError, SuiErrorKind};
 use crate::execution::ExecutionTimeObservationKey;
-use crate::messages_checkpoint::{CheckpointSequenceNumber, CheckpointSignatureMessage};
+use crate::messages_checkpoint::{
+    CheckpointDigest, CheckpointSequenceNumber, CheckpointSignatureMessage,
+};
 use crate::supported_protocol_versions::{
     Chain, SupportedProtocolVersions, SupportedProtocolVersionsWithHashes,
 };
-use crate::transaction::{CertifiedTransaction, Transaction};
+use crate::transaction::{CertifiedTransaction, PlainTransactionWithClaims, Transaction};
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::Bytes;
-use consensus_types::block::{BlockRef, TransactionIndex};
+use consensus_types::block::{BlockRef, PING_TRANSACTION_INDEX, TransactionIndex};
 use fastcrypto::error::FastCryptoResult;
 use fastcrypto::groups::bls12381;
 use fastcrypto_tbls::dkg_v1;
-use fastcrypto_zkp::bn254::zk_login::{JwkId, JWK};
+use fastcrypto_zkp::bn254::zk_login::{JWK, JwkId};
+use mysten_common::debug_fatal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -53,11 +56,24 @@ pub struct ConsensusPosition {
 impl ConsensusPosition {
     pub fn into_raw(self) -> Result<Bytes, SuiError> {
         bcs::to_bytes(&self)
-            .map_err(|e| SuiError::GrpcMessageSerializeError {
-                type_info: "ConsensusPosition".to_string(),
-                error: e.to_string(),
+            .map_err(|e| {
+                SuiErrorKind::GrpcMessageSerializeError {
+                    type_info: "ConsensusPosition".to_string(),
+                    error: e.to_string(),
+                }
+                .into()
             })
             .map(Bytes::from)
+    }
+
+    // We reserve the max index for the "ping" transaction. This transaction is not included in the block, but we are
+    // simulating by assuming its position in the block as the max index.
+    pub fn ping(epoch: EpochId, block: BlockRef) -> Self {
+        Self {
+            epoch,
+            block,
+            index: PING_TRANSACTION_INDEX,
+        }
     }
 }
 
@@ -65,9 +81,12 @@ impl TryFrom<&[u8]> for ConsensusPosition {
     type Error = SuiError;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        bcs::from_bytes(bytes).map_err(|e| SuiError::GrpcMessageDeserializeError {
-            type_info: "ConsensusPosition".to_string(),
-            error: e.to_string(),
+        bcs::from_bytes(bytes).map_err(|e| {
+            SuiErrorKind::GrpcMessageDeserializeError {
+                type_info: "ConsensusPosition".to_string(),
+                error: e.to_string(),
+            }
+            .into()
         })
     }
 }
@@ -108,7 +127,6 @@ pub struct ConsensusCommitPrologueV2 {
     pub consensus_commit_digest: ConsensusCommitDigest,
 }
 
-/// Uses an enum to allow for future expansion of the ConsensusDeterminedVersionAssignments.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum ConsensusDeterminedVersionAssignments {
     // Cancelled transaction version assignment.
@@ -181,9 +199,50 @@ pub struct ConsensusTransaction {
     pub kind: ConsensusTransactionKind,
 }
 
+impl ConsensusTransaction {
+    /// Displays a ConsensusTransaction created locally by the validator, for example during submission to consensus.
+    pub fn local_display(&self) -> String {
+        match &self.kind {
+            ConsensusTransactionKind::CertifiedTransaction(cert) => {
+                format!("Certified({})", cert.digest())
+            }
+            ConsensusTransactionKind::CheckpointSignature(data) => {
+                format!(
+                    "CkptSig({}, {})",
+                    data.summary.sequence_number,
+                    data.summary.digest()
+                )
+            }
+            ConsensusTransactionKind::CheckpointSignatureV2(data) => {
+                format!(
+                    "CkptSigV2({}, {})",
+                    data.summary.sequence_number,
+                    data.summary.digest()
+                )
+            }
+            ConsensusTransactionKind::EndOfPublish(..) => "EOP".to_string(),
+            ConsensusTransactionKind::CapabilityNotification(..) => "Cap".to_string(),
+            ConsensusTransactionKind::CapabilityNotificationV2(..) => "CapV2".to_string(),
+            ConsensusTransactionKind::NewJWKFetched(..) => "NewJWKFetched".to_string(),
+            ConsensusTransactionKind::RandomnessStateUpdate(..) => "RandStateUpdate".to_string(),
+            ConsensusTransactionKind::RandomnessDkgMessage(..) => "RandDkg".to_string(),
+            ConsensusTransactionKind::RandomnessDkgConfirmation(..) => "RandDkgConf".to_string(),
+            ConsensusTransactionKind::ExecutionTimeObservation(..) => "ExecTimeOb".to_string(),
+            ConsensusTransactionKind::UserTransaction(tx) => {
+                format!("User({})", tx.digest())
+            }
+            ConsensusTransactionKind::UserTransactionV2(tx) => {
+                format!("UserV2({})", tx.tx().digest())
+            }
+        }
+    }
+}
+
+// Serialized ordinally - always append to end of enum
 #[derive(Serialize, Deserialize, Clone, Hash, PartialEq, Eq, Ord, PartialOrd)]
 pub enum ConsensusTransactionKey {
     Certificate(TransactionDigest),
+    // V1: dedup by authority + sequence only (no digest)
     CheckpointSignature(AuthorityName, CheckpointSequenceNumber),
     EndOfPublish(AuthorityName),
     CapabilityNotification(AuthorityName, u64 /* generation */),
@@ -193,6 +252,10 @@ pub enum ConsensusTransactionKey {
     RandomnessDkgMessage(AuthorityName),
     RandomnessDkgConfirmation(AuthorityName),
     ExecutionTimeObservation(AuthorityName, u64 /* generation */),
+    // V2: dedup by authority + sequence + digest
+    CheckpointSignatureV2(AuthorityName, CheckpointSequenceNumber, CheckpointDigest),
+    // Deprecated.
+    RandomnessStateUpdate,
 }
 
 impl Debug for ConsensusTransactionKey {
@@ -202,6 +265,13 @@ impl Debug for ConsensusTransactionKey {
             Self::CheckpointSignature(name, seq) => {
                 write!(f, "CheckpointSignature({:?}, {:?})", name.concise(), seq)
             }
+            Self::CheckpointSignatureV2(name, seq, digest) => write!(
+                f,
+                "CheckpointSignatureV2({:?}, {:?}, {:?})",
+                name.concise(),
+                seq,
+                digest
+            ),
             Self::EndOfPublish(name) => write!(f, "EndOfPublish({:?})", name.concise()),
             Self::CapabilityNotification(name, generation) => write!(
                 f,
@@ -232,10 +302,14 @@ impl Debug for ConsensusTransactionKey {
                     name.concise()
                 )
             }
+            Self::RandomnessStateUpdate => {
+                write!(f, "RandomnessStateUpdate")
+            }
         }
     }
 }
 
+/// Deprecated in favor of AuthorityCapabilitiesV2
 /// Used to advertise capabilities of each authority via consensus. This allows validators to
 /// negotiate the creation of the ChangeEpoch transaction.
 #[derive(Serialize, Deserialize, Clone, Hash)]
@@ -268,27 +342,6 @@ impl Debug for AuthorityCapabilitiesV1 {
             )
             .field("available_system_packages", &self.available_system_packages)
             .finish()
-    }
-}
-
-impl AuthorityCapabilitiesV1 {
-    pub fn new(
-        authority: AuthorityName,
-        supported_protocol_versions: SupportedProtocolVersions,
-        available_system_packages: Vec<ObjectRef>,
-    ) -> Self {
-        let generation = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Sui did not exist prior to 1970")
-            .as_millis()
-            .try_into()
-            .expect("This build of sui is not supported in the year 500,000,000");
-        Self {
-            authority,
-            generation,
-            supported_protocol_versions,
-            available_system_packages,
-        }
     }
 }
 
@@ -384,10 +437,10 @@ impl ExecutionTimeObservation {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ConsensusTransactionKind {
     CertifiedTransaction(Box<CertifiedTransaction>),
-    CheckpointSignature(Box<CheckpointSignatureMessage>),
+    CheckpointSignature(Box<CheckpointSignatureMessage>), // deprecated, use CheckpointSignatureV2
     EndOfPublish(AuthorityName),
 
-    CapabilityNotification(AuthorityCapabilitiesV1),
+    CapabilityNotification(AuthorityCapabilitiesV1), // deprecated, use CapabilityNotificationV2
 
     NewJWKFetched(AuthorityName, JwkId, JWK),
     RandomnessStateUpdate(u64, Vec<u8>), // deprecated
@@ -405,19 +458,30 @@ pub enum ConsensusTransactionKind {
     UserTransaction(Box<Transaction>),
 
     ExecutionTimeObservation(ExecutionTimeObservation),
+    // V2: dedup by authority + sequence + digest
+    CheckpointSignatureV2(Box<CheckpointSignatureMessage>),
+
+    // UserTransactionV2 commits to verified claims about the transaction:
+    // - AddressAliases: specific object versions used for signature verification
+    // - ImmutableInputObjects: object IDs that are immutable (to avoid locking them)
+    UserTransactionV2(Box<PlainTransactionWithClaims>),
 }
 
 impl ConsensusTransactionKind {
-    pub fn is_dkg(&self) -> bool {
-        matches!(
-            self,
-            ConsensusTransactionKind::RandomnessDkgMessage(_, _)
-                | ConsensusTransactionKind::RandomnessDkgConfirmation(_, _)
-        )
+    pub fn as_user_transaction(&self) -> Option<&Transaction> {
+        match self {
+            ConsensusTransactionKind::UserTransaction(tx) => Some(tx),
+            ConsensusTransactionKind::UserTransactionV2(tx) => Some(tx.tx()),
+            _ => None,
+        }
     }
 
-    pub fn is_user_transaction(&self) -> bool {
-        matches!(self, ConsensusTransactionKind::UserTransaction(_))
+    pub fn into_user_transaction(self) -> Option<Transaction> {
+        match self {
+            ConsensusTransactionKind::UserTransaction(tx) => Some(*tx),
+            ConsensusTransactionKind::UserTransactionV2(tx) => Some(tx.into_tx()),
+            _ => None,
+        }
     }
 }
 
@@ -510,40 +574,28 @@ impl VersionedDkgConfirmation {
 }
 
 impl ConsensusTransaction {
-    pub fn new_certificate_message(
+    pub fn new_user_transaction_v2_message(
         authority: &AuthorityName,
-        certificate: CertifiedTransaction,
+        tx: PlainTransactionWithClaims,
     ) -> Self {
         let mut hasher = DefaultHasher::new();
-        let tx_digest = certificate.digest();
+        let tx_digest = tx.tx().digest();
         tx_digest.hash(&mut hasher);
         authority.hash(&mut hasher);
         let tracking_id = hasher.finish().to_le_bytes();
         Self {
             tracking_id,
-            kind: ConsensusTransactionKind::CertifiedTransaction(Box::new(certificate)),
+            kind: ConsensusTransactionKind::UserTransactionV2(Box::new(tx)),
         }
     }
 
-    pub fn new_user_transaction_message(authority: &AuthorityName, tx: Transaction) -> Self {
-        let mut hasher = DefaultHasher::new();
-        let tx_digest = tx.digest();
-        tx_digest.hash(&mut hasher);
-        authority.hash(&mut hasher);
-        let tracking_id = hasher.finish().to_le_bytes();
-        Self {
-            tracking_id,
-            kind: ConsensusTransactionKind::UserTransaction(Box::new(tx)),
-        }
-    }
-
-    pub fn new_checkpoint_signature_message(data: CheckpointSignatureMessage) -> Self {
+    pub fn new_checkpoint_signature_message_v2(data: CheckpointSignatureMessage) -> Self {
         let mut hasher = DefaultHasher::new();
         data.summary.auth_sig().signature.hash(&mut hasher);
         let tracking_id = hasher.finish().to_le_bytes();
         Self {
             tracking_id,
-            kind: ConsensusTransactionKind::CheckpointSignature(Box::new(data)),
+            kind: ConsensusTransactionKind::CheckpointSignatureV2(Box::new(data)),
         }
     }
 
@@ -554,16 +606,6 @@ impl ConsensusTransaction {
         Self {
             tracking_id,
             kind: ConsensusTransactionKind::EndOfPublish(authority),
-        }
-    }
-
-    pub fn new_capability_notification(capabilities: AuthorityCapabilitiesV1) -> Self {
-        let mut hasher = DefaultHasher::new();
-        capabilities.hash(&mut hasher);
-        let tracking_id = hasher.finish().to_le_bytes();
-        Self {
-            tracking_id,
-            kind: ConsensusTransactionKind::CapabilityNotification(capabilities),
         }
     }
 
@@ -660,6 +702,13 @@ impl ConsensusTransaction {
                     data.summary.sequence_number,
                 )
             }
+            ConsensusTransactionKind::CheckpointSignatureV2(data) => {
+                ConsensusTransactionKey::CheckpointSignatureV2(
+                    data.summary.auth_sig().authority,
+                    data.summary.sequence_number,
+                    *data.summary.digest(),
+                )
+            }
             ConsensusTransactionKind::EndOfPublish(authority) => {
                 ConsensusTransactionKey::EndOfPublish(*authority)
             }
@@ -677,7 +726,10 @@ impl ConsensusTransaction {
                 )))
             }
             ConsensusTransactionKind::RandomnessStateUpdate(_, _) => {
-                unreachable!("there should never be a RandomnessStateUpdate with SequencedConsensusTransactionKind::External")
+                debug_fatal!(
+                    "there should never be a RandomnessStateUpdate with SequencedConsensusTransactionKind::External"
+                );
+                ConsensusTransactionKey::RandomnessStateUpdate
             }
             ConsensusTransactionKind::RandomnessDkgMessage(authority, _) => {
                 ConsensusTransactionKey::RandomnessDkgMessage(*authority)
@@ -691,19 +743,33 @@ impl ConsensusTransaction {
                 // between CertifiedTransaction and UserTransaction.
                 ConsensusTransactionKey::Certificate(*tx.digest())
             }
+            ConsensusTransactionKind::UserTransactionV2(tx) => {
+                // Use the same key format as ConsensusTransactionKind::CertifiedTransaction,
+                // because existing usages of ConsensusTransactionKey should not differentiate
+                // between CertifiedTransaction and UserTransactionV2.
+                ConsensusTransactionKey::Certificate(*tx.tx().digest())
+            }
             ConsensusTransactionKind::ExecutionTimeObservation(msg) => {
                 ConsensusTransactionKey::ExecutionTimeObservation(msg.authority, msg.generation)
             }
         }
     }
 
-    pub fn is_executable_transaction(&self) -> bool {
-        matches!(self.kind, ConsensusTransactionKind::CertifiedTransaction(_))
-            || matches!(self.kind, ConsensusTransactionKind::UserTransaction(_))
+    pub fn is_dkg(&self) -> bool {
+        matches!(
+            self.kind,
+            ConsensusTransactionKind::RandomnessDkgMessage(_, _)
+                | ConsensusTransactionKind::RandomnessDkgConfirmation(_, _)
+        )
     }
 
     pub fn is_user_transaction(&self) -> bool {
-        matches!(self.kind, ConsensusTransactionKind::UserTransaction(_))
+        // CertifiedTransaction is unused and not accepted now.
+        matches!(
+            self.kind,
+            ConsensusTransactionKind::UserTransaction(_)
+                | ConsensusTransactionKind::UserTransactionV2(_)
+        )
     }
 
     pub fn is_end_of_publish(&self) -> bool {

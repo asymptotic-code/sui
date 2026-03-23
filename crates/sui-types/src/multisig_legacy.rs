@@ -4,6 +4,7 @@
 use crate::{
     crypto::{CompressedSignature, SignatureScheme},
     digests::ZKLoginInputsDigest,
+    error::SuiErrorKind,
     multisig::{MultiSig, MultiSigPublicKey},
     signature::{AuthenticatorTrait, GenericSignature, VerifyParams},
     signature_verification::VerifiedDigestCache,
@@ -18,7 +19,7 @@ use fastcrypto::{
 use once_cell::sync::OnceCell;
 use roaring::RoaringBitmap;
 use schemars::JsonSchema;
-use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeSeq};
 use serde_with::serde_as;
 use shared_crypto::intent::IntentMessage;
 use std::{
@@ -99,7 +100,7 @@ impl AuthenticatorTrait for MultiSigLegacy {
         let multisig: MultiSig =
             self.clone()
                 .try_into()
-                .map_err(|_| SuiError::InvalidSignature {
+                .map_err(|_| SuiErrorKind::InvalidSignature {
                     error: "Invalid legacy multisig".to_string(),
                 })?;
         multisig.verify_user_authenticator_epoch(epoch_id, max_epoch_upper_bound_delta)
@@ -118,7 +119,7 @@ impl AuthenticatorTrait for MultiSigLegacy {
         let multisig: MultiSig =
             self.clone()
                 .try_into()
-                .map_err(|_| SuiError::InvalidSignature {
+                .map_err(|_| SuiErrorKind::InvalidSignature {
                     error: "Invalid legacy multisig".to_string(),
                 })?;
         multisig.verify_claims(value, author, aux_verify_data, zklogin_inputs_cache)
@@ -149,9 +150,8 @@ impl TryFrom<MultiSigPublicKeyLegacy> for MultiSigPublicKey {
 
 /// Convert a roaring bitmap to plain bitmap.
 pub fn bitmap_to_u16(roaring: RoaringBitmap) -> Result<u16, FastCryptoError> {
-    let indices: Vec<u32> = roaring.into_iter().collect();
     let mut val = 0;
-    for i in indices {
+    for i in roaring {
         if i >= 10 {
             return Err(FastCryptoError::InvalidInput);
         }
@@ -168,28 +168,30 @@ impl MultiSigLegacy {
     ) -> Result<Self, SuiError> {
         multisig_pk
             .validate()
-            .map_err(|_| SuiError::InvalidSignature {
+            .map_err(|_| SuiErrorKind::InvalidSignature {
                 error: "Invalid multisig public key".to_string(),
             })?;
 
         if full_sigs.len() > multisig_pk.pk_map.len() || full_sigs.is_empty() {
-            return Err(SuiError::InvalidSignature {
+            return Err(SuiErrorKind::InvalidSignature {
                 error: "Invalid number of signatures".to_string(),
-            });
+            }
+            .into());
         }
         let mut bitmap = RoaringBitmap::new();
         let mut sigs = Vec::with_capacity(full_sigs.len());
         for s in full_sigs {
             let pk = s.to_public_key()?;
             let inserted = bitmap.insert(multisig_pk.get_index(&pk).ok_or(
-                SuiError::IncorrectSigner {
+                SuiErrorKind::IncorrectSigner {
                     error: format!("pk does not exist: {:?}", pk),
                 },
             )?);
             if !inserted {
-                return Err(SuiError::InvalidSignature {
+                return Err(SuiErrorKind::InvalidSignature {
                     error: "Duplicate signature".to_string(),
-                });
+                }
+                .into());
             }
             sigs.push(s.to_compressed()?);
         }
@@ -296,16 +298,17 @@ impl MultiSigPublicKeyLegacy {
             || threshold == 0
             || pks.len() != weights.len()
             || pks.len() > MAX_SIGNER_IN_MULTISIG
-            || weights.iter().any(|w| *w == 0)
+            || weights.contains(&0)
             || weights
                 .iter()
                 .map(|w| *w as ThresholdUnit)
                 .sum::<ThresholdUnit>()
                 < threshold
         {
-            return Err(SuiError::InvalidSignature {
+            return Err(SuiErrorKind::InvalidSignature {
                 error: "Invalid multisig public key construction".to_string(),
-            });
+            }
+            .into());
         }
         Ok(MultiSigPublicKeyLegacy {
             pk_map: pks.into_iter().zip(weights).collect(),

@@ -4,13 +4,13 @@
 use std::path::PathBuf;
 use sui_macros::*;
 use sui_test_transaction_builder::publish_package;
+use sui_types::SUI_FRAMEWORK_ADDRESS;
 use sui_types::base_types::{ObjectID, ObjectRef, SequenceNumber};
 use sui_types::effects::TransactionEffectsAPI;
 use sui_types::effects::{TransactionEffects, TransactionEvents};
-use sui_types::execution_status::{ExecutionFailureStatus, ExecutionStatus};
-use sui_types::object::{Owner, OBJECT_START_VERSION};
-use sui_types::transaction::{CallArg, ObjectArg};
-use sui_types::SUI_FRAMEWORK_ADDRESS;
+use sui_types::execution_status::{ExecutionErrorKind, ExecutionFailure, ExecutionStatus};
+use sui_types::object::{OBJECT_START_VERSION, Owner};
+use sui_types::transaction::{CallArg, ObjectArg, SharedObjectMutability};
 use test_cluster::{TestCluster, TestClusterBuilder};
 
 #[sim_test]
@@ -28,7 +28,7 @@ async fn objects_transitioning_to_shared_remember_their_previous_version() {
     let (counter, _) = env.increment_owned_counter(counter).await;
     assert_ne!(counter.1, OBJECT_START_VERSION);
 
-    let ExecutionFailureStatus::MoveAbort(location, code) =
+    let ExecutionErrorKind::MoveAbort(location, code) =
         env.share_counter(counter).await.unwrap_err()
     else {
         panic!()
@@ -44,7 +44,7 @@ async fn shared_object_owner_doesnt_change_on_write() {
     let (counter, _) = env.create_counter().await;
 
     let (inc_counter, _) = env.increment_owned_counter(counter).await;
-    let ExecutionFailureStatus::MoveAbort(location, code) =
+    let ExecutionErrorKind::MoveAbort(location, code) =
         env.share_counter(inc_counter).await.unwrap_err()
     else {
         panic!()
@@ -60,7 +60,7 @@ async fn initial_shared_version_mismatch_start_version() {
     let (counter, _) = env.create_counter().await;
 
     let (counter, _) = env.increment_owned_counter(counter).await;
-    let ExecutionFailureStatus::MoveAbort(location, code) =
+    let ExecutionErrorKind::MoveAbort(location, code) =
         env.share_counter(counter).await.unwrap_err()
     else {
         panic!()
@@ -75,7 +75,7 @@ async fn initial_shared_version_mismatch_current_version() {
     let env = TestEnvironment::new().await;
     let (counter, _) = env.create_counter().await;
 
-    let ExecutionFailureStatus::MoveAbort(location, code) =
+    let ExecutionErrorKind::MoveAbort(location, code) =
         env.share_counter(counter).await.unwrap_err()
     else {
         panic!()
@@ -90,10 +90,11 @@ async fn shared_object_not_found() {
     let env = TestEnvironment::new().await;
     let nonexistent_id = ObjectID::random();
     let initial_shared_seq = SequenceNumber::from_u64(42);
-    assert!(env
-        .increment_shared_counter(nonexistent_id, initial_shared_seq)
-        .await
-        .is_err());
+    assert!(
+        env.increment_shared_counter(nonexistent_id, initial_shared_seq)
+            .await
+            .is_err()
+    );
 }
 
 fn is_shared_at(owner: &Owner, version: SequenceNumber) -> bool {
@@ -140,7 +141,11 @@ impl TestEnvironment {
                 arguments,
             )
             .build();
-        let transaction = self.test_cluster.wallet.sign_transaction(&transaction);
+        let transaction = self
+            .test_cluster
+            .wallet
+            .sign_transaction(&transaction)
+            .await;
         self.test_cluster
             .execute_transaction_return_raw_effects(transaction)
             .await
@@ -174,7 +179,7 @@ impl TestEnvironment {
     async fn share_counter(
         &self,
         counter: ObjectRef,
-    ) -> Result<(ObjectRef, Owner), ExecutionFailureStatus> {
+    ) -> Result<(ObjectRef, Owner), ExecutionErrorKind> {
         let (fx, _) = self
             .move_call(
                 "share_counter",
@@ -183,7 +188,7 @@ impl TestEnvironment {
             .await
             .unwrap();
 
-        if let ExecutionStatus::Failure { error, .. } = fx.status() {
+        if let ExecutionStatus::Failure(ExecutionFailure { error, .. }) = fx.status() {
             return Err(error.clone());
         }
 
@@ -222,7 +227,7 @@ impl TestEnvironment {
                 vec![CallArg::Object(ObjectArg::SharedObject {
                     id: counter,
                     initial_shared_version,
-                    mutable: true,
+                    mutability: SharedObjectMutability::Mutable,
                 })],
             )
             .await?;

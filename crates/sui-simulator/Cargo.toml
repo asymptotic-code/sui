@@ -4,13 +4,14 @@ version = "0.7.0"
 authors = ["Mysten Labs <build@mystenlabs.com>"]
 license = "Apache-2.0"
 publish = false
-edition = "2021"
+edition = "2024"
 
 [lints]
 workspace = true
 
 [dependencies]
-move-package.workspace = true
+move-package-alt.workspace = true
+move-package-alt-compilation.workspace = true
 mysten-network.workspace = true
 sui-framework.workspace = true
 sui-move-build.workspace = true

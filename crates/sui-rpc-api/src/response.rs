@@ -6,6 +6,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
+use sui_sdk_types::Digest;
 
 use crate::RpcService;
 use sui_rpc::headers::{
@@ -20,7 +21,10 @@ pub async fn append_info_headers(
 ) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
 
-    if let Ok(chain_id) = state.chain_id().to_string().try_into() {
+    if let Ok(chain_id) = Digest::new(state.chain_id().as_bytes().to_owned())
+        .to_string()
+        .try_into()
+    {
         headers.insert(X_SUI_CHAIN_ID, chain_id);
     }
 
@@ -45,22 +49,16 @@ pub async fn append_info_headers(
         );
     }
 
-    if let Ok(lowest_available_checkpoint) = state.reader.inner().get_lowest_available_checkpoint()
-    {
+    if let Ok(lowest_available_checkpoint) = state.reader.get_lowest_available_checkpoint() {
         headers.insert(
             X_SUI_LOWEST_AVAILABLE_CHECKPOINT,
             lowest_available_checkpoint.into(),
         );
-    }
 
-    if let Ok(lowest_available_checkpoint_objects) = state
-        .reader
-        .inner()
-        .get_lowest_available_checkpoint_objects()
-    {
+        // Still set the deprecated header
         headers.insert(
             X_SUI_LOWEST_AVAILABLE_CHECKPOINT_OBJECTS,
-            lowest_available_checkpoint_objects.into(),
+            lowest_available_checkpoint.into(),
         );
     }
 

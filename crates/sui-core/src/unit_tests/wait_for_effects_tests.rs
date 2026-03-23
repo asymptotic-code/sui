@@ -4,33 +4,31 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use consensus_types::block::{BlockRef, TransactionIndex};
+use consensus_types::block::{BlockRef, PING_TRANSACTION_INDEX, TransactionIndex};
 use fastcrypto::traits::KeyPair;
 use sui_test_transaction_builder::TestTransactionBuilder;
 use sui_types::base_types::{ObjectRef, SuiAddress, TransactionDigest};
 use sui_types::committee::EpochId;
-use sui_types::crypto::{get_account_key_pair, AccountKeyPair};
+use sui_types::crypto::{AccountKeyPair, get_account_key_pair};
+use sui_types::digests::TransactionEffectsDigest;
 use sui_types::effects::TransactionEffectsAPI as _;
-use sui_types::error::{SuiError, UserInputError};
+use sui_types::error::{SuiErrorKind, UserInputError};
 use sui_types::executable_transaction::VerifiedExecutableTransaction;
 use sui_types::message_envelope::Message;
 use sui_types::messages_consensus::ConsensusPosition;
-use sui_types::messages_grpc::RawWaitForEffectsRequest;
+use sui_types::messages_grpc::{PingType, WaitForEffectsRequest, WaitForEffectsResponse};
 use sui_types::object::Object;
 use sui_types::transaction::VerifiedTransaction;
 use sui_types::utils::to_sender_signed_transaction;
 
+use super::AuthorityServerHandle;
 use crate::authority::consensus_tx_status_cache::{
-    ConsensusTxStatus, CONSENSUS_STATUS_RETENTION_ROUNDS,
+    CONSENSUS_STATUS_RETENTION_ROUNDS, ConsensusTxStatus,
 };
 use crate::authority::test_authority_builder::TestAuthorityBuilder;
 use crate::authority::{AuthorityState, ExecutionEnv};
 use crate::authority_client::{AuthorityAPI, NetworkAuthorityClient};
 use crate::authority_server::AuthorityServer;
-use crate::execution_scheduler::SchedulingSource;
-use crate::transaction_driver::{WaitForEffectsRequest, WaitForEffectsResponse};
-
-use super::AuthorityServerHandle;
 
 struct TestContext {
     state: Arc<AuthorityState>,
@@ -88,11 +86,11 @@ impl TestContext {
     }
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test]
 async fn test_wait_for_effects_position_mismatch() {
-    // This test exercise the path where if the position of the transaction
-    // triggered the execution differs from the position in the request,
-    // the request will timeout.
+    // Even if the consensus position in the request differs from the position
+    // where the transaction was finalized, the effects are still returned
+    // because they are read from the regular execution cache (not position-specific).
     let test_context = TestContext::new().await;
 
     let transaction = test_context.build_test_transaction();
@@ -109,35 +107,46 @@ async fn test_wait_for_effects_position_mismatch() {
     };
 
     let state_clone = test_context.state.clone();
-    tokio::spawn(async move {
+    let exec_handle = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let epoch_store = state_clone.epoch_store_for_testing();
-        epoch_store.set_consensus_tx_status(tx_position2, ConsensusTxStatus::FastpathCertified);
+        epoch_store.set_consensus_tx_status(tx_position2, ConsensusTxStatus::Finalized);
         state_clone
-            .try_execute_immediately(
-                &transaction,
-                ExecutionEnv::new().with_scheduling_source(SchedulingSource::MysticetiFastPath),
-                &epoch_store,
-            )
+            .try_execute_immediately(&transaction, ExecutionEnv::new(), &epoch_store)
             .await
             .unwrap()
             .0
     });
 
-    let request = RawWaitForEffectsRequest::try_from(WaitForEffectsRequest {
-        transaction_digest: tx_digest,
+    let request = WaitForEffectsRequest {
+        transaction_digest: Some(tx_digest),
         consensus_position: Some(tx_position1),
         include_details: true,
-    })
-    .unwrap();
+        ping_type: None,
+    };
 
-    let response = test_context.client.wait_for_effects(request, None).await;
+    let response = test_context
+        .client
+        .wait_for_effects(request, None)
+        .await
+        .unwrap();
 
-    assert!(response.is_err());
+    let exec_effects = exec_handle.await.unwrap();
+    match response {
+        WaitForEffectsResponse::Executed {
+            effects_digest,
+            details,
+            fast_path: _,
+        } => {
+            assert!(details.is_some());
+            assert_eq!(effects_digest, exec_effects.digest());
+        }
+        _ => panic!("Expected Executed response"),
+    }
 }
 
 #[tokio::test]
-async fn test_wait_for_effects_post_commit_rejected() {
+async fn test_wait_for_effects_consensus_rejected_validator_accepted() {
     let test_context = TestContext::new().await;
 
     let transaction = test_context.build_test_transaction();
@@ -148,19 +157,18 @@ async fn test_wait_for_effects_post_commit_rejected() {
         index: TransactionIndex::MIN,
     };
 
-    let request = RawWaitForEffectsRequest::try_from(WaitForEffectsRequest {
-        transaction_digest: tx_digest,
+    let request = WaitForEffectsRequest {
+        transaction_digest: Some(tx_digest),
         consensus_position: Some(tx_position),
         include_details: true,
-    })
-    .unwrap();
+        ping_type: None,
+    };
 
+    // Validator does not reject the transaction, but it is rejected by the commit.
     let state_clone = test_context.state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let epoch_store = state_clone.epoch_store_for_testing();
-        epoch_store.set_consensus_tx_status(tx_position, ConsensusTxStatus::FastpathCertified);
-        tokio::time::sleep(Duration::from_millis(100)).await;
         epoch_store.set_consensus_tx_status(tx_position, ConsensusTxStatus::Rejected);
     });
 
@@ -168,17 +176,12 @@ async fn test_wait_for_effects_post_commit_rejected() {
         .client
         .wait_for_effects(request, None)
         .await
-        .unwrap()
-        .try_into()
         .unwrap();
 
     match response {
         WaitForEffectsResponse::Rejected { error } => {
             // TODO(fastpath): Test reject reason.
-            assert!(matches!(
-                error,
-                SuiError::TransactionRejectReasonNotFound { .. }
-            ));
+            assert!(error.is_none(), "{:?}", error);
         }
         _ => panic!("Expected Rejected response"),
     }
@@ -197,12 +200,12 @@ async fn test_wait_for_effects_epoch_mismatch() {
         index: TransactionIndex::MIN,
     };
 
-    let request = RawWaitForEffectsRequest::try_from(WaitForEffectsRequest {
-        transaction_digest: tx_digest,
+    let request = WaitForEffectsRequest {
+        transaction_digest: Some(tx_digest),
         consensus_position: Some(tx_position),
         include_details: true,
-    })
-    .unwrap();
+        ping_type: None,
+    };
 
     let response = test_context.client.wait_for_effects(request, None).await;
 
@@ -222,12 +225,12 @@ async fn test_wait_for_effects_timeout() {
         index: TransactionIndex::MIN,
     };
 
-    let request = RawWaitForEffectsRequest::try_from(WaitForEffectsRequest {
-        transaction_digest: tx_digest,
+    let request = WaitForEffectsRequest {
+        transaction_digest: Some(tx_digest),
         consensus_position: Some(tx_position),
         include_details: true,
-    })
-    .unwrap();
+        ping_type: None,
+    };
 
     let response = test_context.client.wait_for_effects(request, None).await;
 
@@ -235,8 +238,8 @@ async fn test_wait_for_effects_timeout() {
 }
 
 #[tokio::test]
-async fn test_wait_for_effects_quorum_rejected() {
-    // This test exercises the path where the transaction is rejected by a quorum in consensus.
+async fn test_wait_for_effects_consensus_rejected_validator_rejected() {
+    // This test exercises the path where the transaction is rejected by both consensus and the validator.
     let test_context = TestContext::new().await;
 
     let transaction = test_context.build_test_transaction();
@@ -247,12 +250,12 @@ async fn test_wait_for_effects_quorum_rejected() {
         index: TransactionIndex::MIN,
     };
 
-    let request = RawWaitForEffectsRequest::try_from(WaitForEffectsRequest {
-        transaction_digest: tx_digest,
+    let request = WaitForEffectsRequest {
+        transaction_digest: Some(tx_digest),
         consensus_position: Some(tx_position),
         include_details: true,
-    })
-    .unwrap();
+        ping_type: None,
+    };
 
     let state_clone = test_context.state.clone();
     tokio::spawn(async move {
@@ -261,11 +264,12 @@ async fn test_wait_for_effects_quorum_rejected() {
         epoch_store.set_consensus_tx_status(tx_position, ConsensusTxStatus::Rejected);
         epoch_store.set_rejection_vote_reason(
             tx_position,
-            &SuiError::UserInputError {
+            &SuiErrorKind::UserInputError {
                 error: UserInputError::TransactionDenied {
                     error: "object denied".to_string(),
                 },
-            },
+            }
+            .into(),
         );
     });
 
@@ -273,30 +277,28 @@ async fn test_wait_for_effects_quorum_rejected() {
         .client
         .wait_for_effects(request, None)
         .await
-        .unwrap()
-        .try_into()
         .unwrap();
 
     match response {
         WaitForEffectsResponse::Rejected { error } => {
             assert_eq!(
-                error,
-                SuiError::UserInputError {
+                error.map(|e| e.into_inner()),
+                Some(SuiErrorKind::UserInputError {
                     error: UserInputError::TransactionDenied {
                         error: "object denied".to_string(),
                     },
-                }
+                })
             );
         }
         _ => panic!("Expected Rejected response"),
     }
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test]
 async fn test_wait_for_effects_fastpath_certified_only() {
-    // This test exercises the path where the transaction is only fastpath certified.
-    // Waiting on effects acknowledgement should still succeed with consensus position.
-    // But it should timeout without consensus position.
+    // Without the fastpath cache, effects are always read from the regular execution cache.
+    // Even when only FastpathCertified is set (no Finalized), the outer select in
+    // wait_for_effects_response resolves via notify_read_executed_effects once the tx executes.
     let test_context = TestContext::new().await;
 
     let transaction = test_context.build_test_transaction();
@@ -313,32 +315,23 @@ async fn test_wait_for_effects_fastpath_certified_only() {
         let epoch_store = state_clone.epoch_store_for_testing();
         epoch_store.set_consensus_tx_status(tx_position, ConsensusTxStatus::FastpathCertified);
         state_clone
-            .try_execute_immediately(
-                &transaction,
-                ExecutionEnv::new().with_scheduling_source(SchedulingSource::MysticetiFastPath),
-                &epoch_store,
-            )
+            .try_execute_immediately(&transaction, ExecutionEnv::new(), &epoch_store)
             .await
             .unwrap()
             .0
     });
 
-    // -------- First, test getting effects acknowledgement with consensus position. --------
-
-    let request = RawWaitForEffectsRequest::try_from(WaitForEffectsRequest {
-        transaction_digest: tx_digest,
+    let request = WaitForEffectsRequest {
+        transaction_digest: Some(tx_digest),
         consensus_position: Some(tx_position),
-        // Also test the case where details are not requested.
         include_details: false,
-    })
-    .unwrap();
+        ping_type: None,
+    };
 
     let response = test_context
         .client
         .wait_for_effects(request, None)
         .await
-        .unwrap()
-        .try_into()
         .unwrap();
 
     let exec_effects = exec_handle.await.unwrap();
@@ -346,25 +339,13 @@ async fn test_wait_for_effects_fastpath_certified_only() {
         WaitForEffectsResponse::Executed {
             details,
             effects_digest,
+            fast_path: _,
         } => {
             assert!(details.is_none());
             assert_eq!(effects_digest, exec_effects.digest());
         }
         _ => panic!("Expected Executed response"),
     }
-
-    // -------- Then, test getting effects acknowledgement without consensus position. --------
-
-    let request = RawWaitForEffectsRequest::try_from(WaitForEffectsRequest {
-        transaction_digest: tx_digest,
-        consensus_position: None,
-        include_details: true,
-    })
-    .unwrap();
-
-    let response = test_context.client.wait_for_effects(request, None).await;
-
-    assert!(response.is_err());
 }
 
 #[tokio::test]
@@ -381,26 +362,21 @@ async fn test_wait_for_effects_fastpath_certified_then_executed() {
         index: TransactionIndex::MIN,
     };
 
-    let request = RawWaitForEffectsRequest::try_from(WaitForEffectsRequest {
-        transaction_digest: tx_digest,
+    let request = WaitForEffectsRequest {
+        transaction_digest: Some(tx_digest),
         consensus_position: Some(tx_position),
         // Also test the case where details are not requested.
         include_details: false,
-    })
-    .unwrap();
+        ping_type: None,
+    };
 
     let state_clone = test_context.state.clone();
     let exec_handle = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let epoch_store = state_clone.epoch_store_for_testing();
-        epoch_store.set_consensus_tx_status(tx_position, ConsensusTxStatus::FastpathCertified);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        epoch_store.set_consensus_tx_status(tx_position, ConsensusTxStatus::Finalized);
         state_clone
-            .try_execute_immediately(
-                &transaction,
-                ExecutionEnv::new().with_scheduling_source(SchedulingSource::NonFastPath),
-                &epoch_store,
-            )
+            .try_execute_immediately(&transaction, ExecutionEnv::new(), &epoch_store)
             .await
             .unwrap()
             .0
@@ -410,8 +386,6 @@ async fn test_wait_for_effects_fastpath_certified_then_executed() {
         .client
         .wait_for_effects(request, None)
         .await
-        .unwrap()
-        .try_into()
         .unwrap();
 
     let exec_effects = exec_handle.await.unwrap();
@@ -419,6 +393,7 @@ async fn test_wait_for_effects_fastpath_certified_then_executed() {
         WaitForEffectsResponse::Executed {
             details,
             effects_digest,
+            fast_path: _,
         } => {
             assert!(details.is_none());
             assert_eq!(effects_digest, exec_effects.digest());
@@ -447,16 +422,9 @@ async fn test_wait_for_effects_finalized() {
     let exec_handle = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let epoch_store = state_clone.epoch_store_for_testing();
-        epoch_store.set_consensus_tx_status(tx_position, ConsensusTxStatus::FastpathCertified);
-        tokio::time::sleep(Duration::from_millis(100)).await;
         epoch_store.set_consensus_tx_status(tx_position, ConsensusTxStatus::Finalized);
-        tokio::time::sleep(Duration::from_millis(100)).await;
         state_clone
-            .try_execute_immediately(
-                &transaction,
-                ExecutionEnv::new().with_scheduling_source(SchedulingSource::NonFastPath),
-                &epoch_store,
-            )
+            .try_execute_immediately(&transaction, ExecutionEnv::new(), &epoch_store)
             .await
             .unwrap()
             .0
@@ -464,20 +432,18 @@ async fn test_wait_for_effects_finalized() {
 
     // -------- First, test getting effects acknowledgement with consensus position. --------
 
-    let request = RawWaitForEffectsRequest::try_from(WaitForEffectsRequest {
-        transaction_digest: tx_digest,
+    let request = WaitForEffectsRequest {
+        transaction_digest: Some(tx_digest),
         consensus_position: Some(tx_position),
         // Also test the case where details are not requested.
         include_details: false,
-    })
-    .unwrap();
+        ping_type: None,
+    };
 
     let response = test_context
         .client
         .wait_for_effects(request, None)
         .await
-        .unwrap()
-        .try_into()
         .unwrap();
 
     let exec_effects = exec_handle.await.unwrap();
@@ -485,6 +451,7 @@ async fn test_wait_for_effects_finalized() {
         WaitForEffectsResponse::Executed {
             details,
             effects_digest,
+            fast_path: _,
         } => {
             assert!(details.is_none());
             assert_eq!(effects_digest, exec_effects.digest());
@@ -494,25 +461,24 @@ async fn test_wait_for_effects_finalized() {
 
     // -------- Then, test getting full effects without consensus position. --------
 
-    let request = RawWaitForEffectsRequest::try_from(WaitForEffectsRequest {
-        transaction_digest: tx_digest,
+    let request = WaitForEffectsRequest {
+        transaction_digest: Some(tx_digest),
         consensus_position: None,
         include_details: true,
-    })
-    .unwrap();
+        ping_type: None,
+    };
 
     let response = test_context
         .client
         .wait_for_effects(request, None)
         .await
-        .unwrap()
-        .try_into()
         .unwrap();
 
     match response {
         WaitForEffectsResponse::Executed {
             details,
             effects_digest,
+            fast_path: _,
         } => {
             let details = details.unwrap();
             assert_eq!(effects_digest, exec_effects.digest());
@@ -529,37 +495,43 @@ async fn test_wait_for_effects_expired() {
 
     let transaction = test_context.build_test_transaction();
     let tx_digest = *transaction.digest();
+    let block_round = 3;
     let tx_position = ConsensusPosition {
         epoch: EpochId::MIN,
-        block: BlockRef::MIN,
+        block: BlockRef {
+            round: block_round,
+            ..BlockRef::MIN
+        },
         index: TransactionIndex::MIN,
     };
 
-    let request = RawWaitForEffectsRequest::try_from(WaitForEffectsRequest {
-        transaction_digest: tx_digest,
+    let request = WaitForEffectsRequest {
+        transaction_digest: Some(tx_digest),
         consensus_position: Some(tx_position),
         include_details: true,
-    })
-    .unwrap();
+        ping_type: None,
+    };
 
     let state_clone = test_context.state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let epoch_store = state_clone.epoch_store_for_testing();
-        epoch_store
-            .consensus_tx_status_cache
-            .as_ref()
-            .unwrap()
-            .update_last_committed_leader_round(CONSENSUS_STATUS_RETENTION_ROUNDS + 1)
+        let cache = epoch_store.consensus_tx_status_cache.as_ref().unwrap();
+
+        // Initialize the last committed leader round.
+        cache
+            .update_last_committed_leader_round(CONSENSUS_STATUS_RETENTION_ROUNDS + block_round)
             .await;
+
+        // Update that will actually trigger expiration using the leader round, CONSENSUS_STATUS_RETENTION_ROUNDS + block_round
+        cache
+            .update_last_committed_leader_round(CONSENSUS_STATUS_RETENTION_ROUNDS + block_round + 1)
+            .await;
+
         tokio::time::sleep(Duration::from_millis(100)).await;
         epoch_store.set_consensus_tx_status(tx_position, ConsensusTxStatus::Finalized);
         state_clone
-            .try_execute_immediately(
-                &transaction,
-                ExecutionEnv::new().with_scheduling_source(SchedulingSource::NonFastPath),
-                &epoch_store,
-            )
+            .try_execute_immediately(&transaction, ExecutionEnv::new(), &epoch_store)
             .await
             .unwrap()
             .0
@@ -569,9 +541,151 @@ async fn test_wait_for_effects_expired() {
         .client
         .wait_for_effects(request, None)
         .await
-        .unwrap()
-        .try_into()
         .unwrap();
 
     assert!(matches!(response, WaitForEffectsResponse::Expired { .. }));
+}
+
+#[tokio::test]
+async fn test_wait_for_effects_ping() {
+    let test_context = TestContext::new().await;
+
+    println!(
+        "Case 1. Send a FastPath ping request. The end point should wait until the block is certified via MFP (we assume the ping transaction is in the block)."
+    );
+    {
+        let tx_position = ConsensusPosition {
+            epoch: EpochId::MIN,
+            block: BlockRef::MIN,
+            index: PING_TRANSACTION_INDEX,
+        };
+
+        let request = WaitForEffectsRequest {
+            transaction_digest: None,
+            consensus_position: Some(tx_position),
+            include_details: false,
+            ping_type: Some(PingType::FastPath),
+        };
+
+        let state_clone = test_context.state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let epoch_store = state_clone.epoch_store_for_testing();
+            epoch_store.set_consensus_tx_status(tx_position, ConsensusTxStatus::FastpathCertified);
+        });
+
+        let response = test_context
+            .client
+            .wait_for_effects(request, None)
+            .await
+            .unwrap();
+
+        match response {
+            WaitForEffectsResponse::Executed {
+                effects_digest,
+                details,
+                fast_path,
+            } => {
+                assert!(details.is_none());
+                assert_eq!(effects_digest, TransactionEffectsDigest::ZERO);
+                assert!(fast_path);
+            }
+            _ => panic!("Expected Executed response for FastPath ping check"),
+        }
+    }
+
+    println!(
+        "Case 2. Send a Consensus ping request. The end point should wait for the transaction is finalised via Consensus."
+    );
+    {
+        let mut block = BlockRef::MIN;
+        block.round = 5;
+        let tx_position = ConsensusPosition {
+            epoch: EpochId::MIN,
+            block,
+            index: TransactionIndex::MIN,
+        };
+
+        let request = WaitForEffectsRequest {
+            transaction_digest: None,
+            consensus_position: Some(tx_position),
+            include_details: false,
+            ping_type: Some(PingType::Consensus),
+        };
+
+        let state_clone = test_context.state.clone();
+        tokio::spawn(async move {
+            let epoch_store = state_clone.epoch_store_for_testing();
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            epoch_store.set_consensus_tx_status(tx_position, ConsensusTxStatus::Finalized);
+        });
+
+        let response = test_context
+            .client
+            .wait_for_effects(request, None)
+            .await
+            .unwrap();
+
+        match response {
+            WaitForEffectsResponse::Executed {
+                effects_digest,
+                details,
+                fast_path,
+            } => {
+                assert!(details.is_none());
+                assert_eq!(effects_digest, TransactionEffectsDigest::ZERO);
+                assert!(
+                    !fast_path,
+                    "This is Consensus ping request, so fast_path should be false"
+                );
+            }
+            _ => panic!("Expected Executed response for Consensus ping check"),
+        }
+    }
+
+    println!(
+        "Case 3. Send a Consensus ping request but the corresponding block gets garbage collected and never committed."
+    );
+    {
+        let mut block = BlockRef::MIN;
+        block.round = 10;
+        let tx_position = ConsensusPosition {
+            epoch: EpochId::MIN,
+            block,
+            index: TransactionIndex::MIN,
+        };
+
+        let request = WaitForEffectsRequest {
+            transaction_digest: None,
+            consensus_position: Some(tx_position),
+            include_details: false,
+            ping_type: Some(PingType::Consensus),
+        };
+
+        let state_clone = test_context.state.clone();
+        tokio::spawn(async move {
+            let epoch_store = state_clone.epoch_store_for_testing();
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let consensus_tx_status_cache = epoch_store.consensus_tx_status_cache.as_ref().unwrap();
+            consensus_tx_status_cache
+                .update_last_committed_leader_round(CONSENSUS_STATUS_RETENTION_ROUNDS + 10)
+                .await;
+            consensus_tx_status_cache
+                .update_last_committed_leader_round(CONSENSUS_STATUS_RETENTION_ROUNDS + 11)
+                .await;
+        });
+
+        let response = test_context
+            .client
+            .wait_for_effects(request, None)
+            .await
+            .unwrap();
+
+        match response {
+            WaitForEffectsResponse::Expired { .. } => {}
+            _ => panic!("Expected Expired response"),
+        }
+    }
 }

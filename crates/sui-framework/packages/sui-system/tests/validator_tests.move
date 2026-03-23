@@ -4,9 +4,8 @@
 #[test_only]
 module sui_system::validator_tests;
 
-use std::unit_test::assert_eq;
+use std::unit_test::{assert_eq, destroy};
 use sui::balance;
-use sui::test_utils;
 use sui::url;
 use sui_system::staking_pool::StakedSui;
 use sui_system::test_runner;
@@ -98,15 +97,15 @@ fun pending_validator_flow() {
 #[test]
 fun metadata() {
     let ctx = &mut tx_context::dummy();
-    let metadata = validator_builder::preset().build_metadata(ctx);
+    let metadata = validator_builder::preset(0).build_metadata(ctx);
     metadata.validate();
-    test_utils::destroy(metadata);
+    destroy(metadata);
 }
 
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidPubkey)]
 fun metadata_invalid_pubkey() {
     let ctx = &mut tx_context::dummy();
-    let metadata = validator_builder::preset()
+    let metadata = validator_builder::preset(0)
         .protocol_pubkey_bytes(b"incorrect")
         .build_metadata(ctx);
 
@@ -118,7 +117,7 @@ fun metadata_invalid_pubkey() {
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidNetPubkey)]
 fun metadata_invalid_net_pubkey() {
     let ctx = &mut tx_context::dummy();
-    let metadata = validator_builder::preset()
+    let metadata = validator_builder::preset(0)
         .network_pubkey_bytes(b"incorrect")
         .build_metadata(ctx);
 
@@ -130,7 +129,7 @@ fun metadata_invalid_net_pubkey() {
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidWorkerPubkey)]
 fun metadata_invalid_worker_pubkey() {
     let ctx = &mut tx_context::dummy();
-    let metadata = validator_builder::preset()
+    let metadata = validator_builder::preset(0)
         .worker_pubkey_bytes(b"incorrect")
         .build_metadata(ctx);
 
@@ -142,7 +141,7 @@ fun metadata_invalid_worker_pubkey() {
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidNetAddr)]
 fun metadata_invalid_net_addr() {
     let ctx = &mut tx_context::dummy();
-    let metadata = validator_builder::preset().net_address(b"incorrect").build_metadata(ctx);
+    let metadata = validator_builder::preset(0).net_address(b"incorrect").build_metadata(ctx);
 
     metadata.validate();
 
@@ -152,7 +151,7 @@ fun metadata_invalid_net_addr() {
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidP2pAddr)]
 fun metadata_invalid_p2p_addr() {
     let ctx = &mut tx_context::dummy();
-    let metadata = validator_builder::preset().p2p_address(b"incorrect").build_metadata(ctx);
+    let metadata = validator_builder::preset(0).p2p_address(b"incorrect").build_metadata(ctx);
 
     metadata.validate();
 
@@ -162,7 +161,7 @@ fun metadata_invalid_p2p_addr() {
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidPrimaryAddr)]
 fun metadata_invalid_consensus_addr() {
     let ctx = &mut tx_context::dummy();
-    let metadata = validator_builder::preset().primary_address(b"incorrect").build_metadata(ctx);
+    let metadata = validator_builder::preset(0).primary_address(b"incorrect").build_metadata(ctx);
 
     metadata.validate();
 
@@ -172,9 +171,44 @@ fun metadata_invalid_consensus_addr() {
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidWorkerAddr)]
 fun metadata_invalid_worker_addr() {
     let ctx = &mut tx_context::dummy();
-    let metadata = validator_builder::preset().worker_address(b"incorrect").build_metadata(ctx);
+    let metadata = validator_builder::preset(0).worker_address(b"incorrect").build_metadata(ctx);
 
     metadata.validate();
+
+    abort
+}
+
+#[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidNetPubkey)]
+fun metadata_invalid_equal_network_pubkey_next_epoch() {
+    let ctx = &mut tx_context::dummy();
+    let mut validator = validator_builder::preset(0).build(ctx);
+    let pubkey_bytes = *validator.worker_pubkey_bytes();
+
+    validator.update_next_epoch_network_pubkey(pubkey_bytes);
+
+    abort
+}
+
+#[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidWorkerPubkey)]
+fun metadata_invalid_equal_worker_pubkey_next_epoch() {
+    let ctx = &mut tx_context::dummy();
+    let mut validator = validator_builder::preset(0).build(ctx);
+    let pubkey_bytes = *validator.network_pubkey_bytes();
+
+    validator.update_next_epoch_worker_pubkey(pubkey_bytes);
+
+    abort
+}
+
+#[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidWorkerPubkey)]
+fun metadata_invalid_equal_both_pubkey_next_epoch() {
+    let ctx = &mut tx_context::dummy();
+    let mut validator = validator_builder::preset(0).build(ctx);
+    let mut pubkey_bytes = *validator.network_pubkey_bytes();
+    *pubkey_bytes.borrow_mut(0) = 0;
+
+    validator.update_next_epoch_network_pubkey(pubkey_bytes);
+    validator.update_next_epoch_worker_pubkey(pubkey_bytes);
 
     abort
 }
@@ -192,7 +226,7 @@ fun validator_update_metadata_ok() {
     let new_network_pub_key = vector[149, 128, 161, 13, 11, 183, 96, 45, 89, 20, 188, 205, 26, 127, 147, 254, 184, 229, 184, 102, 64, 170, 104, 29, 191, 171, 91, 99, 58, 178, 41, 156];
 
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     // perform updates
     validator.update_next_epoch_network_address(b"/ip4/192.168.1.1/tcp/80");
@@ -256,13 +290,13 @@ fun validator_update_metadata_ok() {
         validator.next_epoch_network_pubkey_bytes().is_some_and!(|key| key == new_network_pub_key),
     );
 
-    test_utils::destroy(validator);
+    destroy(validator);
 }
 
 #[test, expected_failure(abort_code = sui_system::validator::EInvalidProofOfPossession)]
 fun validator_update_metadata_invalid_proof_of_possession() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_next_epoch_protocol_pubkey(
         x"96d19c53f1bee2158c3fcfb5bb2f06d3a8237667529d2d8f0fbb22fe5c3b3e64748420b4103674490476d98530d063271222d2a59b0f7932909cc455a30f00c69380e6885375e94243f7468e9563aad29330aca7ab431927540e9508888f0e1c",
@@ -275,7 +309,7 @@ fun validator_update_metadata_invalid_proof_of_possession() {
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidNetPubkey)]
 fun validator_update_metadata_invalid_network_key() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_next_epoch_network_pubkey(x"beef");
 
@@ -285,7 +319,7 @@ fun validator_update_metadata_invalid_network_key() {
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidWorkerPubkey)]
 fun validator_update_metadata_invalid_worker_key() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_next_epoch_worker_pubkey(x"beef");
 
@@ -295,7 +329,7 @@ fun validator_update_metadata_invalid_worker_key() {
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidNetAddr)]
 fun validator_update_metadata_invalid_network_addr() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_next_epoch_network_address(b"beef");
 
@@ -305,7 +339,7 @@ fun validator_update_metadata_invalid_network_addr() {
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidPrimaryAddr)]
 fun validator_update_metadata_invalid_primary_addr() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_next_epoch_primary_address(b"beef");
 
@@ -315,7 +349,7 @@ fun validator_update_metadata_invalid_primary_addr() {
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidWorkerAddr)]
 fun validator_update_metadata_invalid_worker_addr() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_next_epoch_worker_address(b"beef");
 
@@ -325,7 +359,7 @@ fun validator_update_metadata_invalid_worker_addr() {
 #[test, expected_failure(abort_code = sui_system::validator::EMetadataInvalidP2pAddr)]
 fun validator_update_metadata_invalid_p2p_address() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_next_epoch_p2p_address(b"beef");
 
@@ -340,7 +374,7 @@ fun validator_update_metadata_invalid_p2p_address() {
 ]
 fun validator_update_metadata_primary_address_too_long() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_next_epoch_primary_address(vector::tabulate!(257, |_| 0));
     abort
@@ -354,7 +388,7 @@ fun validator_update_metadata_primary_address_too_long() {
 ]
 fun validator_update_metadata_net_address_too_long() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_next_epoch_network_address(vector::tabulate!(257, |_| 0));
 
@@ -369,7 +403,7 @@ fun validator_update_metadata_net_address_too_long() {
 ]
 fun validator_update_metadata_worker_address_too_long() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_next_epoch_worker_address(vector::tabulate!(257, |_| 0));
 
@@ -384,7 +418,7 @@ fun validator_update_metadata_worker_address_too_long() {
 ]
 fun validator_update_metadata_p2p_address_too_long() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_next_epoch_p2p_address(vector::tabulate!(257, |_| 0));
 
@@ -399,7 +433,7 @@ fun validator_update_metadata_p2p_address_too_long() {
 ]
 fun validator_update_name_too_long() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_name(vector::tabulate!(257, |_| 0));
 
@@ -414,7 +448,7 @@ fun validator_update_name_too_long() {
 ]
 fun validator_update_description_too_long() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_description(vector::tabulate!(257, |_| 0));
 
@@ -429,7 +463,7 @@ fun validator_update_description_too_long() {
 ]
 fun validator_update_project_url_too_long() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_project_url(vector::tabulate!(257, |_| 0));
 
@@ -444,7 +478,7 @@ fun validator_update_project_url_too_long() {
 ]
 fun validator_update_image_url_too_long() {
     let ctx = &mut tx_context::dummy();
-    let mut validator = validator_builder::preset().build(ctx);
+    let mut validator = validator_builder::preset(0).build(ctx);
 
     validator.update_image_url(vector::tabulate!(257, |_| 0));
 

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    FullyCompiledProgram,
+    PreCompiledProgramInfo,
     cfgir::{
         self,
         ast::{self as G, BasicBlock, BasicBlocks, BlockInfo},
@@ -155,7 +155,7 @@ impl<'env> Context<'env> {
 
 pub fn program(
     compilation_env: &CompilationEnv,
-    _pre_compiled_lib: Option<Arc<FullyCompiledProgram>>,
+    pre_compiled_program: Option<Arc<PreCompiledProgramInfo>>,
     prog: H::Program,
 ) -> G::Program {
     let H::Program {
@@ -174,7 +174,7 @@ pub fn program(
         warning_filters_table,
         info: info.clone(),
     };
-    visit_program(&mut context, &mut program);
+    visit_program(&mut context, pre_compiled_program, &mut program);
     program
 }
 
@@ -261,10 +261,11 @@ fn constants(
     let mut graph = DiGraphMap::<ConstantName, ()>::new();
     for (name, constant) in consts.key_cloned_iter() {
         let deps = dependent_constants(constant);
-        if deps.is_empty() {
-            graph.add_node(name);
-        } else {
-            for dep in deps {
+        graph.add_node(name);
+        for dep in deps {
+            // Only add edges for constants defined in this module; cross-module constants
+            // are already resolved and don't need dependency tracking here.
+            if consts.contains_key(&dep) {
                 graph.add_edge(dep, name, ());
             }
         }
@@ -274,7 +275,18 @@ fn constants(
     let sccs = petgraph_scc(&graph);
     let mut cycle_nodes = BTreeSet::new();
     for scc in sccs {
-        if scc.len() > 1 {
+        // An SCC of size 1 is only a cycle if the node has a self-edge.
+        if scc.len() == 1 && graph.contains_edge(scc[0], scc[0]) {
+            let name = scc[0];
+            context.add_diag(diag!(
+                CodeGeneration::UnfoldableConstant,
+                (
+                    *consts.get_loc(&name).unwrap(),
+                    format!("Constant '{}' references itself", name),
+                )
+            ));
+            cycle_nodes.insert(name);
+        } else if scc.len() > 1 {
             let names = scc
                 .iter()
                 .map(|name| name.to_string())
@@ -527,6 +539,7 @@ fn constant_(
     let fake_infinite_loop_starts = BTreeSet::new();
     let function_context = super::CFGContext {
         env: context.env,
+        pre_compiled_program: None,
         reporter: &context.reporter,
         info: context.info,
         package: context.current_package,
@@ -701,6 +714,7 @@ fn function_body(
 
             let function_context = super::CFGContext {
                 env: context.env,
+                pre_compiled_program: None,
                 reporter: &context.reporter,
                 info: context.info,
                 package: context.current_package,
@@ -1045,24 +1059,29 @@ fn destructure_tuple<T, U>((fst, snd): &(T, U)) -> (&T, &U) {
 // Visitors
 //**************************************************************************************************
 
-fn visit_program(context: &mut Context, prog: &mut G::Program) {
+fn visit_program(
+    context: &mut Context,
+    pre_compiled_program: Option<Arc<PreCompiledProgramInfo>>,
+    prog: &mut G::Program,
+) {
     if context.env.visitors().abs_int.is_empty() && context.env.visitors().cfgir.is_empty() {
         return;
     }
 
-    AbsintVisitor.visit(context.env, prog);
+    AbsintVisitor.visit(context.env, pre_compiled_program.clone(), prog);
 
     context
         .env
         .visitors()
         .cfgir
         .par_iter()
-        .for_each(|v| v.visit(context.env, prog));
+        .for_each(|v| v.visit(context.env, pre_compiled_program.clone(), prog));
 }
 
 struct AbsintVisitor;
 struct AbsintVisitorContext<'a> {
     env: &'a CompilationEnv,
+    pre_compiled_program: Option<Arc<PreCompiledProgramInfo>>,
     reporter: DiagnosticReporter<'a>,
     info: Arc<TypingProgramInfo>,
     current_package: Option<Symbol>,
@@ -1071,10 +1090,15 @@ struct AbsintVisitorContext<'a> {
 impl CFGIRVisitorConstructor for AbsintVisitor {
     type Context<'a> = AbsintVisitorContext<'a>;
 
-    fn context<'a>(env: &'a CompilationEnv, program: &G::Program) -> Self::Context<'a> {
+    fn context<'a>(
+        env: &'a CompilationEnv,
+        pre_compiled_program: Option<Arc<PreCompiledProgramInfo>>,
+        program: &G::Program,
+    ) -> Self::Context<'a> {
         let reporter = env.diagnostic_reporter_at_top_level();
         AbsintVisitorContext {
             env,
+            pre_compiled_program,
             reporter,
             info: program.info.clone(),
             current_package: None,
@@ -1136,6 +1160,7 @@ impl CFGIRVisitorContext for AbsintVisitorContext<'_> {
         let (cfg, infinite_loop_starts) = ImmForwardCFG::new(*start, blocks, block_info.iter());
         let function_context = super::CFGContext {
             env: self.env,
+            pre_compiled_program: self.pre_compiled_program.clone(),
             reporter: &self.reporter,
             info: &self.info,
             package: self.current_package,

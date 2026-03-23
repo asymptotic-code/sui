@@ -5,8 +5,8 @@ use crate::monitored_scope;
 use futures::FutureExt;
 use parking_lot::Mutex;
 use prometheus::{
-    register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry, IntCounterVec,
-    IntGaugeVec, Registry,
+    IntCounterVec, IntGaugeVec, Registry, register_int_counter_vec_with_registry,
+    register_int_gauge_vec_with_registry,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -193,7 +193,7 @@ impl Histogram {
         }
     }
 
-    pub fn start_timer(&self) -> HistogramTimerGuard {
+    pub fn start_timer(&self) -> HistogramTimerGuard<'_> {
         HistogramTimerGuard {
             histogram: self,
             start: Instant::now(),
@@ -248,7 +248,10 @@ impl HistogramCollector {
         }
         if Arc::strong_count(&self.reporter) != 1 {
             #[cfg(not(debug_assertions))]
-            error!("Histogram data overflow - we receive histogram data for {} faster then can process. Some histogram data is dropped", self._name);
+            error!(
+                "Histogram data overflow - we receive histogram data for {} faster then can process. Some histogram data is dropped",
+                self._name
+            );
         } else {
             let reporter = self.reporter.clone();
             Handle::current().spawn_blocking(move || reporter.lock().report(labeled_data));
@@ -364,7 +367,7 @@ mod tests {
         let gather = registry.gather();
         let gather: HashMap<_, _> = gather
             .into_iter()
-            .map(|f| (f.get_name().to_string(), f))
+            .map(|f| (f.name().to_string(), f))
             .collect();
         let hist = gather.get("test").unwrap();
         let sum = gather.get("test_sum").unwrap();
@@ -389,11 +392,11 @@ mod tests {
             .get_metric()
             .iter()
             .map(|m| {
-                let value = m.get_gauge().get_value();
+                let value = m.gauge.value();
                 let mut key = String::new();
                 for label in m.get_label() {
                     key.push_str("::");
-                    key.push_str(label.get_value());
+                    key.push_str(label.value());
                 }
                 (key, value)
             })
@@ -405,11 +408,11 @@ mod tests {
             .get_metric()
             .iter()
             .map(|m| {
-                let value = m.get_counter().get_value();
+                let value = m.counter.value();
                 let mut key = String::new();
                 for label in m.get_label() {
                     key.push_str("::");
-                    key.push_str(label.get_value());
+                    key.push_str(label.value());
                 }
                 (key, value)
             })

@@ -5,18 +5,20 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use move_binary_format::CompiledModule;
 use move_bytecode_utils::module_cache::GetModule;
+use move_core_types::account_address::AccountAddress;
+use move_core_types::resolver::SerializedPackage;
 use move_core_types::{language_storage::ModuleId, resolver::ModuleResolver};
 use simulacrum::Simulacrum;
 use std::num::NonZeroUsize;
 use sui_config::genesis;
-use sui_protocol_config::ProtocolVersion;
+use sui_protocol_config::ProtocolConfig;
 use sui_swarm_config::genesis_config::AccountConfig;
-use sui_swarm_config::network_config_builder::ConfigBuilder;
+use sui_swarm_config::network_config_builder::{ConfigBuilder, KeyPairWrapper};
+use sui_types::error::SuiErrorKind;
 use sui_types::storage::{ReadStore, RpcStateReader};
 use sui_types::{
     base_types::{ObjectID, SequenceNumber, SuiAddress, VersionNumber},
     committee::{Committee, EpochId},
-    crypto::AccountKeyPair,
     digests::{ObjectDigest, TransactionDigest},
     effects::{TransactionEffects, TransactionEffectsAPI, TransactionEvents},
     error::{SuiError, UserInputError},
@@ -26,8 +28,8 @@ use sui_types::{
     },
     object::{Object, Owner},
     storage::{
-        load_package_object_from_object_store, BackingPackageStore, ChildObjectResolver,
-        ObjectStore, PackageObject, ParentSync,
+        BackingPackageStore, ChildObjectResolver, ObjectStore, PackageObject, ParentSync,
+        load_package_object_from_object_store,
     },
     transaction::VerifiedTransaction,
 };
@@ -103,26 +105,28 @@ impl PersistedStore {
     pub fn new_sim_replica_with_protocol_version_and_accounts<R>(
         mut rng: R,
         chain_start_timestamp_ms: u64,
-        protocol_version: ProtocolVersion,
+        protocol_config: &ProtocolConfig,
         account_configs: Vec<AccountConfig>,
-        validator_keys: Option<Vec<AccountKeyPair>>,
+        key_pair_wrappers: Vec<KeyPairWrapper>,
         reference_gas_price: Option<u64>,
         path: Option<PathBuf>,
     ) -> (Simulacrum<R, Self>, PersistedStoreInnerReadOnlyWrapper)
     where
         R: rand::RngCore + rand::CryptoRng,
     {
+        let leaked: &'static ProtocolConfig = Box::leak(Box::new(protocol_config.clone()));
+        let _override_guard = ProtocolConfig::apply_overrides_for_testing(|_, _| leaked.clone());
         let path: PathBuf = path.unwrap_or(tempdir().unwrap().keep());
 
         let mut builder = ConfigBuilder::new_with_temp_dir()
             .rng(&mut rng)
             .with_chain_start_timestamp_ms(chain_start_timestamp_ms)
             .deterministic_committee_size(NonZeroUsize::new(1).unwrap())
-            .with_protocol_version(protocol_version)
+            .with_protocol_version(protocol_config.version)
             .with_accounts(account_configs);
 
-        if let Some(validator_keys) = validator_keys {
-            builder = builder.deterministic_committee_validators(validator_keys)
+        if !key_pair_wrappers.is_empty() {
+            builder = builder.deterministic_committee_validators(key_pair_wrappers)
         };
         if let Some(reference_gas_price) = reference_gas_price {
             builder = builder.with_reference_gas_price(reference_gas_price)
@@ -143,7 +147,7 @@ impl PersistedStore {
     pub fn new_sim_with_protocol_version_and_accounts<R>(
         rng: R,
         chain_start_timestamp_ms: u64,
-        protocol_version: ProtocolVersion,
+        protocol_config: &ProtocolConfig,
         account_configs: Vec<AccountConfig>,
         path: Option<PathBuf>,
     ) -> Simulacrum<R, Self>
@@ -153,9 +157,9 @@ impl PersistedStore {
         Self::new_sim_replica_with_protocol_version_and_accounts(
             rng,
             chain_start_timestamp_ms,
-            protocol_version,
+            protocol_config,
             account_configs,
-            None,
+            vec![],
             None,
             path,
         )
@@ -411,18 +415,20 @@ impl ChildObjectResolver for PersistedStore {
 
         let parent = *parent;
         if child_object.owner != Owner::ObjectOwner(parent.into()) {
-            return Err(SuiError::InvalidChildObjectAccess {
+            return Err(SuiErrorKind::InvalidChildObjectAccess {
                 object: *child,
                 given_parent: parent,
                 actual_owner: child_object.owner.clone(),
-            });
+            }
+            .into());
         }
 
         if child_object.version() > child_version_upper_bound {
-            return Err(SuiError::UnsupportedFeatureError {
+            return Err(SuiErrorKind::UnsupportedFeatureError {
                 error: "TODO InMemoryStorage::read_child_object does not yet support bounded reads"
                     .to_owned(),
-            });
+            }
+            .into());
         }
 
         Ok(Some(child_object))
@@ -474,6 +480,32 @@ impl ModuleResolver for PersistedStore {
                     .get(module_id.name().as_str())
                     .cloned()
             }))
+    }
+
+    fn get_packages_static<const N: usize>(
+        &self,
+        ids: [AccountAddress; N],
+    ) -> Result<[Option<SerializedPackage>; N], Self::Error> {
+        let mut packages = [const { None }; N];
+        for (i, id) in ids.iter().enumerate() {
+            packages[i] = self
+                .get_package_object(&ObjectID::from(*id))?
+                .map(|pkg| pkg.move_package().into_serialized_move_package())
+                .transpose()?;
+        }
+        Ok(packages)
+    }
+
+    fn get_packages<'a>(
+        &self,
+        ids: impl ExactSizeIterator<Item = &'a AccountAddress>,
+    ) -> Result<Vec<Option<SerializedPackage>>, Self::Error> {
+        ids.map(|id| {
+            let pkg = self.get_package_object(&ObjectID::from(*id))?;
+            pkg.map(|pkg| pkg.move_package().into_serialized_move_package())
+                .transpose()
+        })
+        .collect()
     }
 }
 
@@ -535,7 +567,7 @@ impl ReadStore for PersistedStoreInnerReadOnlyWrapper {
             .next()
             .transpose()?
             .map(|(_, checkpoint)| checkpoint.into())
-            .ok_or(SuiError::UserInputError {
+            .ok_or(SuiErrorKind::UserInputError {
                 error: UserInputError::LatestCheckpointSequenceNumberNotFound,
             })
             .map_err(sui_types::storage::error::Error::custom)
@@ -622,8 +654,22 @@ impl ReadStore for PersistedStoreInnerReadOnlyWrapper {
         &self,
         _sequence_number: Option<CheckpointSequenceNumber>,
         _digest: &CheckpointContentsDigest,
-    ) -> Option<sui_types::messages_checkpoint::FullCheckpointContents> {
+    ) -> Option<sui_types::messages_checkpoint::VersionedFullCheckpointContents> {
         todo!()
+    }
+
+    fn get_unchanged_loaded_runtime_objects(
+        &self,
+        _digest: &TransactionDigest,
+    ) -> Option<Vec<sui_types::storage::ObjectKey>> {
+        None
+    }
+
+    fn get_transaction_checkpoint(
+        &self,
+        _digest: &TransactionDigest,
+    ) -> Option<CheckpointSequenceNumber> {
+        None
     }
 }
 
@@ -644,9 +690,10 @@ impl RpcStateReader for PersistedStoreInnerReadOnlyWrapper {
         None
     }
 
-    fn get_struct_layout(
+    fn get_struct_layout_with_overlay(
         &self,
         _: &move_core_types::language_storage::StructTag,
+        _overlay: &sui_types::full_checkpoint_content::ObjectSet,
     ) -> sui_types::storage::error::Result<Option<move_core_types::annotated_value::MoveTypeLayout>>
     {
         Ok(None)
@@ -679,15 +726,16 @@ impl Clone for PersistedStoreInnerReadOnlyWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
 
     #[tokio::test]
     async fn deterministic_genesis() {
+        let protocol_config = ProtocolConfig::get_for_max_version_UNSAFE();
         let rng = StdRng::from_seed([9; 32]);
         let chain1 = PersistedStore::new_sim_with_protocol_version_and_accounts(
             rng,
             0,
-            ProtocolVersion::MAX,
+            &protocol_config,
             vec![],
             None,
         );
@@ -701,7 +749,7 @@ mod tests {
         let chain2 = PersistedStore::new_sim_with_protocol_version_and_accounts(
             rng,
             0,
-            ProtocolVersion::MAX,
+            &protocol_config,
             vec![],
             None,
         );
@@ -718,7 +766,7 @@ mod tests {
         let chain3 = PersistedStore::new_sim_with_protocol_version_and_accounts(
             rng,
             0,
-            ProtocolVersion::MAX,
+            &protocol_config,
             vec![],
             None,
         );

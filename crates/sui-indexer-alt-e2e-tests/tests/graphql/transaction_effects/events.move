@@ -1,32 +1,33 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//# init --protocol-version 70 --accounts A B --addresses test=0x0 --simulator
+//# init --protocol-version 108 --accounts A B --addresses test=0x0 --simulator
 
 //# publish
 module test::events_test {
+    use std::ascii;
     use sui::event;
 
     public struct TestEvent has copy, drop {
-        message: vector<u8>,
+        message: ascii::String,
         value: u64,
     }
 
     public entry fun emit_event(value: u64) {
         event::emit(TestEvent {
-            message: b"Hello from test event",
+            message: ascii::string(b"Hello from test event"),
             value,
         });
     }
 
     public entry fun emit_multiple_events() {
         event::emit(TestEvent {
-            message: b"First event",
+            message: ascii::string(b"First event"),
             value: 1,
         });
 
         event::emit(TestEvent {
-            message: b"Second event",
+            message: ascii::string(b"Second event"),
             value: 2,
         });
     }
@@ -60,8 +61,16 @@ module test::events_test {
         sequenceNumber
         timestamp
         eventBcs
+        contents {
+          type { repr }
+          json
+        }
         transaction {
           digest
+        }
+        transactionModule {
+          package { address }
+          name
         }
       }
     }
@@ -83,8 +92,16 @@ module test::events_test {
         sequenceNumber
         timestamp
         eventBcs
+        contents {
+          type { repr }
+          json
+        }
         transaction {
           digest
+        }
+        transactionModule {
+          package { address }
+          name
         }
       }
     }
@@ -106,8 +123,16 @@ module test::events_test {
         sequenceNumber
         timestamp
         eventBcs
+        contents {
+          type { repr }
+          json
+        }
         transaction {
           digest
+        }
+        transactionModule {
+          package { address }
+          name
         }
       }
     }
@@ -129,8 +154,16 @@ module test::events_test {
         sequenceNumber
         timestamp
         eventBcs
+        contents {
+          type { repr }
+          json
+        }
         transaction {
           digest
+        }
+        transactionModule {
+          package { address }
+          name
         }
       }
     }
@@ -152,9 +185,32 @@ module test::events_test {
         sequenceNumber
         timestamp
         eventBcs
+        contents {
+          type { repr }
+          json
+        }
         transaction {
           digest
         }
+        transactionModule {
+          package { address }
+          name
+        }
+      }
+    }
+  }
+}
+
+//# run-graphql --cursors 1000 2000
+{ # Test cursors being out of bounds
+  outOfBounds: transactionEffects(digest: "@{digest_3}") {
+    events(after: "@{cursor_0}", before: "@{cursor_1}") {
+      pageInfo {
+        hasNextPage
+        hasPreviousPage
+      }
+      nodes {
+        sequenceNumber
       }
     }
   }

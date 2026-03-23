@@ -8,18 +8,18 @@ use std::time::Duration;
 use fastcrypto::encoding::{Encoding, Hex};
 use fastcrypto::traits::KeyPair;
 use sui_config::node::{
-    default_enable_index_processing, default_end_of_epoch_broadcast_channel_capacity,
     AuthorityKeyPairWithPath, AuthorityOverloadConfig, AuthorityStorePruningConfig,
-    CheckpointExecutorConfig, DBCheckpointConfig, ExecutionCacheConfig,
-    ExecutionTimeObserverConfig, ExpensiveSafetyCheckConfig, Genesis, KeyPairWithPath,
-    StateSnapshotConfig, DEFAULT_GRPC_CONCURRENCY_LIMIT,
+    CheckpointExecutorConfig, DBCheckpointConfig, DEFAULT_GRPC_CONCURRENCY_LIMIT,
+    ExecutionCacheConfig, ExecutionTimeObserverConfig, ExpensiveSafetyCheckConfig,
+    FundsWithdrawSchedulerType, Genesis, KeyPairWithPath, StateSnapshotConfig,
+    default_enable_index_processing, default_end_of_epoch_broadcast_channel_capacity,
 };
-use sui_config::node::{default_zklogin_oauth_providers, RunWithRange};
+use sui_config::node::{RunWithRange, TransactionDriverConfig, default_zklogin_oauth_providers};
 use sui_config::p2p::{P2pConfig, SeedPeer, StateSyncConfig};
 use sui_config::verifier_signing_config::VerifierSigningConfig;
 use sui_config::{
-    local_ip_utils, ConsensusConfig, NodeConfig, AUTHORITIES_DB_NAME, CONSENSUS_DB_NAME,
-    FULL_NODE_DB_PATH,
+    AUTHORITIES_DB_NAME, CONSENSUS_DB_NAME, ConsensusConfig, FULL_NODE_DB_PATH, NodeConfig,
+    local_ip_utils,
 };
 use sui_protocol_config::Chain;
 use sui_types::crypto::{AuthorityKeyPair, AuthorityPublicKeyBytes, NetworkKeyPair, SuiKeyPair};
@@ -46,8 +46,10 @@ pub struct ValidatorConfigBuilder {
     max_submit_position: Option<usize>,
     submit_delay_step_override_millis: Option<u64>,
     global_state_hash_v2: bool,
+    funds_withdraw_scheduler_type: FundsWithdrawSchedulerType,
     execution_time_observer_config: Option<ExecutionTimeObserverConfig>,
     chain_override: Option<Chain>,
+    state_sync_config: Option<StateSyncConfig>,
 }
 
 impl ValidatorConfigBuilder {
@@ -132,11 +134,24 @@ impl ValidatorConfigBuilder {
         self
     }
 
+    pub fn with_funds_withdraw_scheduler_type(
+        mut self,
+        scheduler_type: FundsWithdrawSchedulerType,
+    ) -> Self {
+        self.funds_withdraw_scheduler_type = scheduler_type;
+        self
+    }
+
     pub fn with_execution_time_observer_config(
         mut self,
         config: ExecutionTimeObserverConfig,
     ) -> Self {
         self.execution_time_observer_config = Some(config);
+        self
+    }
+
+    pub fn with_state_sync_config(mut self, config: StateSyncConfig) -> Self {
+        self.state_sync_config = Some(config);
         self
     }
 
@@ -164,6 +179,8 @@ impl ValidatorConfigBuilder {
             max_submit_position: self.max_submit_position,
             submit_delay_step_override_millis: self.submit_delay_step_override_millis,
             parameters: Default::default(),
+            listen_address: None,
+            external_address: None,
         };
 
         let p2p_config = P2pConfig {
@@ -176,9 +193,16 @@ impl ValidatorConfigBuilder {
             external_address: Some(validator.p2p_address),
             // Set a shorter timeout for checkpoint content download in tests, since
             // checkpoint pruning also happens much faster, and network is local.
-            state_sync: Some(StateSyncConfig {
-                checkpoint_content_timeout_ms: Some(10_000),
-                ..Default::default()
+            state_sync: Some(if let Some(mut config) = self.state_sync_config {
+                if config.checkpoint_content_timeout_ms.is_none() {
+                    config.checkpoint_content_timeout_ms = Some(10_000);
+                }
+                config
+            } else {
+                StateSyncConfig {
+                    checkpoint_content_timeout_ms: Some(10_000),
+                    ..Default::default()
+                }
             }),
             ..Default::default()
         };
@@ -208,6 +232,7 @@ impl ValidatorConfigBuilder {
             consensus_config: Some(consensus_config),
             remove_deprecated_tables: false,
             enable_index_processing: default_enable_index_processing(),
+            sync_post_process_one_tx: false,
             genesis: sui_config::node::Genesis::new(genesis),
             grpc_load_shed: None,
             grpc_concurrency_limit: Some(DEFAULT_GRPC_CONCURRENCY_LIMIT),
@@ -225,6 +250,7 @@ impl ValidatorConfigBuilder {
             name_service_registry_id: None,
             name_service_reverse_registry_id: None,
             transaction_deny_config: Default::default(),
+            dev_inspect_disabled: false,
             certificate_deny_config: Default::default(),
             state_debug_dump_config: Default::default(),
             state_archive_read_config: vec![],
@@ -247,12 +273,17 @@ impl ValidatorConfigBuilder {
             policy_config: self.policy_config,
             firewall_config: self.firewall_config,
             state_accumulator_v2: self.global_state_hash_v2,
+            funds_withdraw_scheduler_type: self.funds_withdraw_scheduler_type,
             enable_soft_bundle: true,
-            enable_validator_tx_finalizer: true,
             verifier_signing_config: VerifierSigningConfig::default(),
             enable_db_write_stall: None,
+            enable_db_sync_to_disk: None,
             execution_time_observer_config: self.execution_time_observer_config,
             chain_override_for_testing: self.chain_override,
+            validator_client_monitor_config: None,
+            fork_recovery: None,
+            transaction_driver_config: Some(TransactionDriverConfig::default()),
+            congestion_log: None,
         }
     }
 
@@ -289,7 +320,11 @@ pub struct FullnodeConfigBuilder {
     fw_config: Option<RemoteFirewallConfig>,
     data_ingestion_dir: Option<PathBuf>,
     disable_pruning: bool,
+    sync_post_process_one_tx: bool,
     chain_override: Option<Chain>,
+    transaction_driver_config: Option<TransactionDriverConfig>,
+    rpc_config: Option<sui_config::RpcConfig>,
+    state_sync_config: Option<StateSyncConfig>,
 }
 
 impl FullnodeConfigBuilder {
@@ -320,6 +355,11 @@ impl FullnodeConfigBuilder {
         self
     }
 
+    pub fn with_rpc_config(mut self, rpc_config: sui_config::RpcConfig) -> Self {
+        self.rpc_config = Some(rpc_config);
+        self
+    }
+
     pub fn with_supported_protocol_versions(mut self, versions: SupportedProtocolVersions) -> Self {
         self.supported_protocol_versions = Some(versions);
         self
@@ -340,6 +380,11 @@ impl FullnodeConfigBuilder {
         expensive_safety_check_config: ExpensiveSafetyCheckConfig,
     ) -> Self {
         self.expensive_safety_check_config = Some(expensive_safety_check_config);
+        self
+    }
+
+    pub fn with_sync_post_process_one_tx(mut self, sync: bool) -> Self {
+        self.sync_post_process_one_tx = sync;
         self
     }
 
@@ -413,6 +458,19 @@ impl FullnodeConfigBuilder {
         self
     }
 
+    pub fn with_transaction_driver_config(
+        mut self,
+        config: Option<TransactionDriverConfig>,
+    ) -> Self {
+        self.transaction_driver_config = config;
+        self
+    }
+
+    pub fn with_state_sync_config(mut self, config: StateSyncConfig) -> Self {
+        self.state_sync_config = Some(config);
+        self
+    }
+
     pub fn build<R: rand::RngCore + rand::CryptoRng>(
         self,
         rng: &mut R,
@@ -460,9 +518,16 @@ impl FullnodeConfigBuilder {
                 seed_peers,
                 // Set a shorter timeout for checkpoint content download in tests, since
                 // checkpoint pruning also happens much faster, and network is local.
-                state_sync: Some(StateSyncConfig {
-                    checkpoint_content_timeout_ms: Some(10_000),
-                    ..Default::default()
+                state_sync: Some(if let Some(mut config) = self.state_sync_config {
+                    if config.checkpoint_content_timeout_ms.is_none() {
+                        config.checkpoint_content_timeout_ms = Some(10_000);
+                    }
+                    config
+                } else {
+                    StateSyncConfig {
+                        checkpoint_content_timeout_ms: Some(10_000),
+                        ..Default::default()
+                    }
                 }),
                 ..Default::default()
             }
@@ -512,6 +577,7 @@ impl FullnodeConfigBuilder {
             consensus_config: None,
             remove_deprecated_tables: false,
             enable_index_processing: default_enable_index_processing(),
+            sync_post_process_one_tx: self.sync_post_process_one_tx,
             genesis: self.genesis.unwrap_or(sui_config::node::Genesis::new(
                 network_config.genesis.clone(),
             )),
@@ -532,6 +598,7 @@ impl FullnodeConfigBuilder {
             name_service_registry_id: None,
             name_service_reverse_registry_id: None,
             transaction_deny_config: Default::default(),
+            dev_inspect_disabled: false,
             certificate_deny_config: Default::default(),
             state_debug_dump_config: Default::default(),
             state_archive_read_config: vec![],
@@ -539,9 +606,11 @@ impl FullnodeConfigBuilder {
             indexer_max_subscriptions: Default::default(),
             transaction_kv_store_read_config: Default::default(),
             transaction_kv_store_write_config: Default::default(),
-            rpc: Some(sui_rpc_api::Config {
-                enable_indexing: Some(true),
-                ..Default::default()
+            rpc: self.rpc_config.or_else(|| {
+                Some(sui_rpc_api::Config {
+                    enable_indexing: Some(true),
+                    ..Default::default()
+                })
             }),
             // note: not used by fullnodes.
             jwk_fetch_interval_seconds: 3600,
@@ -553,13 +622,19 @@ impl FullnodeConfigBuilder {
             firewall_config: self.fw_config,
             execution_cache: ExecutionCacheConfig::default(),
             state_accumulator_v2: true,
+            funds_withdraw_scheduler_type: FundsWithdrawSchedulerType::default(),
             enable_soft_bundle: true,
-            // This is a validator specific feature.
-            enable_validator_tx_finalizer: false,
             verifier_signing_config: VerifierSigningConfig::default(),
             enable_db_write_stall: None,
+            enable_db_sync_to_disk: None,
             execution_time_observer_config: None,
             chain_override_for_testing: self.chain_override,
+            validator_client_monitor_config: None,
+            fork_recovery: None,
+            transaction_driver_config: self
+                .transaction_driver_config
+                .or(Some(TransactionDriverConfig::default())),
+            congestion_log: None,
         }
     }
 }

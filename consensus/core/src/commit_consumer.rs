@@ -3,11 +3,11 @@
 
 use std::sync::Arc;
 
-use mysten_metrics::monitored_mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use mysten_metrics::monitored_mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 use tracing::debug;
 
-use crate::{block::CertifiedBlocksOutput, CommitIndex, CommittedSubDag};
+use crate::{CommitIndex, CommittedSubDag, block::CertifiedBlocksOutput};
 
 /// Arguments from commit consumer to this consensus instance.
 /// This includes both parameters and components for communications.
@@ -34,13 +34,9 @@ impl CommitConsumerArgs {
     pub fn new(
         replay_after_commit_index: CommitIndex,
         consumer_last_processed_commit_index: CommitIndex,
-    ) -> (
-        Self,
-        UnboundedReceiver<CommittedSubDag>,
-        UnboundedReceiver<CertifiedBlocksOutput>,
-    ) {
+    ) -> (Self, UnboundedReceiver<CommittedSubDag>) {
         let (commit_sender, commit_receiver) = unbounded_channel("consensus_commit_output");
-        let (block_sender, block_receiver) = unbounded_channel("consensus_block_output");
+        let (block_sender, _block_receiver) = unbounded_channel("consensus_block_output");
 
         let monitor = Arc::new(CommitConsumerMonitor::new(
             replay_after_commit_index,
@@ -55,7 +51,6 @@ impl CommitConsumerArgs {
                 monitor,
             },
             commit_receiver,
-            block_receiver,
         )
     }
 

@@ -5,10 +5,10 @@
 #![forbid(unsafe_code)]
 
 use crate::tasks::{
-    InitCommand, PrintBytecodeCommand, PublishCommand, RunCommand, SyntaxChoice, TaskCommand,
-    TaskInput, taskify,
+    InitCommand, PrintBytecodeCommand, PublishAndCallsCommand, PublishCommand, PublishRunCommand,
+    RunCommand, SyntaxChoice, TaskCommand, TaskInput, taskify,
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use clap::Parser;
 use move_binary_format::file_format::CompiledModule;
@@ -20,7 +20,7 @@ use move_command_line_common::{
     testing::InstaOptions,
 };
 use move_compiler::{
-    FullyCompiledProgram,
+    PreCompiledProgramInfo,
     compiled_unit::AnnotatedCompiledUnit,
     diagnostics::{Diagnostics, warning_filters::WarningFiltersBuilder},
     editions::{Edition, Flavor},
@@ -37,9 +37,8 @@ use move_core_types::{
     language_storage::{ModuleId, TypeTag},
 };
 use move_disassembler::disassembler::{Disassembler, DisassemblerOptions};
-use move_ir_types::location::Spanned;
 use move_symbol_pool::Symbol;
-use move_vm_runtime::session::SerializedReturnValues;
+use move_vm_runtime::dev_utils::vm_arguments::ValueFrame;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::{Debug, Write as FmtWrite},
@@ -51,7 +50,7 @@ use std::{
 use tempfile::NamedTempFile;
 
 pub struct CompiledState {
-    pre_compiled_deps: Option<Arc<FullyCompiledProgram>>,
+    pre_compiled_program_info_opt: Option<Arc<PreCompiledProgramInfo>>,
     pre_compiled_ids: BTreeSet<(AccountAddress, String)>,
     compiled_module_named_address_mapping: BTreeMap<ModuleId, Symbol>,
     pub named_address_mapping: BTreeMap<String, NumericalAddress>,
@@ -59,6 +58,7 @@ pub struct CompiledState {
     edition: Edition,
     flavor: Flavor,
     modules: BTreeMap<ModuleId, CompiledModule>,
+    source_maps: BTreeMap<ModuleId, SourceMap>,
     temp_files: BTreeMap<String, NamedTempFile>,
 }
 
@@ -121,7 +121,7 @@ pub trait MoveTestAdapter<'a>: Sized + Send {
     fn default_syntax(&self) -> SyntaxChoice;
     async fn init(
         default_syntax: SyntaxChoice,
-        option: Option<Arc<FullyCompiledProgram>>,
+        pre_compiled_module_info_opt: Option<Arc<PreCompiledProgramInfo>>,
         init_data: Option<TaskInput<(InitCommand, Self::ExtraInitArgs)>>,
         path: &Path,
     ) -> (Self, Option<String>);
@@ -132,6 +132,22 @@ pub trait MoveTestAdapter<'a>: Sized + Send {
         gas_budget: Option<u64>,
         extra: Self::ExtraPublishArgs,
     ) -> Result<(Option<String>, Vec<MaybeNamedCompiledModule>)>;
+    async fn publish_modules_with_calls(
+        &mut self,
+        modules: Vec<MaybeNamedCompiledModule>,
+        calls: Vec<(
+            ModuleId,
+            Identifier,
+            Vec<<<Self as MoveTestAdapter<'a>>::ExtraValueArgs as ParsableValue>::ConcreteValue>,
+        )>,
+        signers: Vec<ParsedAddress>,
+        gas_budget: Option<u64>,
+        extra_args: Self::ExtraPublishArgs,
+    ) -> Result<(
+        Option<String>,
+        Vec<MaybeNamedCompiledModule>,
+        Vec<ValueFrame>,
+    )>;
     async fn call_function(
         &mut self,
         module: &ModuleId,
@@ -141,7 +157,7 @@ pub trait MoveTestAdapter<'a>: Sized + Send {
         args: Vec<<<Self as MoveTestAdapter<'a>>::ExtraValueArgs as ParsableValue>::ConcreteValue>,
         gas_budget: Option<u64>,
         extra: Self::ExtraRunArgs,
-    ) -> Result<(Option<String>, SerializedReturnValues)>;
+    ) -> Result<(Option<String>, ValueFrame)>;
 
     async fn handle_subcommand(
         &mut self,
@@ -195,8 +211,9 @@ pub trait MoveTestAdapter<'a>: Sized + Send {
                 panic!("The 'init' command is optional. But if used, it must be the first command")
             }
             TaskCommand::PrintBytecode(PrintBytecodeCommand { syntax }) => {
+                // TODO this should really work over published modules, not source
                 let syntax = syntax.unwrap_or_else(|| self.default_syntax());
-                let (warnings_opt, output, _data, modules) = compile_any(
+                let (warnings_opt, _data, (output, modules)) = compile_any(
                     self,
                     "publish",
                     syntax,
@@ -210,27 +227,27 @@ pub trait MoveTestAdapter<'a>: Sized + Send {
                 )
                 .await?;
                 let output = merge_output(output, warnings_opt);
-                let output = modules.into_iter().fold(output, |output, m| {
+                let output = modules.into_iter().try_fold(output, |output, m| {
                     let MaybeNamedCompiledModule {
                         module, source_map, ..
                     } = m;
-                    let source_mapping = match source_map {
-                        Some(m) => SourceMapping::new(m, &module),
-                        None => SourceMapping::new_without_source_map(
-                            &module,
-                            Spanned::unsafe_no_loc(()).loc,
-                        )
-                        .expect("Unable to build dummy source mapping"),
+                    let Some(source_map) = source_map else {
+                        bail!("No source map available for {}", module.self_id())
                     };
+                    let source_mapping = SourceMapping::new(source_map, &module);
                     let disassembler =
                         Disassembler::new(source_mapping, DisassemblerOptions::new());
-                    merge_output(output, Some(disassembler.disassemble().unwrap()))
-                });
+                    Ok(merge_output(
+                        output,
+                        Some(disassembler.disassemble().unwrap()),
+                    ))
+                })?;
                 Ok(output)
             }
+
             TaskCommand::Publish(PublishCommand { gas_budget, syntax }, extra_args) => {
                 let syntax = syntax.unwrap_or_else(|| self.default_syntax());
-                let (warnings_opt, output, data, modules) = compile_any(
+                let (warnings_opt, data, (output, modules)) = compile_any(
                     self,
                     "publish",
                     syntax,
@@ -246,6 +263,61 @@ pub trait MoveTestAdapter<'a>: Sized + Send {
                 store_modules(self, syntax, data, modules);
                 Ok(merge_output(warnings_opt, output))
             }
+
+            TaskCommand::PublishAndCall(
+                PublishAndCallsCommand {
+                    gas_budget,
+                    syntax,
+                    signers,
+                    calls,
+                },
+                extra_args,
+            ) => {
+                let syntax = syntax.unwrap_or_else(|| self.default_syntax());
+                let calls = PublishRunCommand::<Self::ExtraValueArgs>::from_calls(calls)?;
+                let calls = calls
+                    .into_iter()
+                    .map(|run_command| {
+                        let PublishRunCommand {
+                            // type_args: _,
+                            args,
+                            name,
+                        } = run_command;
+                        println!("name: {name:#?}");
+                        let (raw_addr, module_name, function) = name;
+                        let addr = self.compiled_state().resolve_address(&raw_addr);
+                        let module_id = ModuleId::new(addr, module_name);
+                        let function = function.as_ident_str().to_owned();
+                        let args = self.compiled_state().resolve_args(args)?;
+                        let result: anyhow::Result<_> = Ok((module_id, function, args));
+                        result
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let (warnings_opt, data, (output, modules, return_values)) = compile_any(
+                    self,
+                    "publish",
+                    syntax,
+                    name,
+                    number,
+                    start_line,
+                    command_lines_stop,
+                    stop_line,
+                    data,
+                    |adapter, modules| {
+                        adapter.publish_modules_with_calls(
+                            modules, calls, signers, gas_budget, extra_args,
+                        )
+                    },
+                )
+                .await?;
+                store_modules(self, syntax, data, modules);
+                let mut output = merge_output(warnings_opt, output);
+                for values in return_values {
+                    output = merge_output(output, display_return_values(values));
+                    output = merge_output(output, Some("\n".to_string()));
+                }
+                Ok(output)
+            }
             TaskCommand::Run(
                 RunCommand {
                     signers,
@@ -259,7 +331,7 @@ pub trait MoveTestAdapter<'a>: Sized + Send {
             ) => {
                 let syntax = syntax.unwrap_or_else(|| self.default_syntax());
                 let empty_publish_args = <Self::ExtraPublishArgs as Default>::default();
-                let (warnings_opt, output, data, modules) = compile_any(
+                let (warnings_opt, data, (output, modules)) = compile_any(
                     self,
                     "publish",
                     syntax,
@@ -371,18 +443,39 @@ fn single_entry_function(
     Ok((module.self_id(), name))
 }
 
-fn display_return_values(return_values: SerializedReturnValues) -> Option<String> {
-    let SerializedReturnValues {
-        mutable_reference_outputs,
-        return_values,
-    } = return_values;
+fn display_return_values(
+    ValueFrame {
+        mut heap,
+        heap_mut_refs,
+        heap_imm_refs: _,
+        values: return_values,
+    }: ValueFrame,
+) -> Option<String> {
     let mut output = vec![];
-    if !mutable_reference_outputs.is_empty() {
-        let values = mutable_reference_outputs
+    // Values first so we can drop them before grabbing values from the base heap.
+    let printed = if !return_values.is_empty() {
+        Some(
+            return_values
+                .iter()
+                .map(|v| {
+                    let mut buf = String::new();
+                    move_vm_runtime::execution::values::debug::print_value(&mut buf, v).unwrap();
+                    buf
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    } else {
+        None
+    };
+
+    drop(return_values);
+
+    if !heap_mut_refs.is_empty() {
+        let values = heap_mut_refs
             .iter()
-            .map(|(idx, bytes, layout)| {
-                let value =
-                    move_vm_types::values::Value::simple_deserialize(bytes, layout).unwrap();
+            .map(|(idx, heap_id)| {
+                let value = heap.take_loc(*heap_id).unwrap();
                 (idx, value)
             })
             .collect::<Vec<_>>();
@@ -390,31 +483,18 @@ fn display_return_values(return_values: SerializedReturnValues) -> Option<String
             .iter()
             .map(|(idx, v)| {
                 let mut buf = String::new();
-                move_vm_types::values::debug::print_value(&mut buf, v).unwrap();
+                move_vm_runtime::execution::values::debug::print_value(&mut buf, v).unwrap();
                 format!("local#{}: {}", idx, buf)
             })
             .collect::<Vec<_>>()
             .join(", ");
         output.push(format!("mutable inputs after call: {}", printed))
     };
-    if !return_values.is_empty() {
-        let values = return_values
-            .iter()
-            .map(|(bytes, layout)| {
-                move_vm_types::values::Value::simple_deserialize(bytes, layout).unwrap()
-            })
-            .collect::<Vec<_>>();
-        let printed = values
-            .iter()
-            .map(|v| {
-                let mut buf = String::new();
-                move_vm_types::values::debug::print_value(&mut buf, v).unwrap();
-                buf
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+
+    if let Some(printed) = printed {
         output.push(format!("return values: {}", printed))
-    };
+    }
+
     if output.is_empty() {
         None
     } else {
@@ -425,17 +505,15 @@ fn display_return_values(return_values: SerializedReturnValues) -> Option<String
 impl CompiledState {
     pub fn new(
         named_address_mapping: BTreeMap<String, NumericalAddress>,
-        pre_compiled_deps: Option<Arc<FullyCompiledProgram>>,
+        pre_compiled_deps: Option<Arc<PreCompiledProgramInfo>>,
         default_named_address_mapping: Option<NumericalAddress>,
         compiler_edition: Option<Edition>,
         flavor: Option<Flavor>,
     ) -> Self {
         let pre_compiled_ids = match pre_compiled_deps.clone() {
             None => BTreeSet::new(),
-            Some(pre_compiled) => pre_compiled
-                .cfgir
-                .modules
-                .key_cloned_iter()
+            Some(pre_compiled_deps) => pre_compiled_deps
+                .iter()
                 .map(|(ident, _)| {
                     (
                         ident.value.address.into_addr_bytes().into_inner(),
@@ -445,9 +523,10 @@ impl CompiledState {
                 .collect(),
         };
         let mut state = Self {
-            pre_compiled_deps: pre_compiled_deps.clone(),
+            pre_compiled_program_info_opt: pre_compiled_deps.clone(),
             pre_compiled_ids,
             modules: BTreeMap::new(),
+            source_maps: BTreeMap::new(),
             compiled_module_named_address_mapping: BTreeMap::new(),
             named_address_mapping,
             edition: compiler_edition.unwrap_or(Edition::LEGACY),
@@ -455,8 +534,10 @@ impl CompiledState {
             default_named_address_mapping,
             temp_files: BTreeMap::new(),
         };
-        if let Some(pcd) = pre_compiled_deps {
-            for unit in &pcd.compiled {
+
+        if let Some(pre_compiled_deps) = pre_compiled_deps {
+            for (_, module_info) in pre_compiled_deps.iter() {
+                let unit = module_info.compiled_unit.clone().unwrap();
                 let (named_addr_opt, _id) = unit.module_id();
                 state.add_precompiled(
                     named_addr_opt.map(|n| n.value),
@@ -475,6 +556,10 @@ impl CompiledState {
         self.temp_files.keys()
     }
 
+    pub fn source_map(&self, id: &ModuleId) -> Option<&SourceMap> {
+        self.source_maps.get(id)
+    }
+
     pub fn add_with_source_file(
         &mut self,
         modules: Vec<MaybeNamedCompiledModule>,
@@ -486,6 +571,7 @@ impl CompiledState {
             let MaybeNamedCompiledModule {
                 named_address: named_addr_opt,
                 module,
+                source_map,
                 ..
             } = m;
             let id = module.self_id();
@@ -494,11 +580,18 @@ impl CompiledState {
                 self.compiled_module_named_address_mapping
                     .insert(id.clone(), named_addr);
             }
-            self.modules.insert(id, module);
+            self.modules.insert(id.clone(), module);
+            if let Some(source_map) = source_map {
+                self.source_maps.insert(id, source_map);
+            }
         }
     }
 
-    pub fn add_and_generate_interface_file(&mut self, module: CompiledModule) {
+    pub fn add_and_generate_interface_file(
+        &mut self,
+        module: CompiledModule,
+        source_map: Option<SourceMap>,
+    ) {
         let id = module.self_id();
         self.check_not_precompiled(&id);
         let interface_file = NamedTempFile::new().unwrap();
@@ -515,7 +608,10 @@ impl CompiledState {
             .unwrap();
         let prev = self.temp_files.insert(path, interface_file);
         assert!(prev.is_none());
-        self.modules.insert(id, module);
+        self.modules.insert(id.clone(), module);
+        if let Some(source_map) = source_map {
+            self.source_maps.insert(id, source_map);
+        }
     }
 
     fn add_precompiled(&mut self, named_addr_opt: Option<Symbol>, module: CompiledModule) {
@@ -549,7 +645,7 @@ pub struct MaybeNamedCompiledModule {
     pub source_map: Option<SourceMap>,
 }
 
-pub async fn compile_any<'state, 'adapter: 'result, 'result, F, A, R>(
+pub async fn compile_any<'state, 'adapter: 'result, 'result, F, A, FR, Output>(
     test_adapter: &'adapter mut A,
     command: &str,
     syntax: SyntaxChoice,
@@ -560,16 +656,11 @@ pub async fn compile_any<'state, 'adapter: 'result, 'result, F, A, R>(
     _stop_line: usize,
     data: Option<NamedTempFile>,
     handler: F,
-) -> Result<(
-    Option<String>,
-    Option<String>,
-    NamedTempFile,
-    Vec<MaybeNamedCompiledModule>,
-)>
+) -> Result<(Option<String>, NamedTempFile, Output)>
 where
     A: MoveTestAdapter<'state> + 'adapter,
-    F: FnOnce(&'adapter mut A, Vec<MaybeNamedCompiledModule>) -> R,
-    R: Future<Output = Result<(Option<String>, Vec<MaybeNamedCompiledModule>)>> + 'result,
+    F: FnOnce(&'adapter mut A, Vec<MaybeNamedCompiledModule>) -> FR,
+    FR: Future<Output = Result<Output>> + 'result,
 {
     let data = match data {
         Some(f) => f,
@@ -599,19 +690,19 @@ where
             (modules, warnings_opt)
         }
         SyntaxChoice::IR => {
-            let module = compile_ir_module(state, data.path())?;
+            let (module, source_map) = compile_ir_module(state, data.path())?;
             (
                 vec![MaybeNamedCompiledModule {
                     named_address: None,
                     module,
-                    source_map: None,
+                    source_map: Some(source_map),
                 }],
                 None,
             )
         }
     };
-    let (output, modules) = handler(test_adapter, modules).await?;
-    Ok((warnings_opt, output, data, modules))
+    let handler_result = handler(test_adapter, modules).await?;
+    Ok((warnings_opt, data, handler_result))
 }
 
 pub fn store_modules<'a, A: MoveTestAdapter<'a>>(
@@ -628,10 +719,10 @@ pub fn store_modules<'a, A: MoveTestAdapter<'a>>(
                 .add_with_source_file(modules, (path, data))
         }
         SyntaxChoice::IR => {
-            let module = modules.pop().unwrap().module;
+            let module = modules.pop().unwrap();
             test_adapter
                 .compiled_state()
-                .add_and_generate_interface_file(module);
+                .add_and_generate_interface_file(module.module, module.source_map);
         }
     }
 }
@@ -665,7 +756,7 @@ pub fn compile_source_units(
         state.source_files().cloned().collect::<Vec<_>>(),
         named_address_mapping,
     )
-    .set_pre_compiled_lib_opt(state.pre_compiled_deps.clone())
+    .set_pre_compiled_program_opt(state.pre_compiled_program_info_opt.clone())
     .set_flags(move_compiler::Flags::empty().set_sources_shadow_deps(true))
     .set_warning_filter(Some(warning_filter))
     .set_default_config(PackageConfig {
@@ -678,8 +769,8 @@ pub fn compile_source_units(
 
     match units_or_diags {
         Err((_pass, diags)) => {
-            if let Some(pcd) = state.pre_compiled_deps.clone() {
-                files.extend(pcd.files.clone());
+            if let Some(pre_compiled_module_info) = state.pre_compiled_program_info_opt.clone() {
+                files.extend(pre_compiled_module_info.files());
             }
             Err(anyhow!(rendered_diags(&files, diags).unwrap()))
         }
@@ -690,7 +781,7 @@ pub fn compile_source_units(
 pub fn compile_ir_module(
     state: &CompiledState,
     file_name: impl AsRef<Path>,
-) -> Result<CompiledModule> {
+) -> Result<(CompiledModule, SourceMap)> {
     use move_ir_compiler::Compiler as IRCompiler;
     let code = std::fs::read_to_string(file_name).unwrap();
     let named_addresses = state
@@ -701,14 +792,14 @@ pub fn compile_ir_module(
     // TODO this mapping does not work well with upgrades since they have the same original ID
     IRCompiler::new(state.dep_modules().collect())
         .with_named_addresses(named_addresses)
-        .into_compiled_module(&code)
+        .into_compiled_module_with_source_map(&code)
 }
 
 /// Creates an adapter for the given tasks, using the first task command to initialize the adapter
 /// if it is a `TaskCommand::Init`. Returns the adapter and the output string.
 pub async fn create_adapter<'a, Adapter>(
     path: &Path,
-    fully_compiled_program_opt: Option<Arc<FullyCompiledProgram>>,
+    pre_compiled_program: Option<Arc<PreCompiledProgramInfo>>,
 ) -> Result<(String, Adapter), Box<dyn std::error::Error>>
 where
     Adapter: MoveTestAdapter<'a>,
@@ -758,16 +849,14 @@ where
             None
         }
     };
-
     let (adapter, result_opt) =
-        Adapter::init(default_syntax, fully_compiled_program_opt, init_opt, path).await;
+        Adapter::init(default_syntax, pre_compiled_program, init_opt, path).await;
 
-    if let Some(result) = result_opt {
-        if let Err(e) = writeln!(output, "\ninit:\n{}", result) {
-            return Err(Box::new(e));
-        }
+    if let Some(result) = result_opt
+        && let Err(e) = writeln!(output, "\ninit:\n{}", result)
+    {
+        return Err(Box::new(e));
     }
-
     Ok((output, adapter))
 }
 
@@ -829,7 +918,7 @@ where
 /// not need to extend the adapter.
 pub async fn run_test_impl<'a, Adapter>(
     path: &Path,
-    fully_compiled_program_opt: Option<Arc<FullyCompiledProgram>>,
+    pre_compiled_program: Option<Arc<PreCompiledProgramInfo>>,
     insta_options: Option<InstaOptions>,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
@@ -840,7 +929,7 @@ where
     Adapter::ExtraRunArgs: Debug,
     Adapter::Subcommand: Debug,
 {
-    let (output, adapter) = create_adapter::<Adapter>(path, fully_compiled_program_opt).await?;
+    let (output, adapter) = create_adapter::<Adapter>(path, pre_compiled_program).await?;
     run_tasks_with_adapter(path, adapter, output, insta_options).await?;
     Ok(())
 }

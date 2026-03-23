@@ -10,10 +10,10 @@ use sui_types::{
     utils::to_sender_signed_transaction,
 };
 
-use authority_tests::send_and_confirm_transaction;
+use authority_tests::submit_and_execute;
 use move_core_types::{account_address::AccountAddress, ident_str};
 use sui_types::{
-    crypto::{get_key_pair, AccountKeyPair},
+    crypto::{AccountKeyPair, get_key_pair},
     object::Owner,
 };
 
@@ -62,28 +62,32 @@ async fn test_batch_transaction_ok() -> anyhow::Result<()> {
     }
     let data = TransactionData::new_programmable(
         sender,
-        vec![authority_state
-            .get_object(&all_ids[N])
-            .await
-            .unwrap()
-            .compute_object_reference()],
+        vec![
+            authority_state
+                .get_object(&all_ids[N])
+                .await
+                .unwrap()
+                .compute_object_reference(),
+        ],
         builder.finish(),
         rgp * TEST_ONLY_GAS_UNIT_FOR_OBJECT_BASICS * (N as u64),
         rgp,
     );
 
     let tx = to_sender_signed_transaction(data, &sender_key);
-    let response = send_and_confirm_transaction(&authority_state, tx).await?;
+    let response = submit_and_execute(&authority_state, tx).await?;
     let effects = response.1.into_data();
     assert_eq!(effects.status(), &ExecutionStatus::Success);
     assert_eq!(
         (effects.created().len(), effects.mutated().len()),
         (N, N + 1),
     );
-    assert!(effects
-        .created()
-        .iter()
-        .all(|(_, owner)| owner == &Owner::AddressOwner(sender)));
+    assert!(
+        effects
+            .created()
+            .iter()
+            .all(|(_, owner)| owner == &Owner::AddressOwner(sender))
+    );
     // N of the objects should now be owned by recipient.
     assert_eq!(
         effects
@@ -137,11 +141,13 @@ async fn test_batch_transaction_last_one_fail() -> anyhow::Result<()> {
         .unwrap();
     let data = TransactionData::new_programmable(
         sender,
-        vec![authority_state
-            .get_object(&all_ids[N])
-            .await
-            .unwrap()
-            .compute_object_reference()],
+        vec![
+            authority_state
+                .get_object(&all_ids[N])
+                .await
+                .unwrap()
+                .compute_object_reference(),
+        ],
         builder.finish(),
         rgp * TEST_ONLY_GAS_UNIT_FOR_OBJECT_BASICS,
         rgp,
@@ -149,7 +155,7 @@ async fn test_batch_transaction_last_one_fail() -> anyhow::Result<()> {
 
     let tx = to_sender_signed_transaction(data, &sender_key);
 
-    let response = send_and_confirm_transaction(&authority_state, tx).await?.1;
+    let response = submit_and_execute(&authority_state, tx).await?.1;
     let effects = response.into_data();
     assert!(effects.status().is_err());
     assert_eq!(
@@ -202,7 +208,7 @@ async fn test_batch_insufficient_gas_balance() -> anyhow::Result<()> {
     );
 
     let tx = to_sender_signed_transaction(data, &sender_key);
-    let response = send_and_confirm_transaction(&authority_state, tx).await;
+    let response = submit_and_execute(&authority_state, tx).await;
 
     assert!(matches!(
         UserInputError::try_from(response.unwrap_err()).unwrap(),

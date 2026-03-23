@@ -3,142 +3,131 @@
 
 use std::collections::BTreeMap;
 
+use move_core_types::language_storage::TypeTag;
+use sui_protocol_config::ProtocolConfig;
+
 use crate::{
-    accumulator_root::derive_balance_account_object_id,
-    base_types::{random_object_ref, SuiAddress},
+    accumulator_root::AccumulatorValue,
+    base_types::{SuiAddress, random_object_ref},
+    coin_reservation::{CoinReservationResolverTrait, ParsedObjectRefWithdrawal},
+    digests::{ChainIdentifier, CheckpointDigest},
+    error::UserInputResult,
     gas_coin::GAS,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
-    transaction::{BalanceWithdrawArg, TransactionData, TransactionDataAPI, WithdrawTypeParam},
-    type_input::TypeInput,
+    transaction::{
+        FundsWithdrawalArg, GasData, TransactionData, TransactionDataAPI, TransactionDataV1,
+        TransactionExpiration, TransactionKind, TxValidityCheckContext, WithdrawalTypeArg,
+    },
 };
+
+fn protocol_config() -> ProtocolConfig {
+    let mut cfg = ProtocolConfig::get_for_max_version_UNSAFE();
+    cfg.enable_accumulators_for_testing();
+    cfg
+}
+
+struct NoImpl;
+
+impl CoinReservationResolverTrait for NoImpl {
+    fn resolve_funds_withdrawal(
+        &self,
+        _: SuiAddress,
+        _: ParsedObjectRefWithdrawal,
+    ) -> UserInputResult<FundsWithdrawalArg> {
+        unimplemented!("these tests do not use coin reservations")
+    }
+}
 
 #[test]
 fn test_withdraw_max_amount() {
-    let arg = BalanceWithdrawArg::new_with_amount(100, TypeInput::from(GAS::type_tag()));
+    let arg = FundsWithdrawalArg::balance_from_sender(100, GAS::type_tag());
     let mut ptb = ProgrammableTransactionBuilder::new();
-    ptb.balance_withdraw(arg.clone()).unwrap();
+    ptb.funds_withdrawal(arg.clone()).unwrap();
     let sender = SuiAddress::random_for_testing_only();
     let tx =
         TransactionData::new_programmable(sender, vec![random_object_ref()], ptb.finish(), 1, 1);
-    assert!(tx.has_balance_withdraws());
-    let withdraws = tx.process_balance_withdraws().unwrap();
-    let account_id = derive_balance_account_object_id(
+    assert!(tx.has_funds_withdrawals());
+    let withdraws = tx
+        .process_funds_withdrawals_for_signing(ChainIdentifier::default(), &NoImpl)
+        .unwrap();
+    let account_id = AccumulatorValue::get_field_id(
         sender,
-        WithdrawTypeParam::Balance(GAS::type_tag().into()),
+        &WithdrawalTypeArg::Balance(GAS::type_tag()).to_type_tag(),
     )
     .unwrap();
-    assert_eq!(withdraws, BTreeMap::from([(account_id, arg.reservation)]));
+    assert_eq!(withdraws, BTreeMap::from([(account_id, 100)]));
 }
 
 #[test]
-fn test_withdraw_entire_balance() {
-    let arg = BalanceWithdrawArg::new_with_entire_balance(TypeInput::from(GAS::type_tag()));
+fn test_multiple_withdraws_same_account() {
+    let arg1 = FundsWithdrawalArg::balance_from_sender(100, GAS::type_tag());
+    let arg2 = FundsWithdrawalArg::balance_from_sender(200, GAS::type_tag());
     let mut ptb = ProgrammableTransactionBuilder::new();
-    ptb.balance_withdraw(arg.clone()).unwrap();
+    ptb.funds_withdrawal(arg1.clone()).unwrap();
+    ptb.funds_withdrawal(arg2.clone()).unwrap();
     let sender = SuiAddress::random_for_testing_only();
     let tx =
         TransactionData::new_programmable(sender, vec![random_object_ref()], ptb.finish(), 1, 1);
-    assert!(tx.has_balance_withdraws());
-    let withdraws = tx.process_balance_withdraws().unwrap();
-    let account_id = derive_balance_account_object_id(
+    assert!(tx.has_funds_withdrawals());
+    let withdraws = tx
+        .process_funds_withdrawals_for_signing(ChainIdentifier::default(), &NoImpl)
+        .unwrap();
+    let account_id = AccumulatorValue::get_field_id(
         sender,
-        WithdrawTypeParam::Balance(GAS::type_tag().into()),
+        &WithdrawalTypeArg::Balance(GAS::type_tag()).to_type_tag(),
     )
     .unwrap();
-    assert_eq!(withdraws, BTreeMap::from([(account_id, arg.reservation)]));
+    assert_eq!(withdraws, BTreeMap::from([(account_id, 300)]));
 }
 
 #[test]
-fn test_multiple_withdraws() {
-    let arg1 = BalanceWithdrawArg::new_with_amount(100, TypeInput::from(GAS::type_tag()));
-    let arg2 = BalanceWithdrawArg::new_with_entire_balance(TypeInput::Bool);
+fn test_multiple_withdraws_different_accounts() {
+    let arg1 = FundsWithdrawalArg::balance_from_sender(100, GAS::type_tag());
+    let arg2 = FundsWithdrawalArg::balance_from_sender(200, TypeTag::Bool);
     let mut ptb = ProgrammableTransactionBuilder::new();
-    ptb.balance_withdraw(arg1.clone()).unwrap();
-    ptb.balance_withdraw(arg2.clone()).unwrap();
+    ptb.funds_withdrawal(arg1.clone()).unwrap();
+    ptb.funds_withdrawal(arg2.clone()).unwrap();
     let sender = SuiAddress::random_for_testing_only();
     let tx =
         TransactionData::new_programmable(sender, vec![random_object_ref()], ptb.finish(), 1, 1);
-    assert!(tx.has_balance_withdraws());
-    let withdraws = tx.process_balance_withdraws().unwrap();
-    let account_id1 = derive_balance_account_object_id(
+    assert!(tx.has_funds_withdrawals());
+    let withdraws = tx
+        .process_funds_withdrawals_for_signing(ChainIdentifier::default(), &NoImpl)
+        .unwrap();
+    let account_id1 = AccumulatorValue::get_field_id(
         sender,
-        WithdrawTypeParam::Balance(GAS::type_tag().into()),
+        &WithdrawalTypeArg::Balance(GAS::type_tag()).to_type_tag(),
     )
     .unwrap();
-    let account_id2 =
-        derive_balance_account_object_id(sender, WithdrawTypeParam::Balance(TypeInput::Bool))
-            .unwrap();
+    let account_id2 = AccumulatorValue::get_field_id(
+        sender,
+        &WithdrawalTypeArg::Balance(TypeTag::Bool).to_type_tag(),
+    )
+    .unwrap();
     assert_eq!(
         withdraws,
-        BTreeMap::from([
-            (account_id1, arg1.reservation),
-            (account_id2, arg2.reservation)
-        ])
+        BTreeMap::from([(account_id1, 100), (account_id2, 200),])
     );
 }
 
 #[test]
 fn test_withdraw_zero_amount() {
-    let arg = BalanceWithdrawArg::new_with_amount(0, TypeInput::from(GAS::type_tag()));
+    let arg = FundsWithdrawalArg::balance_from_sender(0, GAS::type_tag());
     let mut ptb = ProgrammableTransactionBuilder::new();
-    ptb.balance_withdraw(arg.clone()).unwrap();
+    ptb.funds_withdrawal(arg.clone()).unwrap();
     let sender = SuiAddress::random_for_testing_only();
-    let tx =
-        TransactionData::new_programmable(sender, vec![random_object_ref()], ptb.finish(), 1, 1);
-    assert!(tx.process_balance_withdraws().is_err());
-}
-
-#[test]
-fn test_withdraw_entire_balance_multiple_times() {
-    let arg1 = BalanceWithdrawArg::new_with_entire_balance(TypeInput::from(GAS::type_tag()));
-    let arg2 = BalanceWithdrawArg::new_with_entire_balance(TypeInput::from(GAS::type_tag()));
-    let mut ptb = ProgrammableTransactionBuilder::new();
-    ptb.balance_withdraw(arg1.clone()).unwrap();
-    ptb.balance_withdraw(arg2.clone()).unwrap();
-    let sender = SuiAddress::random_for_testing_only();
-    let tx =
-        TransactionData::new_programmable(sender, vec![random_object_ref()], ptb.finish(), 1, 1);
-    assert!(tx.process_balance_withdraws().is_err());
-}
-
-#[test]
-fn test_withdraw_amount_and_entire_balance() {
-    let arg1 = BalanceWithdrawArg::new_with_amount(100, TypeInput::from(GAS::type_tag()));
-    let arg2 = BalanceWithdrawArg::new_with_entire_balance(TypeInput::from(GAS::type_tag()));
-    let mut ptb = ProgrammableTransactionBuilder::new();
-    ptb.balance_withdraw(arg1.clone()).unwrap();
-    ptb.balance_withdraw(arg2.clone()).unwrap();
-    let sender = SuiAddress::random_for_testing_only();
-    let tx =
-        TransactionData::new_programmable(sender, vec![random_object_ref()], ptb.finish(), 1, 1);
-    assert!(tx.process_balance_withdraws().is_err());
-}
-
-#[test]
-fn test_withdraw_entire_balance_multiple_times_different_types() {
-    let arg1 = BalanceWithdrawArg::new_with_entire_balance(TypeInput::from(GAS::type_tag()));
-    let arg2 = BalanceWithdrawArg::new_with_entire_balance(TypeInput::Bool);
-    let mut ptb = ProgrammableTransactionBuilder::new();
-    ptb.balance_withdraw(arg1.clone()).unwrap();
-    ptb.balance_withdraw(arg2.clone()).unwrap();
-    let sender = SuiAddress::random_for_testing_only();
-    let tx =
-        TransactionData::new_programmable(sender, vec![random_object_ref()], ptb.finish(), 1, 1);
-    let withdraws = tx.process_balance_withdraws().unwrap();
-    let account_id1 = derive_balance_account_object_id(
+    let tx = TransactionData::new_programmable(
         sender,
-        WithdrawTypeParam::Balance(GAS::type_tag().into()),
-    )
-    .unwrap();
-    let account_id2 =
-        derive_balance_account_object_id(sender, WithdrawTypeParam::Balance(TypeInput::Bool))
-            .unwrap();
-    assert_eq!(
-        withdraws,
-        BTreeMap::from([
-            (account_id1, arg1.reservation),
-            (account_id2, arg2.reservation)
-        ])
+        vec![random_object_ref()],
+        ptb.finish(),
+        1_000_000,
+        1000,
+    );
+    assert!(
+        tx.validity_check(&TxValidityCheckContext::from_cfg_for_testing(
+            &protocol_config()
+        ))
+        .is_err()
     );
 }
 
@@ -146,14 +135,87 @@ fn test_withdraw_entire_balance_multiple_times_different_types() {
 fn test_withdraw_too_many_withdraws() {
     let mut ptb = ProgrammableTransactionBuilder::new();
     for _ in 0..11 {
-        ptb.balance_withdraw(BalanceWithdrawArg::new_with_amount(
+        ptb.funds_withdrawal(FundsWithdrawalArg::balance_from_sender(
             100,
-            TypeInput::from(GAS::type_tag()),
+            GAS::type_tag(),
         ))
         .unwrap();
     }
     let sender = SuiAddress::random_for_testing_only();
+    let tx = TransactionData::new_programmable(
+        sender,
+        vec![random_object_ref()],
+        ptb.finish(),
+        1_000_000,
+        1000,
+    );
+    assert!(
+        tx.validity_check(&TxValidityCheckContext::from_cfg_for_testing(
+            &protocol_config()
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn test_withdraw_overflow() {
+    let arg1 = FundsWithdrawalArg::balance_from_sender(u64::MAX, GAS::type_tag());
+    let arg2 = FundsWithdrawalArg::balance_from_sender(u64::MAX, GAS::type_tag());
+    let mut ptb = ProgrammableTransactionBuilder::new();
+    ptb.funds_withdrawal(arg1).unwrap();
+    ptb.funds_withdrawal(arg2).unwrap();
+    let sender = SuiAddress::random_for_testing_only();
     let tx =
         TransactionData::new_programmable(sender, vec![random_object_ref()], ptb.finish(), 1, 1);
-    assert!(tx.process_balance_withdraws().is_err());
+    let result = tx.process_funds_withdrawals_for_signing(ChainIdentifier::default(), &NoImpl);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("overflow"),
+        "Expected overflow error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_mixed_withdrawal_and_gas_payment_aggregation() {
+    let mut cfg = protocol_config();
+    cfg.enable_address_balance_gas_payments_for_testing();
+
+    let sender = SuiAddress::random_for_testing_only();
+    let mut ptb = ProgrammableTransactionBuilder::new();
+    ptb.funds_withdrawal(FundsWithdrawalArg::balance_from_sender(
+        5000,
+        GAS::type_tag(),
+    ))
+    .unwrap();
+
+    let tx = TransactionData::V1(TransactionDataV1 {
+        kind: TransactionKind::ProgrammableTransaction(ptb.finish()),
+        sender,
+        gas_data: GasData {
+            payment: vec![],
+            owner: sender,
+            price: 1000,
+            budget: 10_000_000,
+        },
+        expiration: TransactionExpiration::ValidDuring {
+            min_epoch: Some(0),
+            max_epoch: Some(0),
+            min_timestamp: None,
+            max_timestamp: None,
+            chain: ChainIdentifier::from(CheckpointDigest::default()),
+            nonce: 42,
+        },
+    });
+
+    let withdraws = tx
+        .process_funds_withdrawals_for_signing(ChainIdentifier::default(), &NoImpl)
+        .unwrap();
+    let account_id = AccumulatorValue::get_field_id(
+        sender,
+        &WithdrawalTypeArg::Balance(GAS::type_tag()).to_type_tag(),
+    )
+    .unwrap();
+    assert_eq!(withdraws, BTreeMap::from([(account_id, 5000 + 10_000_000)]));
 }

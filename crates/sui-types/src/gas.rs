@@ -11,15 +11,15 @@ use crate::{base_types::ObjectID, gas_model::gas_v2::PerObjectStorage};
 pub mod checked {
 
     use crate::gas::GasUsageReport;
-    use crate::gas_model::gas_predicates::gas_price_too_high;
+    use crate::gas_model::gas_predicates::check_for_gas_price_too_high;
     use crate::{
+        ObjectID,
         effects::{TransactionEffects, TransactionEffectsAPI},
         error::{ExecutionError, SuiResult, UserInputError, UserInputResult},
         gas_model::{gas_v2::SuiGasStatus as SuiGasStatusV2, tables::GasStatus},
         object::Object,
         sui_serde::{BigInt, Readable},
         transaction::ObjectReadResult,
-        ObjectID,
     };
     use enum_dispatch::enum_dispatch;
     use itertools::MultiUnzip;
@@ -83,7 +83,8 @@ pub mod checked {
                 }
                 .into());
             }
-            if gas_price_too_high(config.gas_model_version()) && gas_price >= config.max_gas_price()
+            if check_for_gas_price_too_high(config.gas_model_version())
+                && gas_price >= config.max_gas_price()
             {
                 return Err(UserInputError::GasPriceTooHigh {
                     max_gas_price: config.max_gas_price(),
@@ -103,8 +104,6 @@ pub mod checked {
             Self::V2(SuiGasStatusV2::new_unmetered())
         }
 
-        // This is the only public API on SuiGasStatus, all other gas related operations should
-        // go through `GasCharger`
         pub fn check_gas_balance(
             &self,
             gas_objs: &[&ObjectReadResult],
@@ -112,6 +111,22 @@ pub mod checked {
         ) -> UserInputResult {
             match self {
                 Self::V2(status) => status.check_gas_balance(gas_objs, gas_budget),
+            }
+        }
+
+        pub fn check_gas_objects(&self, gas_objs: &[&ObjectReadResult]) -> UserInputResult {
+            match self {
+                Self::V2(status) => status.check_gas_objects(gas_objs),
+            }
+        }
+
+        pub fn check_gas_data(
+            &self,
+            gas_objs: &[&ObjectReadResult],
+            gas_budget: u64,
+        ) -> UserInputResult {
+            match self {
+                Self::V2(status) => status.check_gas_data(gas_objs, gas_budget),
             }
         }
 
@@ -237,7 +252,10 @@ pub mod checked {
             write!(
                 f,
                 "computation_cost: {}, storage_cost: {},  storage_rebate: {}, non_refundable_storage_fee: {}",
-                self.computation_cost, self.storage_cost, self.storage_rebate, self.non_refundable_storage_fee,
+                self.computation_cost,
+                self.storage_cost,
+                self.storage_rebate,
+                self.non_refundable_storage_fee,
             )
         }
     }

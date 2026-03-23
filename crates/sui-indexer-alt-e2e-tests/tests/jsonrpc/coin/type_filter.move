@@ -1,9 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//# init --protocol-version 70 --addresses Test=0x0 --accounts A B --simulator --objects-snapshot-min-checkpoint-lag 2
+//# init --protocol-version 108 --addresses Test=0x0 --accounts A B --simulator --consistent-range 2
 
 //# publish --sender A
+#[allow(deprecated_usage)]
 module Test::fake {
     use sui::coin;
 

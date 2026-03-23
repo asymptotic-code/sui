@@ -6,24 +6,30 @@ members = [
     "move-execution/v0/crates/bytecode-verifier-tests",
     "move-execution/v1/crates/bytecode-verifier-tests",
     "move-execution/v2/crates/bytecode-verifier-tests",
+    "move-execution/v3/crates/bytecode-verifier-tests",
     # "move-execution/$CUT/crates/bytecode-verifier-tests",
     "move-execution/v0/crates/move-bytecode-verifier",
     "move-execution/v1/crates/move-bytecode-verifier",
     "move-execution/v2/crates/move-bytecode-verifier",
+    "move-execution/v3/crates/move-bytecode-verifier",
     # "move-execution/$CUT/crates/move-bytecode-verifier",
     "move-execution/v0/crates/move-vm-runtime",
     "move-execution/v1/crates/move-vm-runtime",
     "move-execution/v2/crates/move-vm-runtime",
+    "move-execution/v3/crates/move-vm-runtime",
     # "move-execution/$CUT/crates/move-vm-runtime",
     "move-execution/v0/crates/move-stdlib-natives",
     "move-execution/v1/crates/move-stdlib-natives",
     "move-execution/v2/crates/move-stdlib-natives",
+    "move-execution/v3/crates/move-stdlib-natives",
     # "move-execution/$CUT/crates/move-stdlib-natives",
     "move-execution/v2/crates/move-abstract-interpreter",
+    "move-execution/v3/crates/move-abstract-interpreter",
     # "move-execution/$CUT/crates/move-abstract-interpreter",
     "move-execution/v0/crates/move-vm-types",
     "move-execution/v1/crates/move-vm-types",
     "move-execution/v2/crates/move-vm-types",
+    "move-execution/v3/crates/move-vm-types",
     # "move-execution/$CUT/crates/move-vm-types",
 ]
 
@@ -32,14 +38,16 @@ members = [
 aes-gcm = "0.8.0"
 anyhow = "1.0.52"
 append-only-vec = "0.1.7"
+aquamarine = "0.6.0"
 arbitrary = { version = "1.1.7", features = ["derive", "derive_arbitrary"] }
 async-trait = "0.1.42"
 bcs = "0.1.4"
 better_any = "0.1.1"
 bimap = "0.6.2"
 bitvec = "0.19.4"
+bumpalo = "3.17.0"
 byteorder = "1.4.3"
-bytes = "1.0.1"
+bytes = "1.11.1"
 chrono = "0.4.19"
 clap = { version = "4", features = ["derive"] }
 codespan = "0.11.1"
@@ -50,7 +58,9 @@ crossbeam = "0.8"
 crossbeam-channel = "0.5.0"
 crossterm = "0.25.0"
 curve25519-dalek = { version = "0.1.0", package = "curve25519-dalek-fiat", default-features = false, features = ["std", "u64_backend"] }
+dashmap = "6.1.0"
 datatest-stable = "0.1.1"
+derivative = "2.2.0"
 derive-where = "1.2.7"
 digest = "0.9.0"
 dir-diff = "0.3.2"
@@ -73,8 +83,10 @@ internment = { version = "0.5.0", features = ["arc"] }
 itertools = "0.10.0"
 json_comments = "0.2.2"
 leb128 = "0.2.5"
+lasso = { version = "0.7.3", features = ["multi-threaded", "inline-more"] }
 libfuzzer-sys = "0.4"
 log = { version = "0.4.14", features = ["serde"] }
+lru = "0.13.0"
 lsp-server = "0.7.6"
 lsp-types = "0.95.1"
 memory-stats = "1.0.0"
@@ -92,14 +104,17 @@ petgraph = "0.8.1"
 phf = { version = "0.11", features = ["macros"] }
 plotters = { version = "0.3.0", default-features = false, features = ["evcxr", "line_series", "histogram"] }
 pretty = "0.10.0"
+pretty_simple = "0.1.1"
+pretty_assertions = "1.4.1"
 prettydiff = "0.4.0"
 primitive-types = { version = "0.10.1", features = ["impl-serde"] }
 proc-macro2 = "1.0.24"
 proptest = "1.6.0"
 proptest-derive = "0.5"
+quick_cache = { version = "0.6.18", features = ["stats"] }
 quote = "1.0.9"
 rand = "0.8.0"
-ratatui = "0.29.0"
+ratatui = "0.30.0"
 rayon = "1.10.0"
 ref-cast = "1.0.6"
 regex = "1.5.5"
@@ -123,6 +138,7 @@ static_assertions = "1.1.0"
 strum = { version = "0.27.1", features = ["derive"] }
 strum_macros = "0.27.1"
 syn = { version = "1.0.64", features = ["derive"] }
+sysinfo = "0.35.2"
 tempfile = "3.2.0"
 tera = "1.16.0"
 test-log = { version = "0.2.17", features = ["trace"] }
@@ -146,6 +162,8 @@ inline_colorization = "0.1.6"
 insta = "1.42.0"
 zstd = "0.13.2"
 lcov = "0.8.1"
+fs4 = { version = "0.13.1" }
+
 
 bytecode-interpreter-crypto = { path = "crates/bytecode-interpreter-crypto" }
 enum-compat-util = { path = "crates/enum-compat-util" }
@@ -168,6 +186,7 @@ move-command-line-common = { path = "crates/move-command-line-common" }
 move-compiler = { path = "crates/move-compiler" }
 move-core-types = { path = "crates/move-core-types" }
 move-coverage = { path = "crates/move-coverage" }
+move-decompiler = { path = "crates/move-decompiler" }
 move-disassembler = { path = "crates/move-disassembler" }
 move-docgen = { path = "crates/move-docgen" }
 move-docgen-tests = { path = "crates/move-docgen-tests" }
@@ -183,6 +202,7 @@ move-package-alt-compilation = { path = "crates/move-package-alt-compilation" }
 move-proc-macros = { path = "crates/move-proc-macros"}
 move-regex-borrow-graph = { path = "crates/move-regex-borrow-graph" }
 move-stackless-bytecode = { path = "crates/move-stackless-bytecode" }
+move-stackless-bytecode-2 = { path = "crates/move-stackless-bytecode-2" }
 move-stdlib = { path = "crates/move-stdlib" }
 move-stdlib-natives = { path = "crates/move-stdlib-natives" }
 move-symbol-pool = { path = "crates/move-symbol-pool" }
@@ -199,11 +219,6 @@ debug = true
 
 [profile.dev]
 debug = true
-
-[profile.test.package.move-vm-integration-tests]
-# opt-level 2 for move-compiler reduces the size of some of its
-# (recursive) stack frames by up to 10x, avoiding stack overflows.
-opt-level = 3
 
 # use release settings to reduce memory pressure in the linking step in CI
 [profile.ci]

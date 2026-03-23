@@ -33,9 +33,8 @@ mod checked {
     use sui_types::clock::{CLOCK_MODULE_NAME, CONSENSUS_COMMIT_PROLOGUE_FUNCTION_NAME};
     use sui_types::committee::EpochId;
     use sui_types::effects::TransactionEffects;
-    use sui_types::error::{ExecutionError, ExecutionErrorKind};
-    use sui_types::execution_config_utils::to_binary_config;
-    use sui_types::execution_status::ExecutionStatus;
+    use sui_types::error::ExecutionError;
+    use sui_types::execution_status::{ExecutionErrorKind, ExecutionStatus};
     use sui_types::gas::GasCostSummary;
     use sui_types::gas::SuiGasStatus;
     use sui_types::inner_temporary_store::InnerTemporaryStore;
@@ -287,7 +286,7 @@ mod checked {
             }
 
             if execution_result.is_ok() {
-                let gas_check = check_written_objects_limit::<Mode>(
+                let gas_check = check_written_objects_limit(
                     temporary_store,
                     gas_charger,
                     protocol_config,
@@ -368,7 +367,7 @@ mod checked {
                 result = Err(conservation_err);
                 gas_charger.reset(temporary_store);
                 gas_charger.charge_gas(temporary_store, &mut result);
-                // check conservation once more more
+                // check conservation once more
                 if let Err(recovery_err) = {
                     temporary_store
                         .check_sui_conserved(simple_conservation_checks, cost_summary)
@@ -442,7 +441,7 @@ mod checked {
     }
 
     #[instrument(name = "check_written_objects_limit", level = "debug", skip_all)]
-    fn check_written_objects_limit<Mode: ExecutionMode>(
+    fn check_written_objects_limit(
         temporary_store: &mut TemporaryStore<'_>,
         gas_charger: &mut GasCharger,
         protocol_config: &ProtocolConfig,
@@ -476,7 +475,7 @@ mod checked {
                             max_size: lim as u64,
                         },
                         "Written objects size crossed hard limit",
-                    ))
+                    ));
                 }
             };
         }
@@ -623,10 +622,14 @@ mod checked {
                             builder = setup_authenticator_state_expire(builder, expire);
                         }
                         EndOfEpochTransactionKind::RandomnessStateCreate => {
-                            panic!("EndOfEpochTransactionKind::RandomnessStateCreate should not exist in v1");
+                            panic!(
+                                "EndOfEpochTransactionKind::RandomnessStateCreate should not exist in v1"
+                            );
                         }
                         EndOfEpochTransactionKind::DenyListStateCreate => {
-                            panic!("EndOfEpochTransactionKind::CoinDenyListStateCreate should not exist in v1");
+                            panic!(
+                                "EndOfEpochTransactionKind::CoinDenyListStateCreate should not exist in v1"
+                            );
                         }
                         EndOfEpochTransactionKind::BridgeStateCreate(_) => {
                             panic!(
@@ -634,17 +637,45 @@ mod checked {
                             );
                         }
                         EndOfEpochTransactionKind::BridgeCommitteeInit(_) => {
-                            panic!("EndOfEpochTransactionKind::BridgeCommitteeInit should not exist in v1");
+                            panic!(
+                                "EndOfEpochTransactionKind::BridgeCommitteeInit should not exist in v1"
+                            );
                         }
                         EndOfEpochTransactionKind::StoreExecutionTimeObservations(_) => {
-                            panic!("EndOfEpochTransactionKind::StoreExecutionTimeEstimates should not exist in v1");
+                            panic!(
+                                "EndOfEpochTransactionKind::StoreExecutionTimeEstimates should not exist in v1"
+                            );
                         }
                         EndOfEpochTransactionKind::AccumulatorRootCreate => {
-                            panic!("EndOfEpochTransactionKind::AccumulatorRootCreate should not exist in v1");
+                            panic!(
+                                "EndOfEpochTransactionKind::AccumulatorRootCreate should not exist in v1"
+                            );
+                        }
+                        EndOfEpochTransactionKind::WriteAccumulatorStorageCost(_) => {
+                            panic!(
+                                "EndOfEpochTransactionKind::WriteAccumulatorStorageCost should not exist in v1"
+                            );
+                        }
+                        EndOfEpochTransactionKind::CoinRegistryCreate => {
+                            panic!(
+                                "EndOfEpochTransactionKind::CoinRegistryCreate should not exist in v1"
+                            );
+                        }
+                        EndOfEpochTransactionKind::DisplayRegistryCreate => {
+                            panic!(
+                                "EndOfEpochTransactionKind::DisplayRegistryCreate should not exist in v1"
+                            );
+                        }
+                        EndOfEpochTransactionKind::AddressAliasStateCreate => {
+                            panic!(
+                                "EndOfEpochTransactionKind::AddressAliasStateCreate should not exist in v1"
+                            );
                         }
                     }
                 }
-                unreachable!("EndOfEpochTransactionKind::ChangeEpoch should be the last transaction in the list")
+                unreachable!(
+                    "EndOfEpochTransactionKind::ChangeEpoch should be the last transaction in the list"
+                )
             }
             TransactionKind::AuthenticatorStateUpdate(auth_state_update) => {
                 setup_authenticator_state_update(
@@ -841,11 +872,11 @@ mod checked {
 
         if result.is_err() {
             tracing::error!(
-            "Failed to execute advance epoch transaction. Switching to safe mode. Error: {:?}. Input objects: {:?}. Tx data: {:?}",
-            result.as_ref().err(),
-            temporary_store.objects(),
-            change_epoch,
-        );
+                "Failed to execute advance epoch transaction. Switching to safe mode. Error: {:?}. Input objects: {:?}. Tx data: {:?}",
+                result.as_ref().err(),
+                temporary_store.objects(),
+                change_epoch,
+            );
             temporary_store.drop_writes();
             // Must reset the storage rebate since we are re-executing.
             gas_charger.reset_storage_cost_and_rebate();
@@ -868,7 +899,7 @@ mod checked {
             }
         }
 
-        let binary_config = to_binary_config(protocol_config);
+        let binary_config = protocol_config.binary_config(None);
         for (version, modules, dependencies) in change_epoch.system_packages.into_iter() {
             let deserialized_modules: Vec<_> = modules
                 .iter()
@@ -1001,7 +1032,7 @@ mod checked {
                     CallArg::Object(ObjectArg::SharedObject {
                         id: SUI_AUTHENTICATOR_STATE_OBJECT_ID,
                         initial_shared_version: update.authenticator_obj_initial_shared_version,
-                        mutable: true,
+                        mutability: sui_types::transaction::SharedObjectMutability::Mutable,
                     }),
                     CallArg::Pure(bcs::to_bytes(&update.new_active_jwks).unwrap()),
                 ],
@@ -1037,7 +1068,7 @@ mod checked {
                     CallArg::Object(ObjectArg::SharedObject {
                         id: SUI_AUTHENTICATOR_STATE_OBJECT_ID,
                         initial_shared_version: expire.authenticator_obj_initial_shared_version,
-                        mutable: true,
+                        mutability: sui_types::transaction::SharedObjectMutability::Mutable,
                     }),
                     CallArg::Pure(bcs::to_bytes(&expire.min_epoch).unwrap()),
                 ],

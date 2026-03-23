@@ -1,18 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::mem;
-
-use anyhow::ensure;
 use sui_default_config::DefaultConfig;
-use sui_indexer_alt_framework::{
-    ingestion::IngestionConfig,
-    pipeline::{
-        concurrent::{ConcurrentConfig, PrunerConfig},
-        sequential::SequentialConfig,
-        CommitterConfig,
-    },
-};
+use sui_indexer_alt_framework::config::ConcurrencyConfig;
+use sui_indexer_alt_framework::ingestion::IngestionConfig;
+use sui_indexer_alt_framework::pipeline::CommitterConfig;
+use sui_indexer_alt_framework::pipeline::concurrent::ConcurrentConfig;
+use sui_indexer_alt_framework::pipeline::concurrent::PrunerConfig;
+use sui_indexer_alt_framework::pipeline::sequential::SequentialConfig;
 
 /// Trait for merging configuration structs together.
 pub trait Merge: Sized {
@@ -21,6 +16,7 @@ pub trait Merge: Sized {
 
 #[DefaultConfig]
 #[derive(Clone, Default, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct IndexerConfig {
     /// How checkpoints are read by the indexer.
     pub ingestion: IngestionLayer,
@@ -38,9 +34,6 @@ pub struct IndexerConfig {
 
     /// Per-pipeline configurations.
     pub pipeline: PipelineLayer,
-
-    #[serde(flatten)]
-    pub extra: toml::Table,
 }
 
 // Configuration layers apply overrides over a base configuration. When reading configs from a
@@ -53,69 +46,74 @@ pub struct IndexerConfig {
 
 #[DefaultConfig]
 #[derive(Clone, Default, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct IngestionLayer {
     pub checkpoint_buffer_size: Option<usize>,
-    pub ingest_concurrency: Option<usize>,
+    pub ingest_concurrency: Option<ConcurrencyConfig>,
     pub retry_interval_ms: Option<u64>,
-
-    #[serde(flatten)]
-    pub extra: toml::Table,
+    pub streaming_backoff_initial_batch_size: Option<usize>,
+    pub streaming_backoff_max_batch_size: Option<usize>,
+    pub streaming_connection_timeout_ms: Option<u64>,
+    pub streaming_statement_timeout_ms: Option<u64>,
 }
 
 #[DefaultConfig]
 #[derive(Clone, Default, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct SequentialLayer {
     pub committer: Option<CommitterLayer>,
     pub checkpoint_lag: Option<u64>,
-
-    #[serde(flatten)]
-    pub extra: toml::Table,
+    pub fanout: Option<ConcurrencyConfig>,
+    pub min_eager_rows: Option<usize>,
+    pub max_batch_checkpoints: Option<usize>,
+    pub processor_channel_size: Option<usize>,
 }
 
 #[DefaultConfig]
 #[derive(Clone, Default, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct ConcurrentLayer {
     pub committer: Option<CommitterLayer>,
     pub pruner: Option<PrunerLayer>,
-
-    #[serde(flatten)]
-    pub extra: toml::Table,
+    pub fanout: Option<ConcurrencyConfig>,
+    pub min_eager_rows: Option<usize>,
+    pub max_pending_rows: Option<usize>,
+    pub max_watermark_updates: Option<usize>,
+    pub processor_channel_size: Option<usize>,
+    pub collector_channel_size: Option<usize>,
+    pub committer_channel_size: Option<usize>,
 }
 
 #[DefaultConfig]
 #[derive(Clone, Default, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct CommitterLayer {
     pub write_concurrency: Option<usize>,
     pub collect_interval_ms: Option<u64>,
     pub watermark_interval_ms: Option<u64>,
-
-    #[serde(flatten)]
-    pub extra: toml::Table,
 }
 
 #[DefaultConfig]
 #[derive(Clone, Default, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct PrunerLayer {
     pub interval_ms: Option<u64>,
     pub delay_ms: Option<u64>,
     pub retention: Option<u64>,
     pub max_chunk_size: Option<u64>,
     pub prune_concurrency: Option<u64>,
-
-    #[serde(flatten)]
-    pub extra: toml::Table,
 }
 
 #[DefaultConfig]
 #[derive(Clone, Default, Debug)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct PipelineLayer {
     // Sequential pipelines
     pub sum_displays: Option<SequentialLayer>,
 
     // All concurrent pipelines
-    pub coin_balance_buckets: Option<ConcurrentLayer>,
-    pub obj_info: Option<ConcurrentLayer>,
+    pub cp_bloom_blocks: Option<ConcurrentLayer>,
+    pub cp_blooms: Option<ConcurrentLayer>,
     pub cp_sequence_numbers: Option<ConcurrentLayer>,
     pub ev_emit_mod: Option<ConcurrentLayer>,
     pub ev_struct_inst: Option<ConcurrentLayer>,
@@ -134,9 +132,6 @@ pub struct PipelineLayer {
     pub tx_calls: Option<ConcurrentLayer>,
     pub tx_digests: Option<ConcurrentLayer>,
     pub tx_kinds: Option<ConcurrentLayer>,
-
-    #[serde(flatten)]
-    pub extra: toml::Table,
 }
 
 impl IndexerConfig {
@@ -161,14 +156,13 @@ impl IndexerConfig {
             .merge(IndexerConfig {
                 ingestion: IngestionLayer {
                     retry_interval_ms: Some(10),
-                    ingest_concurrency: Some(1),
+                    ingest_concurrency: Some(ConcurrencyConfig::Fixed { value: 1 }),
                     ..Default::default()
                 },
                 committer: CommitterLayer {
                     collect_interval_ms: Some(50),
                     watermark_interval_ms: Some(50),
                     write_concurrency: Some(1),
-                    ..Default::default()
                 },
                 pruner: PrunerLayer {
                     interval_ms: Some(50),
@@ -179,29 +173,34 @@ impl IndexerConfig {
             })
             .expect("Merge failed for test configuration")
     }
-
-    pub fn finish(mut self) -> anyhow::Result<IndexerConfig> {
-        check_extra("top-level", mem::take(&mut self.extra))?;
-        Ok(self)
-    }
 }
 
 impl IngestionLayer {
     pub fn finish(self, base: IngestionConfig) -> anyhow::Result<IngestionConfig> {
-        check_extra("ingestion", self.extra)?;
         Ok(IngestionConfig {
             checkpoint_buffer_size: self
                 .checkpoint_buffer_size
                 .unwrap_or(base.checkpoint_buffer_size),
             ingest_concurrency: self.ingest_concurrency.unwrap_or(base.ingest_concurrency),
             retry_interval_ms: self.retry_interval_ms.unwrap_or(base.retry_interval_ms),
+            streaming_backoff_initial_batch_size: self
+                .streaming_backoff_initial_batch_size
+                .unwrap_or(base.streaming_backoff_initial_batch_size),
+            streaming_backoff_max_batch_size: self
+                .streaming_backoff_max_batch_size
+                .unwrap_or(base.streaming_backoff_max_batch_size),
+            streaming_connection_timeout_ms: self
+                .streaming_connection_timeout_ms
+                .unwrap_or(base.streaming_connection_timeout_ms),
+            streaming_statement_timeout_ms: self
+                .streaming_statement_timeout_ms
+                .unwrap_or(base.streaming_statement_timeout_ms),
         })
     }
 }
 
 impl SequentialLayer {
     pub fn finish(self, base: SequentialConfig) -> anyhow::Result<SequentialConfig> {
-        check_extra("sequential pipeline", self.extra)?;
         Ok(SequentialConfig {
             committer: if let Some(committer) = self.committer {
                 committer.finish(base.committer)?
@@ -209,6 +208,10 @@ impl SequentialLayer {
                 base.committer
             },
             checkpoint_lag: self.checkpoint_lag.unwrap_or(base.checkpoint_lag),
+            fanout: self.fanout.or(base.fanout),
+            min_eager_rows: self.min_eager_rows.or(base.min_eager_rows),
+            max_batch_checkpoints: self.max_batch_checkpoints.or(base.max_batch_checkpoints),
+            processor_channel_size: self.processor_channel_size.or(base.processor_channel_size),
         })
     }
 }
@@ -217,7 +220,6 @@ impl ConcurrentLayer {
     /// Unlike other parameters, `pruner` will appear in the finished configuration only if they
     /// appear in the layer *and* in the base.
     pub fn finish(self, base: ConcurrentConfig) -> anyhow::Result<ConcurrentConfig> {
-        check_extra("concurrent pipeline", self.extra)?;
         Ok(ConcurrentConfig {
             committer: if let Some(committer) = self.committer {
                 committer.finish(base.committer)?
@@ -228,26 +230,32 @@ impl ConcurrentLayer {
                 (None, _) | (_, None) => None,
                 (Some(pruner), Some(base)) => Some(pruner.finish(base)?),
             },
+            fanout: self.fanout.or(base.fanout),
+            min_eager_rows: self.min_eager_rows.or(base.min_eager_rows),
+            max_pending_rows: self.max_pending_rows.or(base.max_pending_rows),
+            max_watermark_updates: self.max_watermark_updates.or(base.max_watermark_updates),
+            processor_channel_size: self.processor_channel_size.or(base.processor_channel_size),
+            collector_channel_size: self.collector_channel_size.or(base.collector_channel_size),
+            committer_channel_size: self.committer_channel_size.or(base.committer_channel_size),
         })
     }
 }
 
 impl CommitterLayer {
     pub fn finish(self, base: CommitterConfig) -> anyhow::Result<CommitterConfig> {
-        check_extra("committer", self.extra)?;
         Ok(CommitterConfig {
             write_concurrency: self.write_concurrency.unwrap_or(base.write_concurrency),
             collect_interval_ms: self.collect_interval_ms.unwrap_or(base.collect_interval_ms),
             watermark_interval_ms: self
                 .watermark_interval_ms
                 .unwrap_or(base.watermark_interval_ms),
+            watermark_interval_jitter_ms: 0,
         })
     }
 }
 
 impl PrunerLayer {
     pub fn finish(self, base: PrunerConfig) -> anyhow::Result<PrunerConfig> {
-        check_extra("pruner", self.extra)?;
         Ok(PrunerConfig {
             interval_ms: self.interval_ms.unwrap_or(base.interval_ms),
             delay_ms: self.delay_ms.unwrap_or(base.delay_ms),
@@ -263,8 +271,8 @@ impl PipelineLayer {
     /// configure.
     pub fn example() -> Self {
         PipelineLayer {
-            coin_balance_buckets: Some(Default::default()),
-            obj_info: Some(Default::default()),
+            cp_blooms: Some(Default::default()),
+            cp_bloom_blocks: Some(Default::default()),
             sum_displays: Some(Default::default()),
             cp_sequence_numbers: Some(Default::default()),
             ev_emit_mod: Some(Default::default()),
@@ -284,76 +292,78 @@ impl PipelineLayer {
             tx_calls: Some(Default::default()),
             tx_digests: Some(Default::default()),
             tx_kinds: Some(Default::default()),
-            extra: Default::default(),
         }
-    }
-
-    pub fn finish(mut self) -> anyhow::Result<PipelineLayer> {
-        check_extra("pipeline", mem::take(&mut self.extra))?;
-        Ok(self)
     }
 }
 
 impl Merge for IndexerConfig {
     fn merge(self, other: IndexerConfig) -> anyhow::Result<IndexerConfig> {
-        check_extra("top-level", self.extra)?;
-        check_extra("top-level", other.extra)?;
         Ok(IndexerConfig {
             ingestion: self.ingestion.merge(other.ingestion)?,
             committer: self.committer.merge(other.committer)?,
             pruner: self.pruner.merge(other.pruner)?,
             pipeline: self.pipeline.merge(other.pipeline)?,
-            extra: Default::default(),
         })
     }
 }
 
 impl Merge for IngestionLayer {
     fn merge(self, other: IngestionLayer) -> anyhow::Result<IngestionLayer> {
-        check_extra("ingestion", self.extra)?;
-        check_extra("ingestion", other.extra)?;
         Ok(IngestionLayer {
             checkpoint_buffer_size: other.checkpoint_buffer_size.or(self.checkpoint_buffer_size),
             ingest_concurrency: other.ingest_concurrency.or(self.ingest_concurrency),
             retry_interval_ms: other.retry_interval_ms.or(self.retry_interval_ms),
-            extra: Default::default(),
+            streaming_backoff_initial_batch_size: other
+                .streaming_backoff_initial_batch_size
+                .or(self.streaming_backoff_initial_batch_size),
+            streaming_backoff_max_batch_size: other
+                .streaming_backoff_max_batch_size
+                .or(self.streaming_backoff_max_batch_size),
+            streaming_connection_timeout_ms: other
+                .streaming_connection_timeout_ms
+                .or(self.streaming_connection_timeout_ms),
+            streaming_statement_timeout_ms: other
+                .streaming_statement_timeout_ms
+                .or(self.streaming_statement_timeout_ms),
         })
     }
 }
 
 impl Merge for SequentialLayer {
     fn merge(self, other: SequentialLayer) -> anyhow::Result<SequentialLayer> {
-        check_extra("sequential pipeline", self.extra)?;
-        check_extra("sequential pipeline", other.extra)?;
         Ok(SequentialLayer {
             committer: self.committer.merge(other.committer)?,
             checkpoint_lag: other.checkpoint_lag.or(self.checkpoint_lag),
-            extra: Default::default(),
+            fanout: other.fanout.or(self.fanout),
+            min_eager_rows: other.min_eager_rows.or(self.min_eager_rows),
+            max_batch_checkpoints: other.max_batch_checkpoints.or(self.max_batch_checkpoints),
+            processor_channel_size: other.processor_channel_size.or(self.processor_channel_size),
         })
     }
 }
 
 impl Merge for ConcurrentLayer {
     fn merge(self, other: ConcurrentLayer) -> anyhow::Result<ConcurrentLayer> {
-        check_extra("concurrent pipeline", self.extra)?;
-        check_extra("concurrent pipeline", other.extra)?;
         Ok(ConcurrentLayer {
             committer: self.committer.merge(other.committer)?,
             pruner: self.pruner.merge(other.pruner)?,
-            extra: Default::default(),
+            fanout: other.fanout.or(self.fanout),
+            min_eager_rows: other.min_eager_rows.or(self.min_eager_rows),
+            max_pending_rows: other.max_pending_rows.or(self.max_pending_rows),
+            max_watermark_updates: other.max_watermark_updates.or(self.max_watermark_updates),
+            processor_channel_size: other.processor_channel_size.or(self.processor_channel_size),
+            collector_channel_size: other.collector_channel_size.or(self.collector_channel_size),
+            committer_channel_size: other.committer_channel_size.or(self.committer_channel_size),
         })
     }
 }
 
 impl Merge for CommitterLayer {
     fn merge(self, other: CommitterLayer) -> anyhow::Result<CommitterLayer> {
-        check_extra("committer", self.extra)?;
-        check_extra("committer", other.extra)?;
         Ok(CommitterLayer {
             write_concurrency: other.write_concurrency.or(self.write_concurrency),
             collect_interval_ms: other.collect_interval_ms.or(self.collect_interval_ms),
             watermark_interval_ms: other.watermark_interval_ms.or(self.watermark_interval_ms),
-            extra: Default::default(),
         })
     }
 }
@@ -362,8 +372,6 @@ impl Merge for PrunerLayer {
     /// Last write takes precedence for all fields except the `retention`, which takes the max of
     /// all available values.
     fn merge(self, other: PrunerLayer) -> anyhow::Result<PrunerLayer> {
-        check_extra("pruner", self.extra)?;
-        check_extra("pruner", other.extra)?;
         Ok(PrunerLayer {
             interval_ms: other.interval_ms.or(self.interval_ms),
             delay_ms: other.delay_ms.or(self.delay_ms),
@@ -374,20 +382,15 @@ impl Merge for PrunerLayer {
             },
             max_chunk_size: other.max_chunk_size.or(self.max_chunk_size),
             prune_concurrency: other.prune_concurrency.or(self.prune_concurrency),
-            extra: Default::default(),
         })
     }
 }
 
 impl Merge for PipelineLayer {
     fn merge(self, other: PipelineLayer) -> anyhow::Result<PipelineLayer> {
-        check_extra("pipeline", self.extra)?;
-        check_extra("pipeline", other.extra)?;
         Ok(PipelineLayer {
-            coin_balance_buckets: self
-                .coin_balance_buckets
-                .merge(other.coin_balance_buckets)?,
-            obj_info: self.obj_info.merge(other.obj_info)?,
+            cp_blooms: self.cp_blooms.merge(other.cp_blooms)?,
+            cp_bloom_blocks: self.cp_bloom_blocks.merge(other.cp_bloom_blocks)?,
             sum_displays: self.sum_displays.merge(other.sum_displays)?,
             cp_sequence_numbers: self.cp_sequence_numbers.merge(other.cp_sequence_numbers)?,
             ev_emit_mod: self.ev_emit_mod.merge(other.ev_emit_mod)?,
@@ -409,7 +412,6 @@ impl Merge for PipelineLayer {
             tx_calls: self.tx_calls.merge(other.tx_calls)?,
             tx_digests: self.tx_digests.merge(other.tx_digests)?,
             tx_kinds: self.tx_kinds.merge(other.tx_kinds)?,
-            extra: Default::default(),
         })
     }
 }
@@ -430,7 +432,10 @@ impl From<IngestionConfig> for IngestionLayer {
             checkpoint_buffer_size: Some(config.checkpoint_buffer_size),
             ingest_concurrency: Some(config.ingest_concurrency),
             retry_interval_ms: Some(config.retry_interval_ms),
-            extra: Default::default(),
+            streaming_backoff_initial_batch_size: Some(config.streaming_backoff_initial_batch_size),
+            streaming_backoff_max_batch_size: Some(config.streaming_backoff_max_batch_size),
+            streaming_connection_timeout_ms: Some(config.streaming_connection_timeout_ms),
+            streaming_statement_timeout_ms: Some(config.streaming_statement_timeout_ms),
         }
     }
 }
@@ -440,7 +445,10 @@ impl From<SequentialConfig> for SequentialLayer {
         Self {
             committer: Some(config.committer.into()),
             checkpoint_lag: Some(config.checkpoint_lag),
-            extra: Default::default(),
+            fanout: config.fanout,
+            min_eager_rows: config.min_eager_rows,
+            max_batch_checkpoints: config.max_batch_checkpoints,
+            processor_channel_size: config.processor_channel_size,
         }
     }
 }
@@ -450,7 +458,13 @@ impl From<ConcurrentConfig> for ConcurrentLayer {
         Self {
             committer: Some(config.committer.into()),
             pruner: config.pruner.map(Into::into),
-            extra: Default::default(),
+            fanout: config.fanout,
+            min_eager_rows: config.min_eager_rows,
+            max_pending_rows: config.max_pending_rows,
+            max_watermark_updates: config.max_watermark_updates,
+            processor_channel_size: config.processor_channel_size,
+            collector_channel_size: config.collector_channel_size,
+            committer_channel_size: config.committer_channel_size,
         }
     }
 }
@@ -461,7 +475,6 @@ impl From<CommitterConfig> for CommitterLayer {
             write_concurrency: Some(config.write_concurrency),
             collect_interval_ms: Some(config.collect_interval_ms),
             watermark_interval_ms: Some(config.watermark_interval_ms),
-            extra: Default::default(),
         }
     }
 }
@@ -474,22 +487,8 @@ impl From<PrunerConfig> for PrunerLayer {
             retention: Some(config.retention),
             max_chunk_size: Some(config.max_chunk_size),
             prune_concurrency: Some(config.prune_concurrency),
-            extra: Default::default(),
         }
     }
-}
-
-/// Check whether there are any unrecognized extra fields and if so, warn about them.
-fn check_extra(pos: &str, extra: toml::Table) -> anyhow::Result<()> {
-    ensure!(
-        extra.is_empty(),
-        "Found unrecognized {pos} field{}. This could be because of a typo, or because it was \
-         introduced in a newer version of the indexer:\n{}",
-        if extra.len() != 1 { "s" } else { "" },
-        extra,
-    );
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -515,17 +514,15 @@ mod tests {
                     write_concurrency: Some(10),
                     collect_interval_ms: Some(1000),
                     watermark_interval_ms: None,
-                    extra: Default::default(),
                 }),
                 checkpoint_lag: Some(100),
-                extra: Default::default(),
+                ..Default::default()
             }),
             ev_emit_mod: Some(ConcurrentLayer {
                 committer: Some(CommitterLayer {
                     write_concurrency: Some(5),
                     collect_interval_ms: Some(500),
                     watermark_interval_ms: None,
-                    extra: Default::default(),
                 }),
                 ..Default::default()
             }),
@@ -538,10 +535,9 @@ mod tests {
                     write_concurrency: Some(5),
                     collect_interval_ms: None,
                     watermark_interval_ms: Some(500),
-                    extra: Default::default(),
                 }),
                 checkpoint_lag: Some(200),
-                extra: Default::default(),
+                ..Default::default()
             }),
             ev_emit_mod: None,
             ..Default::default()
@@ -558,20 +554,20 @@ mod tests {
                         write_concurrency: Some(5),
                         collect_interval_ms: Some(1000),
                         watermark_interval_ms: Some(500),
-                        extra: _,
+                        ..
                     }),
                     checkpoint_lag: Some(200),
-                    extra: _,
+                    ..
                 }),
                 ev_emit_mod: Some(ConcurrentLayer {
                     committer: Some(CommitterLayer {
                         write_concurrency: Some(5),
                         collect_interval_ms: Some(500),
                         watermark_interval_ms: None,
-                        extra: _,
+                        ..
                     }),
                     pruner: None,
-                    extra: _,
+                    ..
                 }),
                 ..
             },
@@ -585,20 +581,20 @@ mod tests {
                         write_concurrency: Some(10),
                         collect_interval_ms: Some(1000),
                         watermark_interval_ms: Some(500),
-                        extra: _,
+                        ..
                     }),
                     checkpoint_lag: Some(100),
-                    extra: _,
+                    ..
                 }),
                 ev_emit_mod: Some(ConcurrentLayer {
                     committer: Some(CommitterLayer {
                         write_concurrency: Some(5),
                         collect_interval_ms: Some(500),
                         watermark_interval_ms: None,
-                        extra: _,
+                        ..
                     }),
                     pruner: None,
-                    extra: _,
+                    ..
                 }),
                 ..
             },
@@ -613,7 +609,6 @@ mod tests {
             retention: Some(200),
             max_chunk_size: Some(300),
             prune_concurrency: Some(1),
-            extra: Default::default(),
         };
 
         let that = PrunerLayer {
@@ -622,7 +617,6 @@ mod tests {
             retention: Some(500),
             max_chunk_size: Some(600),
             prune_concurrency: Some(2),
-            extra: Default::default(),
         };
 
         let this_then_that = this.clone().merge(that.clone()).unwrap();
@@ -636,7 +630,6 @@ mod tests {
                 retention: Some(500),
                 max_chunk_size: Some(600),
                 prune_concurrency: Some(2),
-                extra: _,
             },
         );
 
@@ -648,7 +641,6 @@ mod tests {
                 retention: Some(500),
                 max_chunk_size: Some(300),
                 prune_concurrency: Some(1),
-                extra: _,
             },
         );
     }
@@ -658,7 +650,7 @@ mod tests {
         let layer = ConcurrentLayer {
             committer: None,
             pruner: None,
-            extra: Default::default(),
+            ..Default::default()
         };
 
         let base = ConcurrentConfig {
@@ -666,8 +658,10 @@ mod tests {
                 write_concurrency: 5,
                 collect_interval_ms: 50,
                 watermark_interval_ms: 500,
+                ..Default::default()
             },
             pruner: Some(PrunerConfig::default()),
+            ..Default::default()
         };
 
         assert_matches!(
@@ -677,8 +671,10 @@ mod tests {
                     write_concurrency: 5,
                     collect_interval_ms: 50,
                     watermark_interval_ms: 500,
+                    ..
                 },
                 pruner: None,
+                ..
             },
         );
     }
@@ -688,7 +684,7 @@ mod tests {
         let layer = ConcurrentLayer {
             committer: None,
             pruner: None,
-            extra: Default::default(),
+            ..Default::default()
         };
 
         let base = ConcurrentConfig {
@@ -696,8 +692,10 @@ mod tests {
                 write_concurrency: 5,
                 collect_interval_ms: 50,
                 watermark_interval_ms: 500,
+                ..Default::default()
             },
             pruner: None,
+            ..Default::default()
         };
 
         assert_matches!(
@@ -707,8 +705,10 @@ mod tests {
                     write_concurrency: 5,
                     collect_interval_ms: 50,
                     watermark_interval_ms: 500,
+                    ..
                 },
                 pruner: None,
+                ..
             },
         );
     }
@@ -721,7 +721,7 @@ mod tests {
                 interval_ms: Some(1000),
                 ..Default::default()
             }),
-            extra: Default::default(),
+            ..Default::default()
         };
 
         let base = ConcurrentConfig {
@@ -729,6 +729,7 @@ mod tests {
                 write_concurrency: 5,
                 collect_interval_ms: 50,
                 watermark_interval_ms: 500,
+                ..Default::default()
             },
             pruner: Some(PrunerConfig {
                 interval_ms: 100,
@@ -737,6 +738,7 @@ mod tests {
                 max_chunk_size: 400,
                 prune_concurrency: 1,
             }),
+            ..Default::default()
         };
 
         assert_matches!(
@@ -746,6 +748,7 @@ mod tests {
                     write_concurrency: 5,
                     collect_interval_ms: 50,
                     watermark_interval_ms: 500,
+                    ..
                 },
                 pruner: Some(PrunerConfig {
                     interval_ms: 1000,
@@ -754,20 +757,20 @@ mod tests {
                     max_chunk_size: 400,
                     prune_concurrency: 1,
                 }),
+                ..
             },
         );
     }
 
     #[test]
     fn detect_unrecognized_fields() {
-        let config: IndexerConfig = toml::from_str(
+        let err = toml::from_str::<IndexerConfig>(
             r#"
             i_dont_exist = "foo"
             "#,
         )
-        .unwrap();
+        .unwrap_err();
 
-        let err = config.finish().unwrap_err();
         assert!(
             err.to_string().contains("i_dont_exist"),
             "Unexpected error: {err}"

@@ -1,3 +1,4 @@
+use crate::get_extension;
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 use crate::NativesCostTable;
@@ -8,21 +9,23 @@ use fastcrypto::{
     error::FastCryptoError,
     hash::{Keccak256, Sha256},
     secp256k1::{
-        recoverable::Secp256k1RecoverableSignature, Secp256k1PublicKey, Secp256k1Signature,
+        Secp256k1PublicKey, Secp256k1Signature, recoverable::Secp256k1RecoverableSignature,
     },
     traits::{RecoverableSignature, ToFromBytes},
 };
 use move_binary_format::errors::PartialVMResult;
 use move_core_types::gas_algebra::InternalGas;
-use move_vm_runtime::{native_charge_gas_early_exit, native_functions::NativeContext};
-use move_vm_types::{
-    loaded_data::runtime_types::Type,
-    natives::function::NativeResult,
+use move_vm_runtime::{
+    execution::{
+        Type,
+        values::{self, Value, VectorRef},
+    },
+    natives::functions::NativeResult,
     pop_arg,
-    values::{self, Value, VectorRef},
 };
-use rand::rngs::StdRng;
+use move_vm_runtime::{native_charge_gas_early_exit, natives::functions::NativeContext};
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use smallvec::smallvec;
 use std::collections::VecDeque;
 use sui_types::crypto::KeypairTraits;
@@ -80,7 +83,7 @@ pub fn ecrecover(
 
     // Load the cost parameters from the protocol config
     let (ecdsa_k1_ecrecover_cost_params, crypto_invalid_arguments_cost) = {
-        let cost_table = &context.extensions().get::<NativesCostTable>()?;
+        let cost_table: &NativesCostTable = get_extension!(context)?;
         (
             cost_table.ecdsa_k1_ecrecover_cost_params.clone(),
             cost_table.crypto_invalid_arguments_cost,
@@ -101,7 +104,7 @@ pub fn ecrecover(
         ),
         _ => {
             // Charge for failure but dont fail if we run out of gas otherwise the actual error is masked by OUT_OF_GAS error
-            context.charge_gas(crypto_invalid_arguments_cost);
+            context.charge_gas(crypto_invalid_arguments_cost)?;
             return Ok(NativeResult::err(
                 context.gas_used(),
                 FAIL_TO_RECOVER_PUBKEY,
@@ -115,8 +118,8 @@ pub fn ecrecover(
     let msg = pop_arg!(args, VectorRef);
     let signature = pop_arg!(args, VectorRef);
 
-    let msg_ref = msg.as_bytes_ref();
-    let signature_ref = signature.as_bytes_ref();
+    let msg_ref = msg.as_bytes_ref()?;
+    let signature_ref = signature.as_bytes_ref()?;
 
     // Charge the arg size dependent costs
     native_charge_gas_early_exit!(
@@ -159,9 +162,7 @@ pub fn decompress_pubkey(
     debug_assert!(args.len() == 1);
 
     // Load the cost parameters from the protocol config
-    let ecdsa_k1_decompress_pubkey_cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let ecdsa_k1_decompress_pubkey_cost_params = get_extension!(context, NativesCostTable)?
         .ecdsa_k1_decompress_pubkey_cost_params
         .clone();
     // Charge the base cost for this oper
@@ -171,7 +172,7 @@ pub fn decompress_pubkey(
     );
 
     let pubkey = pop_arg!(args, VectorRef);
-    let pubkey_ref = pubkey.as_bytes_ref();
+    let pubkey_ref = pubkey.as_bytes_ref()?;
 
     let cost = context.gas_used();
 
@@ -226,7 +227,7 @@ pub fn secp256k1_verify(
 
     // Load the cost parameters from the protocol config
     let (ecdsa_k1_secp256k1_verify_cost_params, crypto_invalid_arguments_cost) = {
-        let cost_table = &context.extensions().get::<NativesCostTable>()?;
+        let cost_table: &NativesCostTable = get_extension!(context)?;
         (
             cost_table.ecdsa_k1_secp256k1_verify_cost_params.clone(),
             cost_table.crypto_invalid_arguments_cost,
@@ -252,7 +253,7 @@ pub fn secp256k1_verify(
         ),
         _ => {
             // Charge for failure but dont fail if we run out of gas otherwise the actual error is masked by OUT_OF_GAS error
-            context.charge_gas(crypto_invalid_arguments_cost);
+            context.charge_gas(crypto_invalid_arguments_cost)?;
 
             return Ok(NativeResult::ok(
                 context.gas_used(),
@@ -267,9 +268,9 @@ pub fn secp256k1_verify(
     let public_key_bytes = pop_arg!(args, VectorRef);
     let signature_bytes = pop_arg!(args, VectorRef);
 
-    let msg_ref = msg.as_bytes_ref();
-    let public_key_bytes_ref = public_key_bytes.as_bytes_ref();
-    let signature_bytes_ref = signature_bytes.as_bytes_ref();
+    let msg_ref = msg.as_bytes_ref()?;
+    let public_key_bytes_ref = public_key_bytes.as_bytes_ref()?;
+    let signature_bytes_ref = signature_bytes.as_bytes_ref()?;
 
     // Charge the arg size dependent costs
     native_charge_gas_early_exit!(
@@ -321,8 +322,8 @@ pub fn secp256k1_sign(
     let msg = pop_arg!(args, VectorRef);
     let private_key_bytes = pop_arg!(args, VectorRef);
 
-    let msg_ref = msg.as_bytes_ref();
-    let private_key_bytes_ref = private_key_bytes.as_bytes_ref();
+    let msg_ref = msg.as_bytes_ref()?;
+    let private_key_bytes_ref = private_key_bytes.as_bytes_ref()?;
 
     let sk = match <Secp256k1PrivateKey as ToFromBytes>::from_bytes(&private_key_bytes_ref) {
         Ok(sk) => sk,
@@ -370,7 +371,7 @@ pub fn secp256k1_keypair_from_seed(
     let cost = 0.into();
 
     let seed = pop_arg!(args, VectorRef);
-    let seed_ref = seed.as_bytes_ref();
+    let seed_ref = seed.as_bytes_ref()?;
 
     if seed_ref.len() != SEED_LENGTH {
         return Ok(NativeResult::err(cost, INVALID_SEED));

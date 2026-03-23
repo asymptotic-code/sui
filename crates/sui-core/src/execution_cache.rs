@@ -1,21 +1,21 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::accumulators::funds_read::AccountFundsRead;
+use crate::authority::AuthorityStore;
 use crate::authority::authority_per_epoch_store::AuthorityPerEpochStore;
 use crate::authority::authority_store::{ExecutionLockWriteGuard, SuiLockResult};
 use crate::authority::backpressure::BackpressureManager;
 use crate::authority::epoch_start_configuration::EpochFlag;
 use crate::authority::epoch_start_configuration::EpochStartConfiguration;
-use crate::authority::AuthorityStore;
 use crate::global_state_hasher::GlobalStateHashStore;
 use crate::transaction_outputs::TransactionOutputs;
 use either::Either;
 use itertools::Itertools;
-use mysten_common::fatal;
 use sui_types::accumulator_event::AccumulatorEvent;
 use sui_types::bridge::Bridge;
 
-use futures::{future::BoxFuture, FutureExt};
+use futures::{FutureExt, future::BoxFuture};
 use prometheus::Registry;
 use std::collections::HashSet;
 use std::path::Path;
@@ -25,7 +25,7 @@ use sui_protocol_config::ProtocolVersion;
 use sui_types::base_types::{FullObjectID, VerifiedExecutionData};
 use sui_types::digests::{TransactionDigest, TransactionEffectsDigest};
 use sui_types::effects::{TransactionEffects, TransactionEvents};
-use sui_types::error::{SuiError, SuiResult, UserInputError};
+use sui_types::error::{SuiError, SuiErrorKind, SuiResult, UserInputError};
 use sui_types::executable_transaction::VerifiedExecutableTransaction;
 use sui_types::messages_checkpoint::CheckpointSequenceNumber;
 use sui_types::object::Object;
@@ -34,7 +34,7 @@ use sui_types::storage::{
     ObjectOrTombstone, ObjectStore, PackageObject, ParentSync,
 };
 use sui_types::sui_system_state::SuiSystemState;
-use sui_types::transaction::{VerifiedSignedTransaction, VerifiedTransaction};
+use sui_types::transaction::VerifiedTransaction;
 use sui_types::{
     base_types::{EpochId, ObjectID, ObjectRef, SequenceNumber},
     object::Owner,
@@ -62,6 +62,7 @@ pub struct ExecutionCacheTraitPointers {
     pub transaction_cache_reader: Arc<dyn TransactionCacheRead>,
     pub cache_writer: Arc<dyn ExecutionCacheWrite>,
     pub backing_store: Arc<dyn BackingStore + Send + Sync>,
+    pub child_object_resolver: Arc<dyn ChildObjectResolver + Send + Sync>,
     pub backing_package_store: Arc<dyn BackingPackageStore + Send + Sync>,
     pub object_store: Arc<dyn ObjectStore + Send + Sync>,
     pub reconfig_api: Arc<dyn ExecutionCacheReconfigAPI>,
@@ -70,6 +71,7 @@ pub struct ExecutionCacheTraitPointers {
     pub state_sync_store: Arc<dyn StateSyncAPI>,
     pub cache_commit: Arc<dyn ExecutionCacheCommit>,
     pub testing_api: Arc<dyn TestingAPI>,
+    pub account_funds_read: Arc<dyn AccountFundsRead>,
 }
 
 impl ExecutionCacheTraitPointers {
@@ -87,6 +89,7 @@ impl ExecutionCacheTraitPointers {
             + StateSyncAPI
             + ExecutionCacheCommit
             + TestingAPI
+            + AccountFundsRead
             + 'static,
     {
         Self {
@@ -94,6 +97,7 @@ impl ExecutionCacheTraitPointers {
             transaction_cache_reader: cache.clone(),
             cache_writer: cache.clone(),
             backing_store: cache.clone(),
+            child_object_resolver: cache.clone(),
             backing_package_store: cache.clone(),
             object_store: cache.clone(),
             reconfig_api: cache.clone(),
@@ -102,6 +106,7 @@ impl ExecutionCacheTraitPointers {
             state_sync_store: cache.clone(),
             cache_commit: cache.clone(),
             testing_api: cache.clone(),
+            account_funds_read: cache.clone(),
         }
     }
 }
@@ -227,7 +232,7 @@ pub trait ObjectCacheRead: Send + Sync {
                             version: Some(object_ref.1),
                         }
                     };
-                    return Err(SuiError::UserInputError { error });
+                    return Err(SuiErrorKind::UserInputError { error }.into());
                 }
                 Some(object) => {
                     result.push(object);
@@ -339,7 +344,7 @@ pub trait ObjectCacheRead: Send + Sync {
 
     /// Get the marker at a specific version
     fn get_marker_value(&self, object_key: FullObjectKey, epoch_id: EpochId)
-        -> Option<MarkerValue>;
+    -> Option<MarkerValue>;
 
     /// Get the latest marker for a given object.
     fn get_latest_marker(
@@ -498,6 +503,12 @@ pub trait TransactionCacheRead: Send + Sync {
             .expect("multi-get must return correct number of items")
     }
 
+    fn transaction_executed_in_last_epoch(
+        &self,
+        digest: &TransactionDigest,
+        current_epoch: EpochId,
+    ) -> bool;
+
     fn multi_get_effects(
         &self,
         digests: &[TransactionEffectsDigest],
@@ -517,6 +528,11 @@ pub trait TransactionCacheRead: Send + Sync {
             .expect("multi-get must return correct number of items")
     }
 
+    fn get_unchanged_loaded_runtime_objects(
+        &self,
+        digest: &TransactionDigest,
+    ) -> Option<Vec<ObjectKey>>;
+
     fn take_accumulator_events(&self, digest: &TransactionDigest) -> Option<Vec<AccumulatorEvent>>;
 
     fn notify_read_executed_effects_digests<'a>(
@@ -532,36 +548,49 @@ pub trait TransactionCacheRead: Send + Sync {
     /// ExecutionLockReadGuard would also prevent reconfig from happening while waiting,
     /// but this is very dangerous, as it could prevent reconfiguration from ever
     /// occurring!
+    ///
+    /// This function panics if any of the requested effects are not found. Use this in
+    /// critical paths where effects are expected to exist (e.g., checkpoint building,
+    /// consensus commit processing). For non-critical paths where effects may have been
+    /// pruned (e.g., serving historical data to clients), use `notify_read_executed_effects_may_fail`.
     fn notify_read_executed_effects<'a>(
         &'a self,
         task_name: &'static str,
         digests: &'a [TransactionDigest],
     ) -> BoxFuture<'a, Vec<TransactionEffects>> {
         async move {
-            let digests = self
-                .notify_read_executed_effects_digests(task_name, digests)
-                .await;
-            // once digests are available, effects must be present as well
-            self.multi_get_effects(&digests)
-                .into_iter()
-                .map(|e| e.unwrap_or_else(|| fatal!("digests must exist")))
-                .collect()
+            self.notify_read_executed_effects_may_fail(task_name, digests)
+                .await
+                .unwrap_or_else(|e| panic!("effects must exist: {e}"))
         }
         .boxed()
     }
 
-    /// Get the execution outputs of a mysticeti fastpath certified transaction, if it exists.
-    fn get_mysticeti_fastpath_outputs(
-        &self,
-        tx_digest: &TransactionDigest,
-    ) -> Option<Arc<TransactionOutputs>>;
-
-    /// Wait until the outputs of the given transactions are available
-    /// in the temporary buffer holding mysticeti fastpath outputs.
-    fn notify_read_fastpath_transaction_outputs<'a>(
+    /// Returns an error if any of the requested effects have been pruned from the database.
+    /// Use this in non-critical paths where effects may not exist (e.g., serving historical
+    /// data that may have been pruned). For critical paths where effects must exist,
+    /// use `notify_read_executed_effects`.
+    fn notify_read_executed_effects_may_fail<'a>(
         &'a self,
-        tx_digests: &'a [TransactionDigest],
-    ) -> BoxFuture<'a, Vec<Arc<TransactionOutputs>>>;
+        task_name: &'static str,
+        digests: &'a [TransactionDigest],
+    ) -> BoxFuture<'a, SuiResult<Vec<TransactionEffects>>> {
+        async move {
+            let effects_digests = self
+                .notify_read_executed_effects_digests(task_name, digests)
+                .await;
+            self.multi_get_effects(&effects_digests)
+                .into_iter()
+                .zip(digests)
+                .map(|(e, digest)| {
+                    e.ok_or_else(|| {
+                        SuiError::from(SuiErrorKind::TransactionEffectsNotFound { digest: *digest })
+                    })
+                })
+                .collect()
+        }
+        .boxed()
+    }
 }
 
 pub trait ExecutionCacheWrite: Send + Sync {
@@ -584,21 +613,9 @@ pub trait ExecutionCacheWrite: Send + Sync {
     /// in question.
     fn write_transaction_outputs(&self, epoch_id: EpochId, tx_outputs: Arc<TransactionOutputs>);
 
-    /// Write the output of a Mysticeti fastpath certified transaction.
-    /// Such output cannot be written to the dirty cache right away because
-    /// the transaction may end up rejected by consensus later. We need to make sure
-    /// that it is not visible to any subsequent transaction until we observe it
-    /// from consensus or checkpoints.
-    fn write_fastpath_transaction_outputs(&self, tx_outputs: Arc<TransactionOutputs>);
-
-    /// Attempt to acquire object locks for all of the owned input locks.
-    fn acquire_transaction_locks(
-        &self,
-        epoch_store: &AuthorityPerEpochStore,
-        owned_input_objects: &[ObjectRef],
-        tx_digest: TransactionDigest,
-        signed_transaction: Option<VerifiedSignedTransaction>,
-    ) -> SuiResult;
+    /// Validate owned object versions and digests without acquiring locks.
+    /// Used to validate transaction input before submitting or voting to accept the transaction.
+    fn validate_owned_object_versions(&self, owned_input_objects: &[ObjectRef]) -> SuiResult;
 
     /// Write an object entry directly to the cache for testing.
     /// This allows us to write an object without constructing the entire
@@ -634,7 +651,6 @@ pub trait ExecutionCacheReconfigAPI: Send + Sync {
     fn insert_genesis_object(&self, object: Object);
     fn bulk_insert_genesis_objects(&self, objects: &[Object]);
 
-    fn revert_state_update(&self, digest: &TransactionDigest);
     fn set_epoch_start_configuration(&self, epoch_start_config: &EpochStartConfiguration);
 
     fn update_epoch_flags_metrics(&self, old: &[EpochFlag], new: &[EpochFlag]);
@@ -683,6 +699,8 @@ pub trait StateSyncAPI: Send + Sync {
 
 pub trait TestingAPI: Send + Sync {
     fn database_for_testing(&self) -> Arc<AuthorityStore>;
+
+    fn cache_for_testing(&self) -> &WritebackCache;
 }
 
 macro_rules! implement_storage_traits {
@@ -716,11 +734,12 @@ macro_rules! implement_storage_traits {
 
                 let parent = *parent;
                 if child_object.owner != Owner::ObjectOwner(parent.into()) {
-                    return Err(SuiError::InvalidChildObjectAccess {
+                    return Err(SuiErrorKind::InvalidChildObjectAccess {
                         object: *child,
                         given_parent: parent,
                         actual_owner: child_object.owner.clone(),
-                    });
+                    }
+                    .into());
                 }
                 Ok(Some(child_object))
             }
@@ -825,10 +844,6 @@ macro_rules! implement_passthrough_traits {
                 self.bulk_insert_genesis_objects_impl(objects)
             }
 
-            fn revert_state_update(&self, digest: &TransactionDigest) {
-                self.revert_state_update_impl(digest)
-            }
-
             fn set_epoch_start_configuration(&self, epoch_start_config: &EpochStartConfiguration) {
                 self.store
                     .set_epoch_start_configuration(epoch_start_config)
@@ -878,6 +893,10 @@ macro_rules! implement_passthrough_traits {
         impl TestingAPI for $implementor {
             fn database_for_testing(&self) -> Arc<AuthorityStore> {
                 self.store.clone()
+            }
+
+            fn cache_for_testing(&self) -> &WritebackCache {
+                self
             }
         }
     };

@@ -19,12 +19,13 @@ use sui_swarm_config::network_config::NetworkConfig;
 use sui_test_transaction_builder::TestTransactionBuilder;
 use sui_types::base_types::{ObjectID, ObjectRef, SuiAddress};
 use sui_types::effects::TransactionEffectsAPI;
-use sui_types::error::{SuiError, SuiResult, UserInputError};
-use sui_types::execution_status::{ExecutionFailureStatus, ExecutionStatus};
-use sui_types::messages_grpc::HandleTransactionResponse;
+use sui_types::error::{SuiErrorKind, SuiResult, UserInputError};
+use sui_types::executable_transaction::VerifiedExecutableTransaction;
+use sui_types::execution_status::{ExecutionErrorKind, ExecutionFailure, ExecutionStatus};
+use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{
-    CallArg, CertifiedTransaction, Transaction, TransactionData, VerifiedCertificate,
-    VerifiedTransaction, TEST_ONLY_GAS_UNIT_FOR_TRANSFER,
+    CallArg, TEST_ONLY_GAS_UNIT_FOR_TRANSFER, Transaction, TransactionData, TransactionKind,
+    VerifiedTransaction,
 };
 use sui_types::utils::get_zklogin_user_address;
 use sui_types::utils::{
@@ -91,22 +92,17 @@ fn get_accounts_and_coins(
     accounts
 }
 
-async fn process_zklogin_tx(
-    tx: Transaction,
-    state: &Arc<AuthorityState>,
-) -> SuiResult<HandleTransactionResponse> {
+fn process_zklogin_tx(tx: Transaction, state: &Arc<AuthorityState>) -> SuiResult<()> {
+    let epoch_store = state.epoch_store_for_testing();
     let verified_tx = VerifiedTransaction::new_from_verified(tx);
-
-    state
-        .handle_transaction(&state.epoch_store_for_testing(), verified_tx)
-        .await
+    state.handle_vote_transaction(&epoch_store, verified_tx)
 }
 
-async fn transfer_with_account(
+fn transfer_with_account(
     sender_account: &Account,
     sponsor_account: &Account,
     state: &Arc<AuthorityState>,
-) -> SuiResult<HandleTransactionResponse> {
+) -> SuiResult<()> {
     let rgp = state.reference_gas_price_for_testing().unwrap();
     let data = TransactionData::new_transfer_sui_allow_sponsor(
         sender_account.0,
@@ -126,11 +122,14 @@ async fn transfer_with_account(
         )
     };
     let epoch_store = state.epoch_store_for_testing();
-    let tx = epoch_store.verify_transaction(tx).unwrap();
-    state.handle_transaction(&epoch_store, tx).await
+    let tx = epoch_store
+        .verify_transaction_require_no_aliases(tx)
+        .unwrap()
+        .into_tx();
+    state.handle_vote_transaction(&epoch_store, tx)
 }
 
-async fn handle_move_call_transaction(
+fn handle_move_call_transaction(
     state: &Arc<AuthorityState>,
     package: ObjectID,
     module_name: &'static str,
@@ -138,7 +137,7 @@ async fn handle_move_call_transaction(
     args: Vec<CallArg>,
     account: &Account,
     gas_payment_index: usize,
-) -> SuiResult<HandleTransactionResponse> {
+) -> SuiResult<()> {
     let rgp = state.reference_gas_price_for_testing().unwrap();
     let data = TransactionData::new_move_call(
         account.0,
@@ -154,14 +153,17 @@ async fn handle_move_call_transaction(
     .unwrap();
     let epoch_store = state.epoch_store_for_testing();
     let tx = to_sender_signed_transaction(data, &account.1);
-    let tx = epoch_store.verify_transaction(tx).unwrap();
-    state.handle_transaction(&epoch_store, tx).await
+    let tx = epoch_store
+        .verify_transaction_require_no_aliases(tx)
+        .unwrap()
+        .into_tx();
+    state.handle_vote_transaction(&epoch_store, tx)
 }
 
 fn assert_denied<T: std::fmt::Debug>(result: &SuiResult<T>) {
     assert!(matches!(
-        result.as_ref().unwrap_err(),
-        SuiError::UserInputError {
+        result.as_ref().unwrap_err().as_inner(),
+        SuiErrorKind::UserInputError {
             error: UserInputError::TransactionDenied { .. }
         }
     ));
@@ -176,7 +178,7 @@ async fn test_user_transaction_disabled() {
     )
     .await;
     let accounts = get_accounts_and_coins(&network_config, &state);
-    assert_denied(&transfer_with_account(&accounts[0], &accounts[0], &state).await);
+    assert_denied(&transfer_with_account(&accounts[0], &accounts[0], &state));
 }
 
 #[tokio::test]
@@ -188,7 +190,7 @@ async fn test_zklogin_transaction_disabled() {
     )
     .await;
     let (_, tx, _) = make_zklogin_tx(get_zklogin_user_address(), false);
-    assert_denied(&process_zklogin_tx(tx, &state).await);
+    assert_denied(&process_zklogin_tx(tx, &state));
 
     let (_, state1) = setup_test(
         TransactionDenyConfigBuilder::new()
@@ -197,7 +199,7 @@ async fn test_zklogin_transaction_disabled() {
     )
     .await;
     let (_, tx1, _) = make_zklogin_tx(get_zklogin_user_address(), false);
-    assert_denied(&process_zklogin_tx(tx1, &state1).await);
+    assert_denied(&process_zklogin_tx(tx1, &state1));
 }
 
 #[tokio::test]
@@ -215,7 +217,7 @@ async fn test_object_denied() {
             .build(),
     )
     .await;
-    assert_denied(&transfer_with_account(&accounts[0], &accounts[0], &state).await);
+    assert_denied(&transfer_with_account(&accounts[0], &accounts[0], &state));
 }
 
 #[tokio::test]
@@ -235,9 +237,9 @@ async fn test_signer_denied() {
     )
     .await;
     // Test that sender (accounts[0]) would be denied.
-    assert_denied(&transfer_with_account(&accounts[0], &accounts[0], &state).await);
+    assert_denied(&transfer_with_account(&accounts[0], &accounts[0], &state));
     // Test that sponsor (accounts[1]) would be denied.
-    assert_denied(&transfer_with_account(&accounts[2], &accounts[1], &state).await);
+    assert_denied(&transfer_with_account(&accounts[2], &accounts[1], &state));
 }
 
 #[tokio::test]
@@ -255,8 +257,11 @@ async fn test_shared_object_transaction_disabled() {
         .call_staking(account.2[1], SuiAddress::default())
         .build_and_sign(&account.1);
     let epoch_store = state.epoch_store_for_testing();
-    let tx = epoch_store.verify_transaction(tx).unwrap();
-    let result = state.handle_transaction(&epoch_store, tx).await;
+    let tx = epoch_store
+        .verify_transaction_require_no_aliases(tx)
+        .unwrap()
+        .into_tx();
+    let result = state.handle_vote_transaction(&epoch_store, tx);
     assert_denied(&result);
 }
 
@@ -277,8 +282,11 @@ async fn test_package_publish_disabled() {
         .publish(path)
         .build_and_sign(keypair);
     let epoch_store = state.epoch_store_for_testing();
-    let tx = epoch_store.verify_transaction(tx).unwrap();
-    let result = state.handle_transaction(&epoch_store, tx).await;
+    let tx = epoch_store
+        .verify_transaction_require_no_aliases(tx)
+        .unwrap()
+        .into_tx();
+    let result = state.handle_vote_transaction(&epoch_store, tx);
     assert_denied(&result);
 }
 
@@ -371,30 +379,25 @@ async fn test_package_denied() {
     .await;
 
     // Calling modules in package c directly should fail.
-    let result =
-        handle_move_call_transaction(&state, package_c, "c", "c", vec![], &accounts[0], 5).await;
+    let result = handle_move_call_transaction(&state, package_c, "c", "c", vec![], &accounts[0], 5);
     assert_denied(&result);
 
     // Calling modules in package b should fail too as it directly depends on c.
-    let result =
-        handle_move_call_transaction(&state, package_c, "b", "b", vec![], &accounts[0], 6).await;
+    let result = handle_move_call_transaction(&state, package_c, "b", "b", vec![], &accounts[0], 6);
     assert_denied(&result);
 
     // Calling modules in package a should fail too as it indirectly depends on c.
-    let result =
-        handle_move_call_transaction(&state, package_c, "a", "a", vec![], &accounts[0], 7).await;
+    let result = handle_move_call_transaction(&state, package_c, "a", "a", vec![], &accounts[0], 7);
     assert_denied(&result);
 
     // Calling modules in c' should succeed as it is not denied.
     let result =
-        handle_move_call_transaction(&state, package_c_prime, "c", "c", vec![], &accounts[0], 8)
-            .await;
+        handle_move_call_transaction(&state, package_c_prime, "c", "c", vec![], &accounts[0], 8);
     assert!(result.is_ok());
 
     // Calling modules in b' should succeed as it no longer depends on c.
     let result =
-        handle_move_call_transaction(&state, package_b_prime, "b", "b", vec![], &accounts[0], 9)
-            .await;
+        handle_move_call_transaction(&state, package_b_prime, "b", "b", vec![], &accounts[0], 9);
     assert!(result.is_ok());
 
     // Publish a should fail because it has a dependency on c, which is denied.
@@ -466,27 +469,24 @@ async fn test_certificate_deny() {
         .build()
         .await;
     let epoch_store = state.epoch_store_for_testing();
-    let tx = epoch_store.verify_transaction(tx).unwrap();
-    let signature = state
-        .handle_transaction(&epoch_store, tx.clone())
-        .await
+    let tx = epoch_store
+        .verify_transaction_require_no_aliases(tx)
         .unwrap()
-        .status
-        .into_signed_for_testing();
-    let cert = VerifiedCertificate::new_unchecked(
-        CertifiedTransaction::new(tx.into_message(), vec![signature], epoch_store.committee())
-            .unwrap(),
-    );
-    let (effects, _) = state
-        .try_execute_for_test(&cert, ExecutionEnv::new())
-        .await
+        .into_tx();
+    state
+        .handle_vote_transaction(&epoch_store, tx.clone())
         .unwrap();
+    // Create an executable transaction as if certified by consensus
+    let executable = VerifiedExecutableTransaction::new_from_consensus(tx, epoch_store.epoch());
+    let (effects, _) = state
+        .try_execute_executable_for_test(&executable, ExecutionEnv::new())
+        .await;
     assert!(matches!(
         effects.status(),
-        &ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::CertificateDenied,
+        &ExecutionStatus::Failure(ExecutionFailure {
+            error: ExecutionErrorKind::CertificateDenied,
             ..
-        }
+        })
     ));
 }
 
@@ -502,7 +502,7 @@ async fn test_user_transaction_disabled_dynamic_check() {
     )
     .await;
     let accounts = get_accounts_and_coins(&network_config, &state);
-    assert_denied(&transfer_with_account(&accounts[0], &accounts[0], &state).await);
+    assert_denied(&transfer_with_account(&accounts[0], &accounts[0], &state));
 }
 
 #[tokio::test]
@@ -523,7 +523,7 @@ async fn test_object_denied_dynamic_check() {
             .build(),
     )
     .await;
-    assert_denied(&transfer_with_account(&accounts[0], &accounts[0], &state).await);
+    assert_denied(&transfer_with_account(&accounts[0], &accounts[0], &state));
 }
 
 #[tokio::test]
@@ -543,8 +543,11 @@ async fn test_shared_object_transaction_disabled_dynamic_check() {
         .call_staking(account.2[1], SuiAddress::default())
         .build_and_sign(&account.1);
     let epoch_store = state.epoch_store_for_testing();
-    let tx = epoch_store.verify_transaction(tx).unwrap();
-    let result = state.handle_transaction(&epoch_store, tx).await;
+    let tx = epoch_store
+        .verify_transaction_require_no_aliases(tx)
+        .unwrap()
+        .into_tx();
+    let result = state.handle_vote_transaction(&epoch_store, tx);
     assert_denied(&result);
 }
 
@@ -567,8 +570,11 @@ async fn test_package_publish_disabled_dynamic_check() {
         .publish(path)
         .build_and_sign(keypair);
     let epoch_store = state.epoch_store_for_testing();
-    let tx = epoch_store.verify_transaction(tx).unwrap();
-    let result = state.handle_transaction(&epoch_store, tx).await;
+    let tx = epoch_store
+        .verify_transaction_require_no_aliases(tx)
+        .unwrap()
+        .into_tx();
+    let result = state.handle_vote_transaction(&epoch_store, tx);
     assert_denied(&result);
 }
 
@@ -664,30 +670,25 @@ async fn test_package_denied_dynamic_check() {
     .await;
 
     // Calling modules in package c directly should fail.
-    let result =
-        handle_move_call_transaction(&state, package_c, "c", "c", vec![], &accounts[0], 5).await;
+    let result = handle_move_call_transaction(&state, package_c, "c", "c", vec![], &accounts[0], 5);
     assert_denied(&result);
 
     // Calling modules in package b should fail too as it directly depends on c.
-    let result =
-        handle_move_call_transaction(&state, package_c, "b", "b", vec![], &accounts[0], 6).await;
+    let result = handle_move_call_transaction(&state, package_c, "b", "b", vec![], &accounts[0], 6);
     assert_denied(&result);
 
     // Calling modules in package a should fail too as it indirectly depends on c.
-    let result =
-        handle_move_call_transaction(&state, package_c, "a", "a", vec![], &accounts[0], 7).await;
+    let result = handle_move_call_transaction(&state, package_c, "a", "a", vec![], &accounts[0], 7);
     assert_denied(&result);
 
     // Calling modules in c' should succeed as it is not denied.
     let result =
-        handle_move_call_transaction(&state, package_c_prime, "c", "c", vec![], &accounts[0], 8)
-            .await;
+        handle_move_call_transaction(&state, package_c_prime, "c", "c", vec![], &accounts[0], 8);
     assert!(result.is_ok());
 
     // Calling modules in b' should succeed as it no longer depends on c.
     let result =
-        handle_move_call_transaction(&state, package_b_prime, "b", "b", vec![], &accounts[0], 9)
-            .await;
+        handle_move_call_transaction(&state, package_b_prime, "b", "b", vec![], &accounts[0], 9);
     assert!(result.is_ok());
 
     // Publish a should fail because it has a dependency on c, which is denied.
@@ -731,5 +732,41 @@ async fn test_package_denied_dynamic_check() {
         &state,
     )
     .await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_dev_inspect_disabled() {
+    use sui_types::crypto::get_authority_key_pair;
+
+    let fullnode_key_pair = get_authority_key_pair().1;
+    let fullnode = TestAuthorityBuilder::new()
+        .with_dev_inspect_disabled()
+        .with_keypair(&fullnode_key_pair)
+        .build()
+        .await;
+
+    let sender = SuiAddress::random_for_testing_only();
+    let pt = {
+        let mut builder = ProgrammableTransactionBuilder::new();
+        builder.transfer_sui(sender, None);
+        builder.finish()
+    };
+    let kind = TransactionKind::programmable(pt);
+
+    // With skip_checks=true (default), should be denied
+    let result = fullnode
+        .dev_inspect_transaction_block(sender, kind.clone(), None, None, None, None, None, None)
+        .await;
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err().as_inner(),
+        SuiErrorKind::UnsupportedFeatureError { .. }
+    ));
+
+    // With skip_checks=false, should pass our guard
+    let result = fullnode
+        .dev_inspect_transaction_block(sender, kind, None, None, None, None, None, Some(false))
+        .await;
     assert!(result.is_ok());
 }

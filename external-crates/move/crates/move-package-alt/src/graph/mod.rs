@@ -4,175 +4,53 @@
 
 mod builder;
 mod linkage;
+mod package_info;
 mod rename_from;
 mod to_lockfile;
 
+pub use builder::LockfileError;
+use derive_where::derive_where;
 pub use linkage::LinkageError;
+pub use package_info::{NamedAddress, PackageInfo};
+use petgraph::visit::EdgeRef;
 pub use rename_from::RenameError;
+
 use tracing::debug;
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use crate::package::package_loader::PackageConfig;
+use crate::package::package_lock::PackageSystemLock;
+use crate::schema::{EphemeralDependencyInfo, ModeName, Publication};
 use crate::{
     dependency::PinnedDependencyInfo,
-    errors::{PackageError, PackageResult},
+    errors::PackageResult,
     flavor::MoveFlavor,
     package::{Package, paths::PackagePath},
-    schema::{Environment, OriginalID, PackageName, PublishAddresses},
+    schema::{Environment, PackageID},
 };
+use bimap::BiBTreeMap;
 use builder::PackageGraphBuilder;
 
-use derive_where::derive_where;
 use petgraph::{
     algo::toposort,
     graph::{DiGraph, NodeIndex},
-    visit::EdgeRef,
 };
 
-#[derive(Debug, Clone)]
-pub struct PackageGraphEdge {
-    name: PackageName,
-    dep: PinnedDependencyInfo,
-}
-
+/// The graph of all packages. May include multiple versions of "the same" package. Guaranteed to
+/// be a rooted dag
 #[derive(Debug)]
-pub struct PackageGraph<F: MoveFlavor> {
-    root_index: NodeIndex,
-    inner: DiGraph<Arc<Package<F>>, PackageGraphEdge>,
-}
-
-/// A narrow interface for representing packages outside of `move-package-alt`
-#[derive(Copy)]
 #[derive_where(Clone)]
-pub struct PackageInfo<'a, F: MoveFlavor> {
-    graph: &'a PackageGraph<F>,
-    node: NodeIndex,
-}
+pub(crate) struct PackageGraph<F: MoveFlavor> {
+    /// The root of the dag
+    root_index: NodeIndex,
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum NamedAddress {
-    RootPackage(Option<OriginalID>),
-    Unpublished { dummy_addr: OriginalID },
-    Defined(OriginalID),
-}
+    /// The mapping between package ids and nodes
+    /// Invariant: the indices in `package_ids` are the same as those in `inner`
+    package_ids: BiBTreeMap<PackageID, NodeIndex>,
 
-impl<F: MoveFlavor> PackageInfo<'_, F> {
-    /// The name that the package has declared for itself
-    pub fn name(&self) -> &PackageName {
-        self.package().name()
-    }
-
-    /// The compiler edition for the package
-    pub fn edition(&self) -> &str {
-        self.package().metadata().edition.as_str()
-    }
-
-    /// The flavor for the package
-    pub fn flavor(&self) -> Option<&str> {
-        // TODO: pull this from manifest
-        Some("sui")
-    }
-
-    /// The path to the package's files on disk
-    pub fn path(&self) -> &PackagePath {
-        self.package().path()
-    }
-
-    /// Returns the published address of this package, if it is published
-    pub fn published(&self) -> Option<&PublishAddresses> {
-        self.package().publication()
-    }
-
-    /// Returns true if the node is the root of the package graph
-    pub fn is_root(&self) -> bool {
-        self.package().is_root()
-    }
-
-    /// The addresses for the names that are available to this package. For modern packages, this
-    /// contains only the package and its dependencies, but legacy packages may define additional
-    /// addresses as well
-    pub fn named_addresses(&self) -> PackageResult<BTreeMap<PackageName, NamedAddress>> {
-        if self.package().is_legacy() {
-            return self.legacy_named_addresses();
-        }
-
-        let mut result: BTreeMap<PackageName, NamedAddress> = self
-            .graph
-            .inner
-            .edges(self.node)
-            .map(|edge| (edge.weight().name.clone(), self.node_to_addr(edge.target())))
-            .collect();
-        result.insert(self.package().name().clone(), self.node_to_addr(self.node));
-
-        Ok(result)
-    }
-
-    /// For legacy packages, our named addresses need to include all transitive deps too.
-    /// An example of that is depending on "sui", but also keeping it possible to use "std".
-    fn legacy_named_addresses(&self) -> PackageResult<BTreeMap<PackageName, NamedAddress>> {
-        let mut result: BTreeMap<PackageName, NamedAddress> = BTreeMap::new();
-
-        result.insert(self.package().name().clone(), self.node_to_addr(self.node));
-
-        for edge in self.graph.inner.edges(self.node) {
-            let name = edge.weight().name.clone();
-            let dep = Self {
-                graph: self.graph,
-                node: edge.target(),
-            };
-
-            let transitive_result = dep.legacy_named_addresses()?;
-
-            for (name, addr) in transitive_result {
-                let existing = result.insert(name.clone(), addr.clone());
-
-                if existing.is_some_and(|existing| existing != addr) {
-                    return Err(PackageError::DuplicateNamedAddress {
-                        address: name,
-                        package: self.package().name().clone(),
-                    });
-                }
-            }
-        }
-
-        if let Some(legacy_data) = &self.package().legacy_data {
-            let addresses = legacy_data.addresses.clone();
-
-            for (name, addr) in addresses {
-                let new_addr = NamedAddress::Defined(OriginalID(addr));
-                let existing = result.insert(name.clone(), new_addr.clone());
-
-                if existing.is_some_and(|existing| existing != new_addr) {
-                    return Err(PackageError::DuplicateNamedAddress {
-                        address: name,
-                        package: self.package().name().clone(),
-                    });
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Return the NamedAddress for `node`
-    fn node_to_addr(&self, node: NodeIndex) -> NamedAddress {
-        let package = self.graph.inner[node].clone();
-        if package.is_root() {
-            return NamedAddress::RootPackage(package.original_id());
-        }
-        if let Some(oid) = package.original_id() {
-            NamedAddress::Defined(oid)
-        } else {
-            NamedAddress::Unpublished {
-                dummy_addr: package.dummy_addr.clone(),
-            }
-        }
-    }
-
-    /// The package corresponding to this node
-    fn package(&self) -> &Package<F> {
-        &self.graph.inner[self.node]
-    }
+    /// The actual nodes and edges of the graph
+    inner: DiGraph<Arc<Package<F>>, PinnedDependencyInfo>,
 }
 
 impl<F: MoveFlavor> PackageGraph<F> {
@@ -180,23 +58,33 @@ impl<F: MoveFlavor> PackageGraph<F> {
     /// resolution graph in the lockfile inside `path` is up-to-date (i.e., whether any of the
     /// manifests digests are out of date). If the resolution graph is up-to-date, it is returned.
     /// Otherwise a new resolution graph is constructed by traversing (only) the manifest files.
-    pub async fn load(path: &PackagePath, env: &Environment) -> PackageResult<Self> {
-        let builder = PackageGraphBuilder::<F>::new();
+    pub async fn load(
+        path: &PackagePath,
+        env: &Environment,
+        mtx: &PackageSystemLock,
+        config: &PackageConfig,
+    ) -> PackageResult<Self> {
+        let builder = PackageGraphBuilder::<F>::new(config);
 
-        if let Some(graph) = builder.load_from_lockfile(path, env).await? {
+        if let Some(graph) = builder.load_from_lockfile(path, env, mtx).await? {
             debug!("successfully loaded lockfile");
             Ok(graph)
         } else {
             debug!("lockfile was missing or out of date; loading from manifests");
-            builder.load_from_manifests(path, env).await
+            builder.load_from_manifests(path, env, mtx).await
         }
     }
 
     /// Construct a [PackageGraph] by pinning and fetching all transitive dependencies from the
     /// manifests rooted at `path` (no lockfiles are read) for the passed environment.
-    pub async fn load_from_manifests(path: &PackagePath, env: &Environment) -> PackageResult<Self> {
-        PackageGraphBuilder::new()
-            .load_from_manifests(path, env)
+    pub async fn load_from_manifests(
+        path: &PackagePath,
+        env: &Environment,
+        mtx: &PackageSystemLock,
+        config: &PackageConfig,
+    ) -> PackageResult<Self> {
+        PackageGraphBuilder::new(config)
+            .load_from_manifests(path, env, mtx)
             .await
     }
 
@@ -206,149 +94,464 @@ impl<F: MoveFlavor> PackageGraph<F> {
     pub async fn load_from_lockfile_ignore_digests(
         path: &PackagePath,
         env: &Environment,
+        mtx: &PackageSystemLock,
+        config: &PackageConfig,
     ) -> PackageResult<Option<Self>> {
-        PackageGraphBuilder::new()
-            .load_from_lockfile_ignore_digests(path, env)
+        PackageGraphBuilder::new(config)
+            .load_from_lockfile_ignore_digests(path, env, mtx)
             .await
     }
 
     /// Returns the root package of the graph.
     pub fn root_package(&self) -> &Package<F> {
-        self.inner[self.root_index].as_ref()
+        &self.inner[self.root_index]
     }
 
-    /// Return the list of packages that are in the linkage table, as well as
-    /// the unpublished ones in the package graph.
-    // TODO: Do we want a way to access ALL packages and not the "de-duplicated" ones?
-    pub(crate) fn packages(&self) -> PackageResult<Vec<PackageInfo<F>>> {
-        let mut linkage = self.linkage()?;
+    /// Return the list of all packages that are in the package graph. Note that depending on whether the
+    /// graph has been filtered or not, this may contain multiple packages with the same original
+    /// ID
+    pub fn packages(&self) -> Vec<PackageInfo<'_, F>> {
+        self.inner
+            .node_indices()
+            .map(|node| self.package_info(node))
+            .collect()
+    }
 
-        // Populate ALL the linkage elements
-        let mut result: Vec<PackageInfo<F>> = linkage
-            .values()
-            .cloned()
-            .map(|node| PackageInfo { graph: self, node })
-            .collect();
+    /// Return the list of all packages that are in the package graph, sorted in topological order.
+    pub fn sorted_packages(&self) -> Vec<PackageInfo<'_, F>> {
+        let sorted = toposort(&self.inner, None).expect("to sort the graph");
+        sorted.iter().map(|x| self.package_info(*x)).collect()
+    }
 
-        // Add all nodes that exist but are not in the linkage table.
-        // This is done to support unpublished packages, as linkage only includes
-        // published packages.
-        for node in self.inner.node_indices() {
-            let package = &self.inner[node];
-
-            if package
-                .original_id()
-                .is_some_and(|oid| linkage.contains_key(&oid))
+    /// Update the publications for the nodes in the graph to reflect the ephemeral file in
+    /// overrides.
+    ///  - if `overrides` contains the package, we replace its publication
+    ///  - if the package has a system address (see F::is_system_address), we keep it
+    ///  - otherwise, we drop it
+    pub fn make_ephemeral(&mut self, overrides: BTreeMap<EphemeralDependencyInfo, Publication<F>>) {
+        for (_, index) in &self.package_ids {
+            let package = self.inner[*index].clone();
+            let dep = package.dep_for_self().clone().into();
+            let new_publish = if let Some(publish) = overrides.get(&dep) {
+                // take from ephemeral file
+                Some(publish.clone())
+            } else if let Some(original_publish) = package.publication()
+                && F::is_system_address(&original_publish.addresses.original_id)
             {
+                // keep system deps
+                Some(original_publish.clone())
+            } else {
+                // clobber everything else
+                None
+            };
+            self.inner[*index] = Arc::new(package.override_publish(new_publish));
+        }
+    }
+
+    /// Return a copy of `self` with all moded dependencies that don't match `mode` filtered out
+    pub fn filter_for_mode(&self, modes: &Vec<ModeName>) -> Self {
+        let mut result = Self {
+            root_index: NodeIndex::from(0),
+            package_ids: BiBTreeMap::new(),
+            inner: DiGraph::new(),
+        };
+
+        result.root_index = self.copy_moded(&mut result, self.root_index, modes);
+
+        result
+    }
+
+    /// Copy subgraph rooted at `node` into `dest`, filtering out dependencies that don't match
+    /// `modes`. Returns the index for `node` in the new graph
+    fn copy_moded(&self, dest: &mut Self, node: NodeIndex, modes: &Vec<ModeName>) -> NodeIndex {
+        let package_id = self
+            .package_ids
+            .get_by_right(&node)
+            .expect("node is in the graph");
+
+        if let Some(index) = dest.package_ids.get_by_left(package_id) {
+            return *index;
+        }
+
+        let index = dest.inner.add_node(self.inner[node].clone());
+        dest.package_ids.insert(package_id.clone(), index);
+
+        for edge in self.inner.edges(node) {
+            if let Some(dep_modes) = edge.weight().modes()
+                && !modes.iter().any(|mode| dep_modes.contains(mode))
+            {
+                // dependency is moded but doesn't contain the modes we're allowing;
+                // skip adding the dep to the new graph
                 continue;
             }
 
-            result.push(PackageInfo { graph: self, node });
+            let dst_index = self.copy_moded(dest, edge.target(), modes);
+            dest.inner.add_edge(index, dst_index, edge.weight().clone());
         }
 
-        Ok(result)
+        index
     }
 
-    /// Return the sorted list of dependencies' name
-    pub(crate) fn sorted_deps(&self) -> Vec<&PackageName> {
-        let sorted = toposort(&self.inner, None).expect("to sort the graph");
-        sorted
-            .iter()
-            .flat_map(|x| self.inner.node_weight(*x))
-            .map(|x| x.name())
-            .collect()
+    /// Return a `PackageInfo` for `id`. Panics if the ID is not present
+    fn get_package(&self, id: &PackageID) -> PackageInfo<'_, F> {
+        let node = self
+            .package_ids
+            .get_by_left(id)
+            .expect("all IDs have nodes");
+        self.package_info(*node)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // TODO: example with a --[local]--> a/b --[local]--> a/c
     use std::collections::BTreeMap;
 
     use test_log::test;
 
     use crate::{
-        flavor::Vanilla,
-        graph::{PackageGraph, PackageInfo},
-        schema::PackageName,
+        schema::{OriginalID, PackageID, PublishedID},
         test_utils::graph_builder::TestPackageGraph,
     };
 
-    /// Return the packages in the graph, grouped by their name
-    fn packages_by_name(
-        graph: &PackageGraph<Vanilla>,
-    ) -> BTreeMap<PackageName, PackageInfo<Vanilla>> {
-        graph
-            .packages()
-            .expect("failed to get packages from graph")
+    /// ```mermaid
+    /// graph LR
+    ///     root --> a
+    ///     a -->|test| b --> c
+    ///     a --> d --> |spec| e
+    /// ```
+    ///
+    /// If an edge has a mode, it should be dropped if there are no modes passed, so after calling
+    /// `filter_modes([])`, the graph should look like
+    /// ```mermaid
+    ///     root --> a --> d
+    /// ```
+    #[cfg_attr(doc, aquamarine::aquamarine)]
+    #[cfg_attr(not(doc), test(tokio::test))]
+    async fn test_mode_filter_no_modes() {
+        let scenario = TestPackageGraph::new(["root", "a", "b", "c", "d", "e"])
+            .add_deps([("root", "a"), ("b", "c"), ("a", "d")])
+            .add_dep("a", "b", |dep| dep.modes(["test"]))
+            .add_dep("d", "e", |dep| dep.modes(["spec"]))
+            .build();
+
+        let graph = scenario.graph_for("root").await;
+        let filtered = graph.filter_for_mode(&vec![]);
+
+        let ids: Vec<PackageID> = filtered
+            .package_ids
             .into_iter()
-            .map(|node| (node.name().clone(), node))
-            .collect()
+            .map(|(pkg, _)| pkg)
+            .collect();
+
+        assert_eq!(ids, ["a", "d", "root"]);
     }
 
-    /// Root package `root` depends on `a` which depends on `b` which depends on `c`, which depends
-    /// on `d`; `a`, `b`,
-    /// `c`, and `d` are all legacy packages.
+    /// ```mermaid
+    /// graph LR
+    ///     root --> a
+    ///     a -->|test| b --> c
+    ///     a --> d --> |spec| e
+    /// ```
     ///
-    /// Named addresses for 'a' should contain `c` and `d`
-    #[test(tokio::test)]
-    async fn modern_legacy_legacy_legacy_legacy() {
+    /// If an edge has a mode but some other mode is passed, we should drop the edge, so after
+    /// calling `filter_modes(["test"])`, the graph should look like
+    /// ```mermaid
+    ///     root --> a --> b --> c
+    ///     a --> d
+    /// ```
+    #[cfg_attr(doc, aquamarine::aquamarine)]
+    #[cfg_attr(not(doc), test(tokio::test))]
+    async fn test_mode_filter_one_mode() {
+        let scenario = TestPackageGraph::new(["root", "a", "b", "c", "d", "e"])
+            .add_deps([("root", "a"), ("b", "c"), ("a", "d")])
+            .add_dep("a", "b", |dep| dep.modes(["test"]))
+            .add_dep("d", "e", |dep| dep.modes(["spec"]))
+            .build();
+
+        let graph = scenario.graph_for("root").await;
+        let filtered = graph.filter_for_mode(&vec!["test".into()]);
+
+        let ids: Vec<PackageID> = filtered
+            .package_ids
+            .into_iter()
+            .map(|(pkg, _)| pkg)
+            .collect();
+
+        assert_eq!(ids, ["a", "b", "c", "d", "root"]);
+    }
+
+    /// ```mermaid
+    /// graph LR
+    ///     root --> a
+    ///     a -->|test| b --> c
+    ///     a --> d --> |spec| e
+    /// ```
+    ///
+    /// If we pass multiple modes, we should include all edges that match any of the passed modes,
+    /// so after calling `filter_modes(["test", "spec"])`, the graph should look like
+    /// ```mermaid
+    ///     root --> a --> b --> c
+    ///     a --> d --> e
+    /// ```
+    #[cfg_attr(doc, aquamarine::aquamarine)]
+    #[cfg_attr(not(doc), test(tokio::test))]
+    async fn test_mode_filter_multimodes() {
+        let scenario = TestPackageGraph::new(["root", "a", "b", "c", "d", "e"])
+            .add_deps([("root", "a"), ("b", "c"), ("a", "d")])
+            .add_dep("a", "b", |dep| dep.modes(["test"]))
+            .add_dep("d", "e", |dep| dep.modes(["spec"]))
+            .build();
+
+        let graph = scenario.graph_for("root").await;
+        let filtered = graph.filter_for_mode(&vec!["test".into(), "spec".into()]);
+
+        let ids: Vec<PackageID> = filtered
+            .package_ids
+            .into_iter()
+            .map(|(pkg, _)| pkg)
+            .collect();
+
+        assert_eq!(ids, ["a", "b", "c", "d", "e", "root"]);
+    }
+
+    /// ```mermaid
+    /// graph LR
+    ///     root --> a
+    ///     a -->|test, spec| b --> c
+    /// ```
+    ///
+    /// Here, `b` should be included for both `spec` and `test` modes, so after calling
+    /// `filter_modes(["test"])`, the graph should look like
+    /// ```mermaid
+    ///     root --> a --> b --> c
+    /// ```
+    #[cfg_attr(doc, aquamarine::aquamarine)]
+    #[cfg_attr(not(doc), test(tokio::test))]
+    async fn test_multimode_filter() {
+        let scenario = TestPackageGraph::new(["root", "a", "b", "c"])
+            .add_deps([("root", "a"), ("b", "c")])
+            .add_dep("a", "b", |dep| dep.modes(["test", "spec"]))
+            .build();
+
+        let graph = scenario.graph_for("root").await;
+        let filtered = graph.filter_for_mode(&vec!["test".into()]);
+
+        let ids: Vec<PackageID> = filtered
+            .package_ids
+            .into_iter()
+            .map(|(pkg, _)| pkg)
+            .collect();
+
+        assert_eq!(ids, ["a", "b", "c", "root"]);
+    }
+
+    /// ```mermaid
+    /// graph LR
+    ///     root --> a
+    /// ```
+    ///
+    /// We call `add_publish_overrides` with an entry for published `a`; the returned publication
+    /// info should be the new publication
+    #[cfg_attr(doc, aquamarine::aquamarine)]
+    #[cfg_attr(not(doc), test(tokio::test))]
+    async fn test_override_published_addr() {
         let scenario = TestPackageGraph::new(["root"])
-            .add_legacy_packages(["a", "b", "c", "d"])
-            .add_deps([("root", "a"), ("a", "b"), ("b", "c"), ("c", "d")])
+            .add_published("a", OriginalID::from(1), PublishedID::from(2))
+            .add_deps([("root", "a")])
             .build();
 
         let mut graph = scenario.graph_for("root").await;
 
-        let packages = packages_by_name(&graph);
+        let overrides = BTreeMap::from([scenario.ephemeral_for(
+            "a",
+            OriginalID::from(3),
+            PublishedID::from(4),
+        )]);
 
-        assert!(packages["a"].named_addresses().unwrap().contains_key("c"));
-        assert!(packages["a"].named_addresses().unwrap().contains_key("d"));
-        assert!(packages["a"].named_addresses().unwrap().contains_key("b"));
-        assert!(packages["a"].named_addresses().unwrap().contains_key("a"));
-        assert!(
-            !packages["root"]
-                .named_addresses()
+        graph.make_ephemeral(overrides);
+        assert_eq!(
+            graph
+                .get_package(&"a".to_string())
+                .published()
                 .unwrap()
-                .contains_key("c")
+                .original_id,
+            OriginalID::from(3)
+        );
+        assert_eq!(
+            graph
+                .get_package(&"a".to_string())
+                .published()
+                .unwrap()
+                .published_at,
+            PublishedID::from(4)
         );
     }
 
-    /// Root package `root` depends on `a` which depends on `b` which depends on `c` which depends
-    /// on `d`; `a` and `c` are legacy packages.
+    /// ```mermaid
+    /// graph LR
+    ///     root --> a
+    /// ```
     ///
-    /// After adding legacy transitive deps, `a` should have direct dependencies on `c` and `d`
-    /// (even though they "pass through" a modern package)
-    #[test(tokio::test)]
-    async fn modern_legacy_modern_legacy() {
-        let scenario = TestPackageGraph::new(["root", "b", "d"])
-            .add_legacy_packages(["legacy_a", "legacy_c"])
-            .add_deps([
-                ("root", "legacy_a"),
-                ("legacy_a", "b"),
-                ("b", "legacy_c"),
-                ("legacy_c", "d"),
-            ])
+    /// We call `add_publish_overrides` with an entry for unpublished `a`; the returned publication
+    /// info should be the new publication
+    #[cfg_attr(doc, aquamarine::aquamarine)]
+    #[cfg_attr(not(doc), test(tokio::test))]
+    async fn test_override_unpublished_addr() {
+        let scenario = TestPackageGraph::new(["root", "a"])
+            .add_deps([("root", "a")])
             .build();
 
         let mut graph = scenario.graph_for("root").await;
 
-        let packages = packages_by_name(&graph);
+        let overrides = BTreeMap::from([scenario.ephemeral_for(
+            "a",
+            OriginalID::from(3),
+            PublishedID::from(4),
+        )]);
 
-        assert!(
-            packages["legacy_a"]
-                .named_addresses()
+        graph.make_ephemeral(overrides);
+        assert_eq!(
+            graph
+                .get_package(&"a".to_string())
+                .published()
                 .unwrap()
-                .contains_key("legacy_c")
+                .original_id,
+            OriginalID::from(3)
         );
-        assert!(
-            packages["legacy_a"]
-                .named_addresses()
+        assert_eq!(
+            graph
+                .get_package(&"a".to_string())
+                .published()
                 .unwrap()
-                .contains_key("d")
+                .published_at,
+            PublishedID::from(4)
         );
-        assert!(!packages["b"].named_addresses().unwrap().contains_key("d"));
     }
 
-    // TODO: tests around name conflicts?
+    /// ```mermaid
+    /// graph LR
+    ///     root --> a
+    /// ```
+    ///
+    /// We call `add_publish_overrides` with an entry for a system package `a`; the returned
+    /// publication info should be the new publication
+    #[cfg_attr(doc, aquamarine::aquamarine)]
+    #[cfg_attr(not(doc), test(tokio::test))]
+    async fn test_override_system_addr() {
+        let scenario = TestPackageGraph::new(["root"])
+            // Note: 0xBEEF is a system dep for Vanilla
+            .add_published("a", OriginalID::from(0xBEEF), PublishedID::from(0xBEEF))
+            .add_deps([("root", "a")])
+            .build();
+
+        let mut graph = scenario.graph_for("root").await;
+
+        let overrides = BTreeMap::from([scenario.ephemeral_for(
+            "a",
+            OriginalID::from(3),
+            PublishedID::from(4),
+        )]);
+
+        graph.make_ephemeral(overrides);
+        assert_eq!(
+            graph
+                .get_package(&"a".to_string())
+                .published()
+                .unwrap()
+                .original_id,
+            OriginalID::from(3)
+        );
+        assert_eq!(
+            graph
+                .get_package(&"a".to_string())
+                .published()
+                .unwrap()
+                .published_at,
+            PublishedID::from(4)
+        );
+    }
+
+    /// ```mermaid
+    /// graph LR
+    ///     root --> a
+    /// ```
+    ///
+    /// We call `add_publish_overrides` with no entry for published `a`; the returned publication
+    /// info should be None
+    #[cfg_attr(doc, aquamarine::aquamarine)]
+    #[cfg_attr(not(doc), test(tokio::test))]
+    async fn test_no_override_published_addr() {
+        let scenario = TestPackageGraph::new(["root"])
+            .add_published("a", OriginalID::from(1), PublishedID::from(2))
+            .add_deps([("root", "a")])
+            .build();
+
+        let mut graph = scenario.graph_for("root").await;
+
+        let overrides = BTreeMap::new();
+
+        graph.make_ephemeral(overrides);
+        assert!(graph.get_package(&"a".to_string()).published().is_none());
+    }
+
+    /// ```mermaid
+    /// graph LR
+    ///     root --> a
+    /// ```
+    ///
+    /// We call `add_publish_overrides` with an entry for unpublished `a`; the returned publication
+    /// info should be None
+    #[cfg_attr(doc, aquamarine::aquamarine)]
+    #[cfg_attr(not(doc), test(tokio::test))]
+    async fn test_no_override_unpublished_addr() {
+        let scenario = TestPackageGraph::new(["root", "a"])
+            .add_deps([("root", "a")])
+            .build();
+
+        let mut graph = scenario.graph_for("root").await;
+
+        let overrides = BTreeMap::new();
+
+        graph.make_ephemeral(overrides);
+        assert!(graph.get_package(&"a".to_string()).published().is_none());
+    }
+
+    /// ```mermaid
+    /// graph LR
+    ///     root --> a
+    /// ```
+    ///
+    /// We call `add_publish_overrides` with an entry for a system package `a`; the returned
+    /// publication info should be the original system publication
+    #[cfg_attr(doc, aquamarine::aquamarine)]
+    #[cfg_attr(not(doc), test(tokio::test))]
+    async fn test_no_override_system_addr() {
+        let scenario = TestPackageGraph::new(["root"])
+            // Note: 0xBEEF is a system dep for Vanilla
+            .add_published("a", OriginalID::from(0xBEEF), PublishedID::from(0xBEEF))
+            .add_deps([("root", "a")])
+            .build();
+
+        let mut graph = scenario.graph_for("root").await;
+
+        let overrides = BTreeMap::new();
+
+        graph.make_ephemeral(overrides);
+        assert_eq!(
+            graph
+                .get_package(&"a".to_string())
+                .published()
+                .unwrap()
+                .original_id,
+            OriginalID::from(0xBEEF)
+        );
+        assert_eq!(
+            graph
+                .get_package(&"a".to_string())
+                .published()
+                .unwrap()
+                .published_at,
+            PublishedID::from(0xBEEF)
+        );
+    }
 }

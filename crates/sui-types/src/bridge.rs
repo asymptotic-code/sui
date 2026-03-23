@@ -1,21 +1,20 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::SUI_BRIDGE_OBJECT_ID;
 use crate::base_types::ObjectID;
 use crate::base_types::SequenceNumber;
 use crate::collection_types::LinkedTableNode;
-use crate::dynamic_field::{get_dynamic_field_from_store, Field};
-use crate::error::SuiResult;
+use crate::dynamic_field::{Field, get_dynamic_field_from_store};
+use crate::error::{SuiError, SuiErrorKind, SuiResult};
 use crate::object::Owner;
 use crate::storage::ObjectStore;
 use crate::sui_serde::BigInt;
 use crate::sui_serde::Readable;
 use crate::versioned::Versioned;
-use crate::SUI_BRIDGE_OBJECT_ID;
 use crate::{
     base_types::SuiAddress,
     collection_types::{Bag, LinkedTable, VecMap},
-    error::SuiError,
     id::UID,
 };
 use enum_dispatch::enum_dispatch;
@@ -199,12 +198,14 @@ pub fn get_bridge_wrapper(object_store: &dyn ObjectStore) -> Result<BridgeWrappe
     let wrapper = object_store
         .get_object(&SUI_BRIDGE_OBJECT_ID)
         // Don't panic here on None because object_store is a generic store.
-        .ok_or_else(|| SuiError::SuiBridgeReadError("BridgeWrapper object not found".to_owned()))?;
+        .ok_or_else(|| {
+            SuiErrorKind::SuiBridgeReadError("BridgeWrapper object not found".to_owned())
+        })?;
     let move_object = wrapper.data.try_as_move().ok_or_else(|| {
-        SuiError::SuiBridgeReadError("BridgeWrapper object must be a Move object".to_owned())
+        SuiErrorKind::SuiBridgeReadError("BridgeWrapper object must be a Move object".to_owned())
     })?;
     let result = bcs::from_bytes::<BridgeWrapper>(move_object.contents())
-        .map_err(|err| SuiError::SuiBridgeReadError(err.to_string()))?;
+        .map_err(|err| SuiErrorKind::SuiBridgeReadError(err.to_string()))?;
     Ok(result)
 }
 
@@ -216,17 +217,18 @@ pub fn get_bridge(object_store: &dyn ObjectStore) -> Result<Bridge, SuiError> {
         1 => {
             let result: BridgeInnerV1 = get_dynamic_field_from_store(object_store, id, &version)
                 .map_err(|err| {
-                    SuiError::SuiBridgeReadError(format!(
+                    SuiErrorKind::SuiBridgeReadError(format!(
                         "Failed to load bridge inner object with ID {:?} and version {:?}: {:?}",
                         id, version, err
                     ))
                 })?;
             Ok(Bridge::V1(result))
         }
-        _ => Err(SuiError::SuiBridgeReadError(format!(
+        _ => Err(SuiErrorKind::SuiBridgeReadError(format!(
             "Unsupported SuiBridge version: {}",
             version
-        ))),
+        ))
+        .into()),
     }
 }
 
@@ -285,12 +287,12 @@ impl BridgeTrait for BridgeInnerV1 {
             .into_iter()
             .map(|e| {
                 let source = BridgeChainId::try_from(e.key.source).map_err(|_e| {
-                    SuiError::GenericBridgeError {
+                    SuiErrorKind::GenericBridgeError {
                         error: format!("Unrecognized chain id: {}", e.key.source),
                     }
                 })?;
                 let destination = BridgeChainId::try_from(e.key.destination).map_err(|_e| {
-                    SuiError::GenericBridgeError {
+                    SuiErrorKind::GenericBridgeError {
                         error: format!("Unrecognized chain id: {}", e.key.destination),
                     }
                 })?;
@@ -318,12 +320,12 @@ impl BridgeTrait for BridgeInnerV1 {
             .into_iter()
             .map(|e| {
                 let source = BridgeChainId::try_from(e.key.source).map_err(|_e| {
-                    SuiError::GenericBridgeError {
+                    SuiErrorKind::GenericBridgeError {
                         error: format!("Unrecognized chain id: {}", e.key.source),
                     }
                 })?;
                 let destination = BridgeChainId::try_from(e.key.destination).map_err(|_e| {
-                    SuiError::GenericBridgeError {
+                    SuiErrorKind::GenericBridgeError {
                         error: format!("Unrecognized chain id: {}", e.key.destination),
                     }
                 })?;
@@ -479,7 +481,7 @@ pub struct MoveTypeBridgeTransferRecord {
 }
 
 /// Rust version of the Move message::BridgeMessage type.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MoveTypeBridgeMessage {
     pub message_type: u8,
     pub message_version: u8,
@@ -489,7 +491,7 @@ pub struct MoveTypeBridgeMessage {
 }
 
 /// Rust version of the Move message::BridgeMessage type.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MoveTypeBridgeRecord {
     pub message: MoveTypeBridgeMessage,
     pub verified_signatures: Option<Vec<Vec<u8>>>,
@@ -497,10 +499,10 @@ pub struct MoveTypeBridgeRecord {
 }
 
 pub fn is_bridge_committee_initiated(object_store: &dyn ObjectStore) -> SuiResult<bool> {
-    match get_bridge(object_store) {
+    match get_bridge(object_store).map_err(|e| *e.0) {
         Ok(bridge) => Ok(!bridge.committee().members.contents.is_empty()),
-        Err(SuiError::SuiBridgeReadError(..)) => Ok(false),
-        Err(other) => Err(other),
+        Err(SuiErrorKind::SuiBridgeReadError(..)) => Ok(false),
+        Err(other) => Err(other.into()),
     }
 }
 
@@ -512,6 +514,29 @@ pub struct MoveTypeTokenTransferPayload {
     pub target_address: Vec<u8>,
     pub token_type: u8,
     pub amount: u64,
+}
+
+/// Rust version of the Move message::TokenTransferPayloadV2 type (includes timestamp).
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
+pub struct MoveTypeTokenTransferPayloadV2 {
+    pub sender_address: Vec<u8>,
+    pub target_chain: u8,
+    pub target_address: Vec<u8>,
+    pub token_type: u8,
+    pub amount: u64,
+    pub timestamp_ms: u64,
+}
+
+impl From<MoveTypeTokenTransferPayloadV2> for MoveTypeTokenTransferPayload {
+    fn from(v2: MoveTypeTokenTransferPayloadV2) -> Self {
+        Self {
+            sender_address: v2.sender_address,
+            target_chain: v2.target_chain,
+            target_address: v2.target_address,
+            token_type: v2.token_type,
+            amount: v2.amount,
+        }
+    }
 }
 
 /// Rust version of the Move message::ParsedTokenTransferMessage type.

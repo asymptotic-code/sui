@@ -1,14 +1,18 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
+
 use crate::static_programmable_transactions::{env::Env, typing::ast::Type};
-use move_binary_format::errors::PartialVMError;
+use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::account_address::AccountAddress;
-use move_vm_types::{
-    values::{
-        self, Locals as VMLocals, Struct, VMValueCast, Value as VMValue, VectorSpecialization,
-    },
-    views::ValueView,
+use move_core_types::runtime_value::MoveTypeLayout;
+use move_core_types::u256::U256;
+use move_vm_runtime::execution::interpreter::locals::{BaseHeap as VMBaseHeap, BaseHeapId};
+use move_vm_runtime::shared::views::ValueVisitor;
+use move_vm_runtime::{
+    execution::values::{self, Struct, VMValueCast, Value as VMValue, VectorSpecialization},
+    shared::views::ValueView,
 };
 use sui_types::{
     base_types::{ObjectID, SequenceNumber},
@@ -33,7 +37,10 @@ pub enum ByteValue {
 pub struct Local<'a>(&'a mut Locals, u16);
 
 /// A set of memory locations that can be borrowed or moved from. Used for inputs and results
-pub struct Locals(VMLocals);
+pub struct Locals {
+    heap: VMBaseHeap,
+    locations: BTreeMap<u16, BaseHeapId>,
+}
 
 #[derive(Debug)]
 pub struct Value(VMValue);
@@ -41,75 +48,106 @@ pub struct Value(VMValue);
 impl Locals {
     pub fn new<Items>(values: Items) -> Result<Self, ExecutionError>
     where
-        Items: IntoIterator<Item = Value>,
+        Items: IntoIterator<Item = Option<Value>>,
         Items::IntoIter: ExactSizeIterator,
     {
         let values = values.into_iter();
         let n = values.len();
         assert_invariant!(n <= u16::MAX as usize, "Locals size exceeds u16::MAX");
-        let mut locals = VMLocals::new(n);
-        for (i, value) in values.enumerate() {
-            locals
-                .store_loc(i, value.0, /* violation check */ true)
-                .map_err(iv("store loc"))?;
+        // TODO(vm-rewrite): Look into not allocating invalid memory slots ahead of time. For now
+        // we do this for ease, but we should be able to optimize this further.
+        let mut heap = VMBaseHeap::new();
+        let mut locations = BTreeMap::new();
+        for (i, v) in values.enumerate() {
+            let alloc_idx = match v {
+                Some(v) => heap.allocate_value(v.0),
+                // If the value is None, we leave the local invalid
+                None => heap.allocate_value(VMValue::invalid()),
+            }
+            .map_err(iv("allocate local"))?;
+            locations.insert(checked_as!(i, u16)?, alloc_idx);
         }
-        Ok(Self(locals))
+        Ok(Self { heap, locations })
     }
 
     pub fn new_invalid(n: usize) -> Result<Self, ExecutionError> {
         assert_invariant!(n <= u16::MAX as usize, "Locals size exceeds u16::MAX");
-        Ok(Self(VMLocals::new(n)))
+        let mut heap = VMBaseHeap::new();
+        let mut locations = BTreeMap::new();
+        for i in 0..n {
+            let alloc_idx = heap
+                .allocate_value(VMValue::invalid())
+                .map_err(iv("allocate local"))?;
+            locations.insert(checked_as!(i, u16)?, alloc_idx);
+        }
+        Ok(Self { heap, locations })
     }
 
-    pub fn local(&mut self, index: u16) -> Result<Local, ExecutionError> {
+    pub fn local(&mut self, index: u16) -> Result<Local<'_>, ExecutionError> {
         Ok(Local(self, index))
     }
 }
 
 impl Local<'_> {
+    fn to_resolved_location(&self) -> Result<BaseHeapId, ExecutionError> {
+        self.0
+            .locations
+            .get(&self.1)
+            .copied()
+            .ok_or_else(|| make_invariant_violation!("local index {} out of bounds", self.1))
+    }
+
     /// Does the local contain a value?
     pub fn is_invalid(&self) -> Result<bool, ExecutionError> {
         self.0
-            .0
-            .is_invalid(self.1 as usize)
+            .heap
+            .is_invalid(self.to_resolved_location()?)
             .map_err(iv("out of bounds"))
     }
 
     pub fn store(&mut self, value: Value) -> Result<(), ExecutionError> {
-        self.0
+        let val: values::Reference = self
             .0
-            .store_loc(self.1 as usize, value.0, /* violation check */ true)
-            .map_err(iv("store loc"))
+            .heap
+            .borrow_loc(self.to_resolved_location()?)
+            .map_err(iv("store loc"))?
+            .cast()
+            .map_err(iv("cast to reference"))?;
+        val.write_ref(value.0).map_err(iv("store loc"))?;
+        Ok(())
     }
 
     /// Move the value out of the local
     pub fn move_(&mut self) -> Result<Value, ExecutionError> {
         assert_invariant!(!self.is_invalid()?, "cannot move invalid local");
-        Ok(Value(
-            self.0
-                .0
-                .move_loc(self.1 as usize, /* violation check */ true)
-                .map_err(iv("move loc"))?,
-        ))
+        self.0
+            .heap
+            .take_loc(self.to_resolved_location()?)
+            .map_err(iv("move loc"))
+            .map(Value)
     }
 
     /// Copy the value out in the local
     pub fn copy(&self) -> Result<Value, ExecutionError> {
         assert_invariant!(!self.is_invalid()?, "cannot copy invalid local");
-        Ok(Value(
-            self.0.0.copy_loc(self.1 as usize).map_err(iv("copy loc"))?,
-        ))
+        let val: values::Reference = self
+            .0
+            .heap
+            .borrow_loc(self.to_resolved_location()?)
+            .map_err(iv("copy loc"))?
+            .cast()
+            .map_err(iv("cast to reference"))?;
+        val.read_ref().map_err(iv("copy loc")).map(Value)
     }
 
     /// Borrow the local, creating a reference to the value
-    pub fn borrow(&self) -> Result<Value, ExecutionError> {
+    pub fn borrow(&mut self) -> Result<Value, ExecutionError> {
         assert_invariant!(!self.is_invalid()?, "cannot borrow invalid local");
-        Ok(Value(
-            self.0
-                .0
-                .borrow_loc(self.1 as usize)
-                .map_err(iv("borrow loc"))?,
-        ))
+        self.0
+            .heap
+            .borrow_loc(self.to_resolved_location()?)
+            .map_err(iv("borrow loc"))
+            .map(Value)
     }
 
     pub fn move_if_valid(&mut self) -> Result<Option<Value>, ExecutionError> {
@@ -123,7 +161,7 @@ impl Local<'_> {
 
 impl Value {
     pub fn copy(&self) -> Result<Self, ExecutionError> {
-        Ok(Value(self.0.copy_value().map_err(iv("copy"))?))
+        Ok(Value(self.0.copy_value()))
     }
 
     /// Read the value, giving an invariant violation if the value is not a reference
@@ -150,8 +188,13 @@ impl Value {
         Ok(Value(value))
     }
 
-    pub fn serialize(&self) -> Option<Vec<u8>> {
-        self.0.serialize()
+    pub fn typed_serialize(&self, layout: &MoveTypeLayout) -> Option<Vec<u8>> {
+        self.0.typed_serialize(layout)
+    }
+
+    /// Used for getting access to the inner VMValue for tracing purposes.
+    pub(super) fn inner_for_tracing(&self) -> &VMValue {
+        &self.0
     }
 }
 
@@ -174,7 +217,7 @@ impl VMValueCast<Value> for VMValue {
 }
 
 impl ValueView for Value {
-    fn visit(&self, visitor: &mut impl move_vm_types::views::ValueVisitor) {
+    fn visit(&self, visitor: &mut impl ValueVisitor) -> PartialVMResult<()> {
         self.0.visit(visitor)
     }
 }
@@ -214,6 +257,18 @@ impl Value {
         ])))
     }
 
+    /// Constructs a `sui::funds_accumulator::Withdrawal` value
+    pub fn funds_accumulator_withdrawal(owner: AccountAddress, limit: U256) -> Self {
+        // public struct Withdrawal has drop {
+        //     owner: address,
+        //     limit: u256,
+        // }
+        Self(VMValue::struct_(Struct::pack([
+            VMValue::address(owner),
+            VMValue::u256(limit),
+        ])))
+    }
+
     pub fn vec_pack(ty: Type, values: Vec<Self>) -> Result<Self, ExecutionError> {
         let specialization: VectorSpecialization = ty
             .try_into()
@@ -223,7 +278,9 @@ impl Value {
         Ok(Self(vec))
     }
 
-    pub fn tx_context(digest: TransactionDigest) -> Result<Self, ExecutionError> {
+    /// Should be called once at the start of a transaction to populate the location with the
+    /// transaction context.
+    pub fn new_tx_context(digest: TransactionDigest) -> Result<Self, ExecutionError> {
         // public struct TxContext has drop {
         //     sender: address,
         //     tx_hash: vector<u8>,
@@ -301,11 +358,7 @@ fn coin_ref_modify_balance(
     modify: impl FnOnce(u64) -> Result<u64, ExecutionError>,
 ) -> Result<(), ExecutionError> {
     let balance_value_ref = borrow_coin_ref_balance_value(coin_ref)?;
-    let reference: values::Reference = balance_value_ref
-        .copy_value()
-        .map_err(iv("copy"))?
-        .cast()
-        .map_err(iv("cast"))?;
+    let reference: values::Reference = balance_value_ref.copy_value().cast().map_err(iv("cast"))?;
     let balance: u64 = reference
         .read_ref()
         .map_err(iv("read ref"))?
@@ -393,7 +446,7 @@ impl Value {
 
 fn unpack<const N: usize>(value: VMValue) -> Result<[VMValue; N], ExecutionError> {
     let value: values::Struct = value.cast().map_err(iv("cast"))?;
-    let unpacked = value.unpack().map_err(iv("unpack"))?.collect::<Vec<_>>();
+    let unpacked = value.unpack().collect::<Vec<_>>();
     assert_invariant!(unpacked.len() == N, "Expected {N} fields, got {unpacked:?}");
     Ok(unpacked.try_into().unwrap())
 }

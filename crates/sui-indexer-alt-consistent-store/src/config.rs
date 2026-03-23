@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use sui_default_config::DefaultConfig;
-use sui_indexer_alt_framework::{self as framework, pipeline::CommitterConfig};
+use sui_indexer_alt_framework::pipeline::CommitterConfig;
+use sui_indexer_alt_framework::{self as framework};
 
-use crate::{rpc::pagination::PaginationConfig, DbConfig};
+use crate::DbConfig;
+use crate::rpc::pagination::PaginationConfig;
 
 #[DefaultConfig]
 #[derive(Default)]
@@ -36,8 +38,12 @@ pub struct ServiceConfig {
 #[serde(deny_unknown_fields)]
 pub struct IngestionConfig {
     pub checkpoint_buffer_size: usize,
-    pub ingest_concurrency: usize,
+    pub ingest_concurrency: framework::config::ConcurrencyConfig,
     pub retry_interval_ms: u64,
+    pub streaming_backoff_initial_batch_size: usize,
+    pub streaming_backoff_max_batch_size: usize,
+    pub streaming_connection_timeout_ms: u64,
+    pub streaming_statement_timeout_ms: u64,
 }
 
 #[DefaultConfig]
@@ -60,6 +66,7 @@ pub struct PipelineLayer {
     pub balances: Option<CommitterLayer>,
     pub object_by_owner: Option<CommitterLayer>,
     pub object_by_type: Option<CommitterLayer>,
+    pub address_balances: Option<CommitterLayer>,
 }
 
 #[DefaultConfig]
@@ -98,7 +105,8 @@ impl ServiceConfig {
         let mut for_test = Self::example();
 
         for_test.ingestion.retry_interval_ms = 10;
-        for_test.ingestion.ingest_concurrency = 1;
+        for_test.ingestion.ingest_concurrency =
+            framework::config::ConcurrencyConfig::Fixed { value: 1 };
 
         for_test.committer.collect_interval_ms = Some(50);
         for_test.committer.watermark_interval_ms = Some(50);
@@ -116,6 +124,7 @@ impl PipelineLayer {
             balances: Some(CommitterLayer::default()),
             object_by_owner: Some(CommitterLayer::default()),
             object_by_type: Some(CommitterLayer::default()),
+            address_balances: Some(CommitterLayer::default()),
         }
     }
 }
@@ -128,6 +137,7 @@ impl CommitterLayer {
             watermark_interval_ms: self
                 .watermark_interval_ms
                 .unwrap_or(base.watermark_interval_ms),
+            ..Default::default()
         }
     }
 }
@@ -138,6 +148,10 @@ impl From<framework::ingestion::IngestionConfig> for IngestionConfig {
             checkpoint_buffer_size: config.checkpoint_buffer_size,
             ingest_concurrency: config.ingest_concurrency,
             retry_interval_ms: config.retry_interval_ms,
+            streaming_backoff_initial_batch_size: config.streaming_backoff_initial_batch_size,
+            streaming_backoff_max_batch_size: config.streaming_backoff_max_batch_size,
+            streaming_connection_timeout_ms: config.streaming_connection_timeout_ms,
+            streaming_statement_timeout_ms: config.streaming_statement_timeout_ms,
         }
     }
 }
@@ -148,6 +162,10 @@ impl From<IngestionConfig> for framework::ingestion::IngestionConfig {
             checkpoint_buffer_size: config.checkpoint_buffer_size,
             ingest_concurrency: config.ingest_concurrency,
             retry_interval_ms: config.retry_interval_ms,
+            streaming_backoff_initial_batch_size: config.streaming_backoff_initial_batch_size,
+            streaming_backoff_max_batch_size: config.streaming_backoff_max_batch_size,
+            streaming_connection_timeout_ms: config.streaming_connection_timeout_ms,
+            streaming_statement_timeout_ms: config.streaming_statement_timeout_ms,
         }
     }
 }

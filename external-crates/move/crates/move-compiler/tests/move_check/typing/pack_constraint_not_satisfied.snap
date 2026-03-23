@@ -11,8 +11,8 @@ error[E05001]: ability constraint not satisfied
 3 │     struct R<T: key>  { r: T }
   │                 --- 'key' constraint declared here
   ·
-7 │         R {r:_ } = R { r: 0 };
-  │         ^^^^^^^^          - The type 'u64' does not have the ability 'key'
+7 │         R {r:_ } = R { r: 0u64 };
+  │         ^^^^^^^^          ---- The type 'u64' does not have the ability 'key'
   │         │                  
   │         'key' constraint not satisifed
 
@@ -22,8 +22,8 @@ error[E05001]: ability constraint not satisfied
 3 │     struct R<T: key>  { r: T }
   │                 --- 'key' constraint declared here
   ·
-7 │         R {r:_ } = R { r: 0 };
-  │                    ^^^^^^^^^^
+7 │         R {r:_ } = R { r: 0u64 };
+  │                    ^^^^^^^^^^^^^
   │                    │      │
   │                    │      The type 'u64' does not have the ability 'key'
   │                    'key' constraint not satisifed
@@ -61,8 +61,8 @@ error[E05001]: ability constraint not satisfied
    │            │     
    │            To satisfy the constraint, the 'key' ability would need to be added here
    ·
-12 │         R {r: R { r: _ } } = R { r: R { r: 0 }};
-   │         ^^^^^^^^^^^^^^^^^^          ---------- The type '0x8675309::M::R<u64>' does not have the ability 'key'
+12 │         R {r: R { r: _ } } = R { r: R { r: 0u64 }};
+   │         ^^^^^^^^^^^^^^^^^^          ------------- The type '0x8675309::M::R<u64>' does not have the ability 'key'
    │         │                            
    │         'key' constraint not satisifed
 
@@ -72,8 +72,8 @@ error[E05001]: ability constraint not satisfied
  3 │     struct R<T: key>  { r: T }
    │                 --- 'key' constraint declared here
    ·
-12 │         R {r: R { r: _ } } = R { r: R { r: 0 }};
-   │               ^^^^^^^^^^                   - The type 'u64' does not have the ability 'key'
+12 │         R {r: R { r: _ } } = R { r: R { r: 0u64 }};
+   │               ^^^^^^^^^^                   ---- The type 'u64' does not have the ability 'key'
    │               │                             
    │               'key' constraint not satisifed
 
@@ -85,8 +85,8 @@ error[E05001]: ability constraint not satisfied
    │            │     
    │            To satisfy the constraint, the 'key' ability would need to be added here
    ·
-12 │         R {r: R { r: _ } } = R { r: R { r: 0 }};
-   │                              ^^^^^^^^^^^^^^^^^^
+12 │         R {r: R { r: _ } } = R { r: R { r: 0u64 }};
+   │                              ^^^^^^^^^^^^^^^^^^^^^
    │                              │      │
    │                              │      The type '0x8675309::M::R<u64>' does not have the ability 'key'
    │                              'key' constraint not satisifed
@@ -97,8 +97,8 @@ error[E05001]: ability constraint not satisfied
  3 │     struct R<T: key>  { r: T }
    │                 --- 'key' constraint declared here
    ·
-12 │         R {r: R { r: _ } } = R { r: R { r: 0 }};
-   │                                     ^^^^^^^^^^
+12 │         R {r: R { r: _ } } = R { r: R { r: 0u64 }};
+   │                                     ^^^^^^^^^^^^^
    │                                     │      │
    │                                     │      The type 'u64' does not have the ability 'key'
    │                                     'key' constraint not satisifed

@@ -14,9 +14,9 @@ use crate::{
         typing::ast::{self as T, Type},
     },
 };
-use move_regex_borrow_graph::references::Ref;
+use move_regex_borrow_graph::{MeterError, meter::DummyMeter, references::Ref};
 use sui_types::{
-    error::{ExecutionError, command_argument_error},
+    error::{ExecutionError, SafeIndex, command_argument_error},
     execution_status::CommandArgumentError,
 };
 
@@ -38,6 +38,7 @@ struct Context {
     tx_context: Option<Value>,
     gas_coin: Option<Value>,
     objects: Vec<Option<Value>>,
+    withdrawals: Vec<Option<Value>>,
     pure: Vec<Option<Value>>,
     receiving: Vec<Option<Value>>,
     results: Vec<Vec<Option<Value>>>,
@@ -67,8 +68,18 @@ impl Value {
 }
 
 impl Context {
-    fn new(ast: &T::Transaction) -> Result<Self, ExecutionError> {
+    fn new(_env: &Env, ast: &T::Transaction) -> Result<Self, ExecutionError> {
+        let gas_coin = if ast.gas_payment.is_none() {
+            None
+        } else {
+            Some(Value::NonRef)
+        };
         let objects = ast.objects.iter().map(|_| Some(Value::NonRef)).collect();
+        let withdrawals = ast
+            .withdrawals
+            .iter()
+            .map(|_| Some(Value::NonRef))
+            .collect::<Vec<_>>();
         let pure = ast
             .pure
             .iter()
@@ -79,31 +90,48 @@ impl Context {
             .iter()
             .map(|_| Some(Value::NonRef))
             .collect::<Vec<_>>();
-        let (mut graph, _locals) = Graph::new::<()>([]).map_err(graph_err)?;
+        let canonical_reference_capacity = ast
+            .commands
+            .iter()
+            .flat_map(|command| &command.value.result_type)
+            .filter(|ty| matches!(&ty, Type::Reference(_, _)))
+            .count();
+        let (mut graph, _locals) =
+            Graph::new::<()>(canonical_reference_capacity, []).map_err(graph_err)?;
         let local_root = graph
-            .extend_by_epsilon((), std::iter::empty(), /* is_mut */ true)
-            .map_err(graph_err)?;
+            .extend_by_epsilon(
+                (),
+                std::iter::empty(),
+                /* is_mut */ true,
+                &mut DummyMeter,
+            )
+            .map_err(graph_meter_err)?;
         Ok(Self {
             graph,
             local_root,
             tx_context: Some(Value::NonRef),
-            gas_coin: Some(Value::NonRef),
+            gas_coin,
             objects,
+            withdrawals,
             pure,
             receiving,
             results: Vec::with_capacity(ast.commands.len()),
         })
     }
 
-    fn location(&mut self, l: T::Location) -> &mut Option<Value> {
-        match l {
+    fn location(&mut self, l: T::Location) -> Result<&mut Option<Value>, ExecutionError> {
+        Ok(match l {
             T::Location::TxContext => &mut self.tx_context,
             T::Location::GasCoin => &mut self.gas_coin,
-            T::Location::ObjectInput(i) => &mut self.objects[i as usize],
-            T::Location::PureInput(i) => &mut self.pure[i as usize],
-            T::Location::ReceivingInput(i) => &mut self.receiving[i as usize],
-            T::Location::Result(i, j) => &mut self.results[i as usize][j as usize],
-        }
+            T::Location::ObjectInput(i) => self.objects.safe_get_mut(i as usize)?,
+            T::Location::WithdrawalInput(i) => self.withdrawals.safe_get_mut(i as usize)?,
+            T::Location::PureInput(i) => self.pure.safe_get_mut(i as usize)?,
+            T::Location::ReceivingInput(i) => self.receiving.safe_get_mut(i as usize)?,
+            T::Location::Result(i, j) => self
+                .results
+                .safe_get_mut(i as usize)?
+                .safe_get_mut(j as usize)?,
+        })
     }
 
     fn is_mutable(&self, r: Ref) -> Result<bool, ExecutionError> {
@@ -111,7 +139,9 @@ impl Context {
     }
 
     fn borrowed_by(&self, r: Ref) -> Result<BTreeMap<Ref, Paths>, ExecutionError> {
-        self.graph.borrowed_by(r).map_err(graph_err)
+        self.graph
+            .borrowed_by(r, &mut DummyMeter)
+            .map_err(graph_meter_err)
     }
 
     /// Used for checking if a location is borrowed
@@ -124,14 +154,16 @@ impl Context {
     }
 
     fn release(&mut self, r: Ref) -> Result<(), ExecutionError> {
-        self.graph.release(r).map_err(graph_err)
+        self.graph
+            .release(r, &mut DummyMeter)
+            .map_err(graph_meter_err)
     }
 
     fn extend_by_epsilon(&mut self, r: Ref, is_mut: bool) -> Result<Ref, ExecutionError> {
         let new_r = self
             .graph
-            .extend_by_epsilon((), std::iter::once(r), is_mut)
-            .map_err(graph_err)?;
+            .extend_by_epsilon((), std::iter::once(r), is_mut, &mut DummyMeter)
+            .map_err(graph_meter_err)?;
         Ok(new_r)
     }
 
@@ -143,8 +175,14 @@ impl Context {
     ) -> Result<Ref, ExecutionError> {
         let new_r = self
             .graph
-            .extend_by_label((), std::iter::once(r), is_mut, Location(extension))
-            .map_err(graph_err)?;
+            .extend_by_label(
+                (),
+                std::iter::once(r),
+                is_mut,
+                Location(extension),
+                &mut DummyMeter,
+            )
+            .map_err(graph_meter_err)?;
         Ok(new_r)
     }
 
@@ -155,8 +193,8 @@ impl Context {
     ) -> Result<Vec<Ref>, ExecutionError> {
         let new_refs = self
             .graph
-            .extend_by_dot_star_for_call((), sources.iter().copied(), mutabilities)
-            .map_err(graph_err)?;
+            .extend_by_dot_star_for_call((), sources, mutabilities, &mut DummyMeter)
+            .map_err(graph_meter_err)?;
         Ok(new_refs)
     }
 
@@ -215,17 +253,33 @@ impl Context {
 /// Checks the following
 /// - Values are not used after being moved
 /// - Reference safety is upheld (no dangling references)
-pub fn verify(_env: &Env, ast: &T::Transaction) -> Result<(), ExecutionError> {
-    let mut context = Context::new(ast)?;
+pub fn verify(env: &Env, ast: &T::Transaction) -> Result<(), ExecutionError> {
+    let mut context = Context::new(env, ast)?;
     let commands = &ast.commands;
-    for (c, t) in commands {
-        let result =
-            command(&mut context, c, t).map_err(|e| e.with_command_index(c.idx as usize))?;
+    for c in commands {
+        let result = command(&mut context, c).map_err(|e| e.with_command_index(c.idx as usize))?;
         assert_invariant!(
-            result.len() == t.len(),
+            result.len() == c.value.result_type.len(),
             "result length mismatch for command. {c:?}"
         );
-        context.results.push(result.into_iter().map(Some).collect());
+        // drop unused result values
+        assert_invariant!(
+            result.len() == c.value.drop_values.len(),
+            "drop values length mismatch for command. {c:?}"
+        );
+        let result_values = result
+            .into_iter()
+            .zip(c.value.drop_values.iter().copied())
+            .map(|(v, drop)| {
+                Ok(if !drop {
+                    Some(v)
+                } else {
+                    consume_value(&mut context, v)?;
+                    None
+                })
+            })
+            .collect::<Result<Vec<_>, ExecutionError>>()?;
+        context.results.push(result_values);
     }
 
     let Context {
@@ -256,7 +310,7 @@ pub fn verify(_env: &Env, ast: &T::Transaction) -> Result<(), ExecutionError> {
         "reference to local root not released"
     );
     context.release(context.local_root)?;
-    assert_invariant!(context.graph.abstract_size() == 0, "reference not released");
+    assert_invariant!(context.graph.is_empty(), "reference not released");
     assert_invariant!(
         context.tx_context.is_some(),
         "tx_context should never be moved"
@@ -265,13 +319,10 @@ pub fn verify(_env: &Env, ast: &T::Transaction) -> Result<(), ExecutionError> {
     Ok(())
 }
 
-fn command(
-    context: &mut Context,
-    sp!(_, command): &T::Command,
-    result_tys: &[T::Type],
-) -> Result<Vec<Value>, ExecutionError> {
-    Ok(match command {
-        T::Command_::MoveCall(mc) => {
+fn command(context: &mut Context, sp!(_, c): &T::Command) -> Result<Vec<Value>, ExecutionError> {
+    let result_tys = &c.result_type;
+    Ok(match &c.command {
+        T::Command__::MoveCall(mc) => {
             let T::MoveCall {
                 function,
                 arguments: args,
@@ -279,34 +330,34 @@ fn command(
             let arg_values = arguments(context, args)?;
             call(context, arg_values, &function.signature)?
         }
-        T::Command_::TransferObjects(objects, recipient) => {
+        T::Command__::TransferObjects(objects, recipient) => {
             let object_values = arguments(context, objects)?;
             let recipient_value = argument(context, recipient)?;
             consume_values(context, object_values)?;
             consume_value(context, recipient_value)?;
             vec![]
         }
-        T::Command_::SplitCoins(_, coin, amounts) => {
+        T::Command__::SplitCoins(_, coin, amounts) => {
             let coin_value = argument(context, coin)?;
             let amount_values = arguments(context, amounts)?;
             consume_values(context, amount_values)?;
             write_ref(context, 0, coin_value)?;
             (0..amounts.len()).map(|_| Value::NonRef).collect()
         }
-        T::Command_::MergeCoins(_, target, coins) => {
+        T::Command__::MergeCoins(_, target, coins) => {
             let target_value = argument(context, target)?;
             let coin_values = arguments(context, coins)?;
             consume_values(context, coin_values)?;
             write_ref(context, 0, target_value)?;
             vec![]
         }
-        T::Command_::MakeMoveVec(_, xs) => {
+        T::Command__::MakeMoveVec(_, xs) => {
             let vs = arguments(context, xs)?;
             consume_values(context, vs)?;
             vec![Value::NonRef]
         }
-        T::Command_::Publish(_, _, _) => result_tys.iter().map(|_| Value::NonRef).collect(),
-        T::Command_::Upgrade(_, _, _, x, _) => {
+        T::Command__::Publish(_, _, _) => result_tys.iter().map(|_| Value::NonRef).collect(),
+        T::Command__::Upgrade(_, _, _, x, _) => {
             let v = argument(context, x)?;
             consume_value(context, v)?;
             vec![Value::NonRef]
@@ -372,7 +423,7 @@ fn move_value(
             arg_idx as usize,
         ));
     }
-    let Some(value) = context.location(l).take() else {
+    let Some(value) = context.location(l)?.take() else {
         return Err(command_argument_error(
             CommandArgumentError::ArgumentWithoutValue,
             arg_idx as usize,
@@ -392,7 +443,7 @@ fn copy_value(
         .set(is_borrowed)
         .map_err(|_| make_invariant_violation!("Copy's borrowed marker should not yet be set"))?;
 
-    let Some(value) = context.location(l) else {
+    let Some(value) = context.location(l)? else {
         // TODO more specific error
         return Err(command_argument_error(
             CommandArgumentError::ArgumentWithoutValue,
@@ -417,7 +468,7 @@ fn borrow_location(
     l: T::Location,
 ) -> Result<Value, ExecutionError> {
     // check that the location has a value
-    let Some(value) = context.location(l) else {
+    let Some(value) = context.location(l)? else {
         // TODO more specific error
         return Err(command_argument_error(
             CommandArgumentError::ArgumentWithoutValue,
@@ -540,8 +591,17 @@ fn call(
     Ok(return_values)
 }
 
+fn graph_meter_err(e: MeterError<()>) -> ExecutionError {
+    match e {
+        MeterError::Meter(()) => {
+            make_invariant_violation!("DummyMeter should never produce a Meter error")
+        }
+        MeterError::InvariantViolation(iv) => graph_err(iv),
+    }
+}
+
 fn graph_err(e: move_regex_borrow_graph::InvariantViolation) -> ExecutionError {
-    ExecutionError::invariant_violation(format!("Borrow graph invariant violation: {}", e.0))
+    make_invariant_violation!("Borrow graph invariant violation: {}", e.0)
 }
 
 impl fmt::Display for Location {
@@ -550,6 +610,7 @@ impl fmt::Display for Location {
             T::Location::TxContext => write!(f, "TxContext"),
             T::Location::GasCoin => write!(f, "GasCoin"),
             T::Location::ObjectInput(idx) => write!(f, "ObjectInput({idx})"),
+            T::Location::WithdrawalInput(idx) => write!(f, "WithdrawalInput({idx})"),
             T::Location::PureInput(idx) => write!(f, "PureInput({idx})"),
             T::Location::ReceivingInput(idx) => write!(f, "ReceivingInput({idx})"),
             T::Location::Result(i, j) => write!(f, "Result({i}, {j})"),

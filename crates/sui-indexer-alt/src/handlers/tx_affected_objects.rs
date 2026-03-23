@@ -5,37 +5,42 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::Result;
-use diesel::{ExpressionMethods, QueryDsl};
+use async_trait::async_trait;
+use diesel::ExpressionMethods;
+use diesel::QueryDsl;
 use diesel_async::RunQueryDsl;
-use sui_indexer_alt_framework::{
-    pipeline::{concurrent::Handler, Processor},
-    postgres::{Connection, Db},
-    types::{effects::TransactionEffectsAPI, full_checkpoint_content::CheckpointData},
-};
-use sui_indexer_alt_schema::{schema::tx_affected_objects, transactions::StoredTxAffectedObject};
+use sui_indexer_alt_framework::pipeline::Processor;
+use sui_indexer_alt_framework::postgres::Connection;
+use sui_indexer_alt_framework::postgres::handler::Handler;
+use sui_indexer_alt_framework::types::effects::TransactionEffectsAPI;
+use sui_indexer_alt_framework::types::full_checkpoint_content::Checkpoint;
+use sui_indexer_alt_schema::schema::tx_affected_objects;
+use sui_indexer_alt_schema::transactions::StoredTxAffectedObject;
+use sui_types::transaction::TransactionDataAPI;
 
 use crate::handlers::cp_sequence_numbers::tx_interval;
 
 pub(crate) struct TxAffectedObjects;
 
+#[async_trait]
 impl Processor for TxAffectedObjects {
     const NAME: &'static str = "tx_affected_objects";
 
     type Value = StoredTxAffectedObject;
 
-    fn process(&self, checkpoint: &Arc<CheckpointData>) -> Result<Vec<Self::Value>> {
-        let CheckpointData {
+    async fn process(&self, checkpoint: &Arc<Checkpoint>) -> Result<Vec<Self::Value>> {
+        let Checkpoint {
             transactions,
-            checkpoint_summary,
+            summary,
             ..
         } = checkpoint.as_ref();
 
         let mut values = Vec::new();
-        let first_tx = checkpoint_summary.network_total_transactions as usize - transactions.len();
+        let first_tx = summary.network_total_transactions as usize - transactions.len();
 
         for (i, tx) in transactions.iter().enumerate() {
             let tx_sequence_number = (first_tx + i) as i64;
-            let sender = tx.transaction.sender_address();
+            let sender = tx.transaction.sender();
 
             values.extend(
                 tx.effects
@@ -53,10 +58,8 @@ impl Processor for TxAffectedObjects {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl Handler for TxAffectedObjects {
-    type Store = Db;
-
     const MIN_EAGER_ROWS: usize = 100;
     const MAX_PENDING_ROWS: usize = 10000;
 
@@ -88,14 +91,14 @@ impl Handler for TxAffectedObjects {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use diesel_async::RunQueryDsl;
-    use sui_indexer_alt_framework::{
-        types::test_checkpoint_data_builder::TestCheckpointDataBuilder, Indexer,
-    };
+    use sui_indexer_alt_framework::Indexer;
+    use sui_indexer_alt_framework::types::test_checkpoint_data_builder::TestCheckpointBuilder;
     use sui_indexer_alt_schema::MIGRATIONS;
 
     use crate::handlers::cp_sequence_numbers::CpSequenceNumbers;
+
+    use super::*;
 
     async fn get_all_tx_affected_objects(conn: &mut Connection<'_>) -> Result<Vec<i64>> {
         Ok(tx_affected_objects::table
@@ -126,20 +129,20 @@ mod tests {
         let (indexer, _db) = Indexer::new_for_testing(&MIGRATIONS).await;
         let mut conn = indexer.store().connect().await.unwrap();
 
-        let mut builder = TestCheckpointDataBuilder::new(0);
+        let mut builder = TestCheckpointBuilder::new(0);
         builder = builder.start_transaction(0).finish_transaction();
         let checkpoint = Arc::new(builder.build_checkpoint());
-        let values = TxAffectedObjects.process(&checkpoint).unwrap();
+        let values = TxAffectedObjects.process(&checkpoint).await.unwrap();
         TxAffectedObjects::commit(&values, &mut conn).await.unwrap();
-        let values = CpSequenceNumbers.process(&checkpoint).unwrap();
+        let values = CpSequenceNumbers.process(&checkpoint).await.unwrap();
         CpSequenceNumbers::commit(&values, &mut conn).await.unwrap();
 
         builder = builder.start_transaction(0).finish_transaction();
         builder = builder.start_transaction(1).finish_transaction();
         let checkpoint = Arc::new(builder.build_checkpoint());
-        let values = TxAffectedObjects.process(&checkpoint).unwrap();
+        let values = TxAffectedObjects.process(&checkpoint).await.unwrap();
         TxAffectedObjects::commit(&values, &mut conn).await.unwrap();
-        let values = CpSequenceNumbers.process(&checkpoint).unwrap();
+        let values = CpSequenceNumbers.process(&checkpoint).await.unwrap();
         CpSequenceNumbers::commit(&values, &mut conn).await.unwrap();
 
         builder = builder.start_transaction(0).finish_transaction();
@@ -147,9 +150,9 @@ mod tests {
         builder = builder.start_transaction(2).finish_transaction();
         builder = builder.start_transaction(3).finish_transaction();
         let checkpoint = Arc::new(builder.build_checkpoint());
-        let values = TxAffectedObjects.process(&checkpoint).unwrap();
+        let values = TxAffectedObjects.process(&checkpoint).await.unwrap();
         TxAffectedObjects::commit(&values, &mut conn).await.unwrap();
-        let values = CpSequenceNumbers.process(&checkpoint).unwrap();
+        let values = CpSequenceNumbers.process(&checkpoint).await.unwrap();
         CpSequenceNumbers::commit(&values, &mut conn).await.unwrap();
 
         let fetched_results = get_all_tx_affected_objects(&mut conn).await.unwrap();

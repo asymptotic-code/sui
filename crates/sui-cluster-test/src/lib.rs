@@ -4,7 +4,7 @@ use crate::faucet::{FaucetClient, FaucetClientFactory};
 use async_trait::async_trait;
 use cluster::{Cluster, ClusterFactory};
 use config::ClusterTestOpt;
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, stream::FuturesUnordered};
 use helper::ObjectChecker;
 use jsonrpsee::core::params::ArrayParams;
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
@@ -18,8 +18,8 @@ use sui_sdk::wallet_context::WalletContext;
 use sui_test_transaction_builder::batch_make_transfer_transactions;
 use sui_types::base_types::TransactionDigest;
 use sui_types::object::Owner;
-use sui_types::quorum_driver_types::ExecuteTransactionRequestType;
 use sui_types::sui_system_state::sui_system_state_summary::SuiSystemStateSummary;
+use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 
 use sui_sdk::SuiClient;
 use sui_types::gas_coin::GasCoin;
@@ -32,7 +32,7 @@ use test_case::{
     fullnode_build_publish_transaction_test::FullNodeBuildPublishTransactionTest,
     fullnode_execute_transaction_test::FullNodeExecuteTransactionTest,
     native_transfer_test::NativeTransferTest, random_beacon_test::RandomBeaconTest,
-    shared_object_test::SharedCounterTest,
+    shared_object_test::SharedCounterTest, staking_test::StakingTest,
 };
 use tokio::time::{self, Duration};
 use tracing::{error, info};
@@ -152,7 +152,7 @@ impl TestContext {
         txn_data: TransactionData,
         desc: &str,
     ) -> SuiTransactionBlockResponse {
-        let signature = self.get_context().sign(&txn_data, desc);
+        let signature = self.get_context().sign(&txn_data, desc).await;
         let resp = self
             .get_fullnode_client()
             .quorum_driver_api()
@@ -231,8 +231,11 @@ impl TestContext {
             .get_transaction_with_options(digest, SuiTransactionBlockResponseOptions::new())
             .await
         {
-            Ok(_) => (true, digest, retry_times),
-            Err(_) => {
+            // Wait for the transaction to be included in a checkpoint, not just
+            // known to the fullnode. Index data is only available after the
+            // checkpoint containing the transaction has been processed.
+            Ok(resp) if resp.checkpoint.is_some() => (true, digest, retry_times),
+            _ => {
                 time::sleep(Duration::from_millis(300 * retry_times)).await;
                 (false, digest, retry_times + 1)
             }
@@ -314,6 +317,7 @@ impl ClusterTest {
             TestCase::new(FullNodeBuildPublishTransactionTest {}),
             TestCase::new(CoinIndexTest {}),
             TestCase::new(RandomBeaconTest {}),
+            TestCase::new(StakingTest {}),
         ];
 
         // TODO: improve the runner parallelism for efficiency

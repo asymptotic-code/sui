@@ -14,32 +14,46 @@ use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use sui_sdk::{SuiClient, SUI_COIN_TYPE};
+use prost_types::FieldMask;
+use sui_rpc::client::Client;
+use sui_rpc::field::FieldMaskUtil;
+use sui_rpc::proto::sui::rpc::v2::{GetCoinInfoRequest, GetEpochRequest};
+use sui_sdk_types::{StructTag, TypeTag as SDKTypeTag};
+use sui_types::digests::ChainIdentifier;
 
 use crate::errors::Error;
 use crate::errors::Error::MissingMetadata;
+
+pub use crate::errors::Error as RosettaError;
 use crate::state::{CheckpointBlockProvider, OnlineServerContext};
 use crate::types::{Currency, CurrencyMetadata, SuiEnv};
 
-#[cfg(test)]
-#[path = "unit_tests/lib_tests.rs"]
-mod lib_tests;
-
-/// This lib implements the Rosetta online and offline server defined by the [Rosetta API Spec](https://www.rosetta-api.org/docs/Reference.html)
+/// This lib implements the Mesh online and offline server defined by the [Mesh API Spec](https://docs.cdp.coinbase.com/mesh/mesh-api-spec/api-reference)
 mod account;
 mod block;
 mod construction;
-mod errors;
+pub mod errors;
 mod network;
 pub mod operations;
 mod state;
 pub mod types;
 
+pub(crate) async fn get_current_epoch(client: &mut Client) -> Result<u64, Error> {
+    let request = GetEpochRequest::latest().with_read_mask(FieldMask::from_paths(["epoch"]));
+    Ok(client
+        .ledger_client()
+        .get_epoch(request)
+        .await?
+        .into_inner()
+        .epoch()
+        .epoch())
+}
+
 pub static SUI: Lazy<Currency> = Lazy::new(|| Currency {
     symbol: "SUI".to_string(),
     decimals: 9,
     metadata: CurrencyMetadata {
-        coin_type: SUI_COIN_TYPE.to_string(),
+        coin_type: SDKTypeTag::from(StructTag::sui()).to_string(),
     },
 });
 
@@ -49,15 +63,16 @@ pub struct RosettaOnlineServer {
 }
 
 impl RosettaOnlineServer {
-    pub fn new(env: SuiEnv, client: SuiClient) -> Self {
+    pub fn new(env: SuiEnv, client: Client, chain_id: ChainIdentifier) -> Self {
         let coin_cache = CoinMetadataCache::new(client.clone(), NonZeroUsize::new(1000).unwrap());
         let blocks = Arc::new(CheckpointBlockProvider::new(
             client.clone(),
             coin_cache.clone(),
         ));
+
         Self {
             env,
-            context: OnlineServerContext::new(client, blocks, coin_cache),
+            context: OnlineServerContext::new(client, blocks, coin_cache, chain_id),
         }
     }
 
@@ -119,12 +134,12 @@ impl RosettaOfflineServer {
 
 #[derive(Clone)]
 pub struct CoinMetadataCache {
-    client: SuiClient,
+    client: Client,
     metadata: Arc<Mutex<LruCache<TypeTag, Currency>>>,
 }
 
 impl CoinMetadataCache {
-    pub fn new(client: SuiClient, size: NonZeroUsize) -> Self {
+    pub fn new(client: Client, size: NonZeroUsize) -> Self {
         Self {
             client,
             metadata: Arc::new(Mutex::new(LruCache::new(size))),
@@ -134,22 +149,41 @@ impl CoinMetadataCache {
     pub async fn get_currency(&self, type_tag: &TypeTag) -> Result<Currency, Error> {
         let mut cache = self.metadata.lock().await;
         if !cache.contains(type_tag) {
-            let metadata = self
-                .client
-                .coin_read_api()
-                .get_coin_metadata(type_tag.to_string())
+            let mut client = self.client.clone();
+            let request = GetCoinInfoRequest::default().with_coin_type(type_tag.to_string());
+
+            let response = client
+                .state_client()
+                .get_coin_info(request)
                 .await?
+                .into_inner();
+
+            let (symbol, decimals) = response
+                .metadata
+                .and_then(|m| Some((m.symbol?, m.decimals?)))
                 .ok_or(MissingMetadata)?;
 
             let ccy = Currency {
-                symbol: metadata.symbol,
-                decimals: metadata.decimals as u64,
+                symbol,
+                decimals: decimals as u64,
                 metadata: CurrencyMetadata {
-                    coin_type: type_tag.to_string(),
+                    coin_type: type_tag.clone().to_canonical_string(true),
                 },
             };
             cache.push(type_tag.clone(), ccy);
         }
         cache.get(type_tag).cloned().ok_or(MissingMetadata)
+    }
+
+    pub async fn len(&self) -> usize {
+        self.metadata.lock().await.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.metadata.lock().await.is_empty()
+    }
+
+    pub async fn contains(&self, type_tag: &TypeTag) -> bool {
+        self.metadata.lock().await.contains(type_tag)
     }
 }

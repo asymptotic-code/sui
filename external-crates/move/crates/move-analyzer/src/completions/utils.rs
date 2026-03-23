@@ -1,8 +1,6 @@
 // Copyright (c) The Move Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
-
 use crate::symbols::{
     Symbols,
     compilation::{CompiledPkgInfo, SymbolsComputationData},
@@ -15,22 +13,24 @@ use crate::symbols::{
     },
     mod_defs::{AutoImportInsertionInfo, AutoImportInsertionKind, ModuleDefs},
 };
+
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemLabelDetails, InsertTextFormat, Position,
     Range, TextEdit,
 };
 use move_compiler::{
     expansion::ast::{Address, ModuleIdent, ModuleIdent_, Visibility},
-    naming::ast::{Type, Type_},
+    naming::ast::{Type, TypeInner},
     parser::keywords::PRIMITIVE_TYPES,
     shared::Name,
 };
 use move_ir_types::location::sp;
 use move_symbol_pool::Symbol;
-use once_cell::sync::Lazy;
+
+use std::{path::PathBuf, sync::LazyLock};
 
 /// List of completion items of Move's primitive types.
-pub static PRIMITIVE_TYPE_COMPLETIONS: Lazy<Vec<CompletionItem>> = Lazy::new(|| {
+pub static PRIMITIVE_TYPE_COMPLETIONS: LazyLock<Vec<CompletionItem>> = LazyLock::new(|| {
     let mut primitive_types = PRIMITIVE_TYPES
         .iter()
         .map(|label| completion_item(label, CompletionItemKind::KEYWORD))
@@ -39,15 +39,21 @@ pub static PRIMITIVE_TYPE_COMPLETIONS: Lazy<Vec<CompletionItem>> = Lazy::new(|| 
     primitive_types
 });
 
-/// Get import imsertion info for the cursor's module.
+/// Get import insertion info for the file where the cursor is located.
 pub fn import_insertion_info(
     symbols: &Symbols,
     cursor: &CursorContext,
 ) -> Option<AutoImportInsertionInfo> {
-    cursor
-        .module
-        .and_then(|m| mod_defs(symbols, &m.value))
-        .and_then(|m| m.import_insert_info)
+    // Get the file path from the cursor's location
+    let fhash = cursor.loc.file_hash();
+    let fpath = symbols.files.file_path(&fhash);
+    // For auto-imports, find the module whose range contains the cursor
+    symbols.mod_parsing_info.get(fpath).and_then(|mod_map| {
+        mod_map
+            .iter()
+            .find(|(mod_loc, _)| mod_loc.contains(&cursor.loc))
+            .and_then(|(_, mod_info)| mod_info.import_insert_info)
+    })
 }
 
 /// Get definitions for a given module.
@@ -104,10 +110,9 @@ pub fn all_mod_functions_to_import<'a>(
                     .filter_map(move |(member_name, fdef)| {
                         if let Some(DefInfo::Function(_, visibility, ..)) =
                             symbols.def_info(&fdef.name_loc)
+                            && exclude_member_from_import(mod_defs, cursor.module, visibility)
                         {
-                            if exclude_member_from_import(mod_defs, cursor.module, visibility) {
-                                return None;
-                            }
+                            return None;
                         }
                         Some(*member_name)
                     }),
@@ -132,10 +137,9 @@ pub fn all_mod_structs_to_import<'a>(
                     .filter_map(move |(member_name, sdef)| {
                         if let Some(DefInfo::Struct(_, _, visibility, ..)) =
                             symbols.def_info(&sdef.name_loc)
+                            && exclude_member_from_import(mod_defs, cursor.module, visibility)
                         {
-                            if exclude_member_from_import(mod_defs, cursor.module, visibility) {
-                                return None;
-                            }
+                            return None;
                         }
                         Some(*member_name)
                     }),
@@ -160,10 +164,9 @@ pub fn all_mod_enums_to_import<'a>(
                     .filter_map(move |(member_name, edef)| {
                         if let Some(DefInfo::Enum(_, _, visibility, ..)) =
                             symbols.def_info(&edef.name_loc)
+                            && exclude_member_from_import(mod_defs, cursor.module, visibility)
                         {
-                            if exclude_member_from_import(mod_defs, cursor.module, visibility) {
-                                return None;
-                            }
+                            return None;
                         }
                         Some(*member_name)
                     }),
@@ -323,18 +326,15 @@ pub fn compute_cursor(
 ) {
     let cursor_info = Some((cursor_path, cursor_pos));
     let mut symbols_computation_data = SymbolsComputationData::new();
-    let mut symbols_computation_data_deps = SymbolsComputationData::new();
     // we only compute cursor context and tag it on the existing symbols to avoid spending time
     // recomputing all symbols (saves quite a bit of time when running the test suite)
     let mut cursor_context = compute_symbols_pre_process(
         &mut symbols_computation_data,
-        &mut symbols_computation_data_deps,
         compiled_pkg_info,
         cursor_info,
     );
     cursor_context = compute_symbols_parsed_program(
         &mut symbols_computation_data,
-        &mut symbols_computation_data_deps,
         compiled_pkg_info,
         cursor_context,
     );
@@ -361,7 +361,7 @@ pub fn addr_to_ide_string(addr: &Address) -> String {
 }
 
 fn lambda_snippet(sp!(_, ty): &Type, snippet_idx: &mut i32) -> Option<String> {
-    if let Type_::Fun(vec, _) = ty {
+    if let TypeInner::Fun(vec, _) = ty.inner() {
         let arg_snippets = vec
             .iter()
             .map(|_| {

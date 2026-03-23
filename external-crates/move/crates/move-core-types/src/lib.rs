@@ -10,7 +10,6 @@ pub mod account_address;
 pub mod annotated_extractor;
 pub mod annotated_value;
 pub mod annotated_visitor;
-pub mod effects;
 pub mod gas_algebra;
 pub mod identifier;
 pub mod language_storage;
@@ -20,6 +19,7 @@ pub mod parsing;
 pub mod proptest_types;
 pub mod resolver;
 pub mod runtime_value;
+pub mod runtime_visitor;
 pub mod u256;
 #[cfg(test)]
 mod unit_tests;

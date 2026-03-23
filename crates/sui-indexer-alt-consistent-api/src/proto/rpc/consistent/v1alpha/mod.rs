@@ -8,6 +8,17 @@ include!("../../../generated/sui.rpc.consistent.v1alpha.rs");
 pub const FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!("../../../generated/sui.rpc.consistent.v1alpha.fds.bin");
 
+/// Metadata name used in requests to set the checkpoint to make the request at.
+///
+/// Mirrors fullnode gRPC header naming in `sui-rpc`.
+pub const CHECKPOINT_HEIGHT_METADATA: &str = "x-sui-checkpoint-height";
+
+/// Metadata name used in responses to indicate the minimum checkpoint currently retained by
+/// consistent store.
+///
+/// Mirrors fullnode gRPC header naming in `sui-rpc`.
+pub const LOWEST_AVAILABLE_CHECKPOINT_METADATA: &str = "x-sui-lowest-available-checkpoint";
+
 #[cfg(test)]
 mod tests {
     use super::FILE_DESCRIPTOR_SET;

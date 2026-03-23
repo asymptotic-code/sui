@@ -1,5 +1,30 @@
 # @mysten/prettier-plugin-move
 
+## 0.3.5
+
+### Patch Changes
+
+- adds support for string literals
+
+## 0.3.4
+
+### Patch Changes
+
+- fix issue with `spec` being treated as a keyword in a function body
+
+## 0.3.3
+
+### Patch Changes
+
+- fix incorrect label assignment when extend + regular modules are mixed in the same file
+
+## 0.3.2
+
+### Patch Changes
+
+- fix issue with clearing out comments after last variant in an `enum_definition`
+- switch to newer tree-sitter with support for `extend` keyword
+
 ## 0.3.1
 
 ### Patch Changes

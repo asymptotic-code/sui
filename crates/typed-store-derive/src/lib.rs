@@ -9,8 +9,8 @@ use proc_macro2::Ident;
 use quote::quote;
 use syn::Type::{self};
 use syn::{
-    parse_macro_input, AngleBracketedGenericArguments, Attribute, Generics, ItemStruct, Lit, Meta,
-    PathArguments,
+    AngleBracketedGenericArguments, Attribute, Generics, ItemStruct, Lit, Meta, PathArguments,
+    parse_macro_input,
 };
 
 // This is used as default when none is specified
@@ -131,24 +131,32 @@ fn get_options_override_function(attr: &Attribute) -> syn::Result<String> {
         _ => {
             return Err(syn::Error::new_spanned(
                 meta,
-                format!("Expected function name in format `#[{DB_OPTIONS_CUSTOM_FUNCTION} = {{function_name}}]`"),
-            ))
+                format!(
+                    "Expected function name in format `#[{DB_OPTIONS_CUSTOM_FUNCTION} = {{function_name}}]`"
+                ),
+            ));
         }
     };
 
     if !val.path.is_ident(DB_OPTIONS_CUSTOM_FUNCTION) {
         return Err(syn::Error::new_spanned(
             meta,
-            format!("Expected function name in format `#[{DB_OPTIONS_CUSTOM_FUNCTION} = {{function_name}}]`"),
+            format!(
+                "Expected function name in format `#[{DB_OPTIONS_CUSTOM_FUNCTION} = {{function_name}}]`"
+            ),
         ));
     }
 
     let fn_name = match val.lit {
         Lit::Str(fn_name) => fn_name,
-        _ => return Err(syn::Error::new_spanned(
-            meta,
-            format!("Expected function name in format `#[{DB_OPTIONS_CUSTOM_FUNCTION} = {{function_name}}]`"),
-        ))
+        _ => {
+            return Err(syn::Error::new_spanned(
+                meta,
+                format!(
+                    "Expected function name in format `#[{DB_OPTIONS_CUSTOM_FUNCTION} = {{function_name}}]`"
+                ),
+            ));
+        }
     };
     Ok(fn_name.value())
 }
@@ -368,15 +376,17 @@ pub fn derive_dbmap_utils_general(input: TokenStream) -> TokenStream {
                             typed_store::tidehunter_util::add_key_space(
                                 &mut builder,
                                 stringify!(#cf_names),
-                                &cf_configs[stringify!(#cf_names)],
+                                cf_configs.get(stringify!(#cf_names))
+                                    .unwrap_or_else(|| panic!("Missing tidehunter configuration for table {} from database {}", stringify!(#cf_names), stringify!(#name))),
                             ),
                         )*
                     );
                     let key_shape = builder.build();
-                    let inner_db = typed_store::tidehunter_util::open(path.as_path(), key_shape, metric_conf.db_name.clone());
+                    let (inner_db, registry_id) = typed_store::tidehunter_util::open(path.as_path(), key_shape, metric_conf.db_name.clone());
                     let db = std::sync::Arc::new(typed_store::rocks::Database::new(
                         typed_store::rocks::Storage::TideHunter(inner_db),
-                        metric_conf));
+                        metric_conf,
+                        Some(registry_id)));
                     let (
                         #(
                             #field_names
@@ -414,12 +424,47 @@ pub fn derive_dbmap_utils_general(input: TokenStream) -> TokenStream {
                 }
 
                 pub fn get_read_only_handle (
-                    _: std::path::PathBuf,
-                    _: Option<std::path::PathBuf>,
-                    _: Option<typed_store::rocksdb::Options>,
-                    _: typed_store::rocks::MetricConf,
-                ) -> #secondary_db_map_struct_name #generics {
-                    unimplemented!("read only mode is not supported for TideHunter");
+                    path: std::path::PathBuf,
+                    metric_conf: typed_store::rocks::MetricConf,
+                    cf_configs: std::collections::BTreeMap<String, typed_store::tidehunter_util::ThConfig>,
+                ) -> Self {
+                    Self::open_tables_read_write(path, metric_conf, cf_configs)
+                }
+
+                pub fn table_summary(&self, table_name: &str) -> eyre::Result<typed_store::traits::TableSummary> {
+                    match table_name {
+                        #(
+                            stringify!(#field_names) => {
+                                self.#field_names.table_summary()
+                            }
+                        )*
+                        _ => eyre::bail!("No such table name: {}", table_name),
+                    }
+                }
+
+                fn cf_name_to_table_name(cf_name: &str) -> eyre::Result<&'static str> {
+                    Ok(match cf_name {
+                        #(
+                            stringify!(#cf_names) => stringify!(#field_names),
+                        )*
+                        _ => eyre::bail!("No such cf name: {}", cf_name),
+                    })
+                }
+
+                pub fn dump(&self, cf_name: &str, page_size: u16, page_number: usize) -> eyre::Result<std::collections::BTreeMap<String, String>> {
+                    let table_name = Self::cf_name_to_table_name(cf_name)?;
+                    Ok(match table_name {
+                        #(
+                            stringify!(#field_names) => {
+                                typed_store::traits::Map::safe_iter(&self.#field_names)
+                                    .skip((page_number * (page_size) as usize))
+                                    .take(page_size as usize)
+                                    .map(|result| result.map(|(k, v)| (format!("{:?}", k), format!("{:?}", v))))
+                                    .collect::<eyre::Result<std::collections::BTreeMap<_, _>, _>>()?
+                            }
+                        )*
+                        _ => eyre::bail!("No such table name: {}", table_name),
+                    })
                 }
             }
 

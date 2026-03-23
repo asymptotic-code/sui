@@ -1,11 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//# init --protocol-version 70 --accounts A --addresses P=0x0 --simulator
+//# init --protocol-version 108 --accounts A --addresses P=0x0 --simulator
 
 //# advance-epoch
 
 //# publish --sender A
+#[allow(deprecated_usage)]
 module P::coin {
   use sui::coin::{Self, CoinMetadata, DenyCapV2, TreasuryCap};
   use sui::deny_list::DenyList;

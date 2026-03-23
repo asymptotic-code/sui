@@ -8,7 +8,7 @@ use sui_json_rpc_types::{
 };
 use sui_sdk::SuiClient;
 use sui_types::{
-    base_types::TransactionDigest, quorum_driver_types::ExecuteTransactionRequestType,
+    base_types::TransactionDigest, transaction_driver_types::ExecuteTransactionRequestType,
 };
 use tracing::info;
 
@@ -69,7 +69,7 @@ impl TestCaseImpl for FullNodeExecuteTransactionTest {
         assert!(!response.confirmed_local_execution.unwrap());
         assert_eq!(txn_digest, response.digest);
         let effects = response.effects.unwrap();
-        if !matches!(effects.status(), SuiExecutionStatus::Success { .. }) {
+        if !matches!(effects.status(), SuiExecutionStatus::Success) {
             panic!(
                 "Failed to execute transfer transaction {:?}: {:?}",
                 txn_digest,
@@ -95,7 +95,7 @@ impl TestCaseImpl for FullNodeExecuteTransactionTest {
         assert!(response.confirmed_local_execution.unwrap());
         assert_eq!(txn_digest, response.digest);
         let effects = response.effects.unwrap();
-        if !matches!(effects.status(), SuiExecutionStatus::Success { .. }) {
+        if !matches!(effects.status(), SuiExecutionStatus::Success) {
             panic!(
                 "Failed to execute transfer transaction {:?}: {:?}",
                 txn_digest,

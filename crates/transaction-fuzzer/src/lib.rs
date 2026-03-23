@@ -11,17 +11,18 @@ pub mod type_arg_fuzzer;
 use executor::Executor;
 use proptest::collection::vec;
 use proptest::test_runner::TestRunner;
+use rand::Rng;
 use std::fmt::Debug;
 use sui_protocol_config::ProtocolConfig;
 use sui_types::base_types::{ObjectID, SuiAddress};
-use sui_types::crypto::get_key_pair;
 use sui_types::crypto::AccountKeyPair;
+use sui_types::crypto::get_key_pair;
 use sui_types::digests::TransactionDigest;
-use sui_types::object::{MoveObject, Object, Owner, OBJECT_START_VERSION};
+use sui_types::object::{MoveObject, OBJECT_START_VERSION, Object, Owner};
 use sui_types::{gas_coin::TOTAL_SUPPLY_MIST, transaction::GasData};
 
 use proptest::prelude::*;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 fn new_gas_coin_with_balance_and_owner(balance: u64, owner: Owner) -> Object {
     Object::new_move(
@@ -37,6 +38,7 @@ fn generate_random_gas_data(
     seed: [u8; 32],
     gas_coin_owners: Vec<Owner>, // arbitrarily generated owners, can be shared or immutable or obj-owned too
     owned_by_sender: bool,       // whether to set owned gas coins to be owned by the sender
+    force_all_sender_owned: bool, // whether to force ALL gas coins to be owned by the sender
 ) -> GasDataWithObjects {
     let (sender, sender_key): (SuiAddress, AccountKeyPair) = get_key_pair();
     let mut rng = StdRng::from_seed(seed);
@@ -50,11 +52,17 @@ fn generate_random_gas_data(
     let num_gas_objects = gas_coin_owners.len();
     let gas_coin_owners = gas_coin_owners
         .iter()
-        .map(|o| match o {
-            Owner::ObjectOwner(_) | Owner::AddressOwner(_) if owned_by_sender => {
+        .map(|o| {
+            if force_all_sender_owned {
                 Owner::AddressOwner(sender)
+            } else if owned_by_sender {
+                match o {
+                    Owner::ObjectOwner(_) | Owner::AddressOwner(_) => Owner::AddressOwner(sender),
+                    _ => o.clone(),
+                }
+            } else {
+                o.clone()
             }
-            _ => o.clone(),
         })
         .collect::<Vec<_>>();
     for owner in gas_coin_owners.iter().take(num_gas_objects - 1) {
@@ -105,6 +113,9 @@ pub struct GasDataWithObjects {
 pub struct GasDataGenConfig {
     pub max_num_gas_objects: usize,
     pub owned_by_sender: bool,
+    /// When true, ALL generated gas coins are forced to `AddressOwner(sender)`,
+    /// regardless of the randomly generated owner type.
+    pub force_all_sender_owned: bool,
 }
 
 impl GasDataGenConfig {
@@ -113,6 +124,7 @@ impl GasDataGenConfig {
             max_num_gas_objects: ProtocolConfig::get_for_max_version_UNSAFE()
                 .max_gas_payment_objects() as usize,
             owned_by_sender: true,
+            force_all_sender_owned: false,
         }
     }
 
@@ -121,6 +133,19 @@ impl GasDataGenConfig {
             max_num_gas_objects: ProtocolConfig::get_for_max_version_UNSAFE()
                 .max_gas_payment_objects() as usize,
             owned_by_sender: false,
+            force_all_sender_owned: false,
+        }
+    }
+
+    /// All gas coins are `AddressOwner(sender)`. Use this for execution modes
+    /// that skip ownership checks (e.g. dev-inspect with `skip_checks=true`)
+    /// where non-sender-owned gas would panic during execution.
+    pub fn sender_owned_only() -> Self {
+        Self {
+            max_num_gas_objects: ProtocolConfig::get_for_max_version_UNSAFE()
+                .max_gas_payment_objects() as usize,
+            owned_by_sender: true,
+            force_all_sender_owned: true,
         }
     }
 }
@@ -135,7 +160,12 @@ impl proptest::arbitrary::Arbitrary for GasDataWithObjects {
             vec(any::<Owner>(), 1..=params.max_num_gas_objects),
         )
             .prop_map(move |(seed, owners)| {
-                generate_random_gas_data(seed, owners, params.owned_by_sender)
+                generate_random_gas_data(
+                    seed,
+                    owners,
+                    params.owned_by_sender,
+                    params.force_all_sender_owned,
+                )
             })
             .boxed()
     }
@@ -156,11 +186,32 @@ pub fn run_proptest<D>(
 ) where
     D: Debug + 'static,
 {
+    run_proptest_with_executor(num_test_cases, Executor::new(), strategy, test_fn)
+}
+
+/// Same as `run_proptest` but uses a fullnode executor (required for dry-run and dev-inspect).
+pub fn run_proptest_with_fullnode<D>(
+    num_test_cases: u32,
+    strategy: impl Strategy<Value = D>,
+    test_fn: impl Fn(D, Executor) -> Result<(), TestCaseError>,
+) where
+    D: Debug + 'static,
+{
+    run_proptest_with_executor(num_test_cases, Executor::new_fullnode(), strategy, test_fn)
+}
+
+fn run_proptest_with_executor<D>(
+    num_test_cases: u32,
+    executor: Executor,
+    strategy: impl Strategy<Value = D>,
+    test_fn: impl Fn(D, Executor) -> Result<(), TestCaseError>,
+) where
+    D: Debug + 'static,
+{
     let mut runner = TestRunner::new(ProptestConfig {
         cases: num_test_cases,
         ..Default::default()
     });
-    let executor = Executor::new();
     let strategy_with_authority = strategy.prop_map(|data| TestData {
         data,
         executor: executor.clone(),

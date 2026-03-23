@@ -12,12 +12,13 @@ use std::convert::{TryFrom, TryInto};
 use std::fmt::{Display, Formatter};
 
 use crate::{
+    SUI_FRAMEWORK_ADDRESS,
     balance::Balance,
     base_types::{ObjectID, SequenceNumber},
     coin::Coin,
-    error::{ExecutionError, ExecutionErrorKind},
+    error::ExecutionError,
+    execution_status::ExecutionErrorKind,
     object::{Data, MoveObject, Object},
-    SUI_FRAMEWORK_ADDRESS,
 };
 
 /// The number of Mist per Sui token
@@ -93,6 +94,14 @@ mod checked {
             Balance::is_balance(s)
                 && s.type_params.len() == 1
                 && GAS::is_gas_type(&s.type_params[0])
+        }
+
+        pub fn is_gas_balance_type(type_param: &TypeTag) -> bool {
+            if let TypeTag::Struct(s) = type_param {
+                Self::is_gas_balance(s)
+            } else {
+                false
+            }
         }
 
         pub fn id(&self) -> &ObjectID {

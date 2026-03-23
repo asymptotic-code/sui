@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_graphql::Object;
-use sui_types::effects::{IDOperation, ObjectChange as NativeObjectChange};
+use sui_types::effects::IDOperation;
+use sui_types::effects::ObjectChange as NativeObjectChange;
 
-use crate::{api::scalars::sui_address::SuiAddress, scope::Scope};
-
-use super::{address::Address, object::Object};
+use crate::api::scalars::sui_address::SuiAddress;
+use crate::api::types::object::Object;
+use crate::scope::Scope;
 
 pub(crate) struct ObjectChange {
     pub(crate) scope: Scope,
@@ -32,8 +33,7 @@ impl ObjectChange {
             return None;
         };
 
-        let address = Address::with_address(self.scope.clone(), id.into());
-        Some(Object::with_ref(address, version, digest))
+        Some(Object::with_ref(&self.scope, id.into(), version, digest))
     }
 
     /// The contents of the object immediately after the transaction.
@@ -48,8 +48,7 @@ impl ObjectChange {
             return None;
         };
 
-        let address = Address::with_address(self.scope.clone(), id.into());
-        Some(Object::with_ref(address, version, digest))
+        Some(Object::with_ref(&self.scope, id.into(), version, digest))
     }
 
     /// Whether the ID was created in this transaction.

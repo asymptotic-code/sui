@@ -3,18 +3,18 @@
 
 use super::object_runtime::{ObjectRuntime, TransferResult};
 use crate::{
-    get_receiver_object_id, get_tag_and_layouts, object_runtime::object_store::ObjectResult,
-    NativesCostTable,
+    NativesCostTable, get_extension, get_extension_mut, get_receiver_object_id,
+    get_tag_and_layouts, object_runtime::object_store::ObjectResult,
 };
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::{
     account_address::AccountAddress, gas_algebra::InternalGas, language_storage::TypeTag,
     vm_status::StatusCode,
 };
-use move_vm_runtime::{native_charge_gas_early_exit, native_functions::NativeContext};
-use move_vm_types::{
-    loaded_data::runtime_types::Type, natives::function::NativeResult, pop_arg, values::Value,
+use move_vm_runtime::{
+    execution::Type, execution::values::Value, natives::functions::NativeResult, pop_arg,
 };
+use move_vm_runtime::{native_charge_gas_early_exit, natives::functions::NativeContext};
 use smallvec::smallvec;
 use std::collections::VecDeque;
 use sui_types::{
@@ -48,9 +48,7 @@ pub fn receive_object_internal(
 ) -> PartialVMResult<NativeResult> {
     debug_assert!(ty_args.len() == 1);
     debug_assert!(args.len() == 3);
-    let transfer_receive_object_internal_cost_params = context
-        .extensions_mut()
-        .get::<NativesCostTable>()?
+    let transfer_receive_object_internal_cost_params = get_extension!(context, NativesCostTable)?
         .transfer_receive_object_internal_cost_params
         .clone();
     native_charge_gas_early_exit!(
@@ -62,7 +60,7 @@ pub fn receive_object_internal(
     let child_receiver_object_id = args.pop_back().unwrap();
     let parent = pop_arg!(args, AccountAddress).into();
     assert!(args.is_empty());
-    let child_id: ObjectID = get_receiver_object_id(child_receiver_object_id.copy_value().unwrap())
+    let child_id: ObjectID = get_receiver_object_id(child_receiver_object_id.copy_value())
         .unwrap()
         .value_as::<AccountAddress>()
         .unwrap()
@@ -76,8 +74,8 @@ pub fn receive_object_internal(
         ));
     };
 
-    let object_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
-    let child = match object_runtime.receive_object(
+    let object_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
+    let (_cache_info, child) = match object_runtime.receive_object(
         parent,
         child_id,
         child_receiver_sequence_number,
@@ -90,14 +88,14 @@ pub fn receive_object_internal(
             return Ok(NativeResult::err(
                 context.gas_used(),
                 E_UNABLE_TO_RECEIVE_OBJECT,
-            ))
+            ));
         }
         Ok(Some(ObjectResult::Loaded(gv))) => gv,
         Ok(Some(ObjectResult::MismatchedType)) => {
             return Ok(NativeResult::err(
                 context.gas_used(),
                 E_RECEIVING_OBJECT_TYPE_MISMATCH,
-            ))
+            ));
         }
         Err(x) => return Err(x),
     };
@@ -122,9 +120,7 @@ pub fn transfer_internal(
     debug_assert!(ty_args.len() == 1);
     debug_assert!(args.len() == 2);
 
-    let transfer_transfer_internal_cost_params = context
-        .extensions_mut()
-        .get::<NativesCostTable>()?
+    let transfer_transfer_internal_cost_params = get_extension!(context, NativesCostTable)?
         .transfer_transfer_internal_cost_params
         .clone();
 
@@ -182,9 +178,7 @@ pub fn party_transfer_internal(
     debug_assert!(ty_args.len() == 1);
     debug_assert!(args.len() == 4);
 
-    let is_supported = context
-        .extensions()
-        .get::<ObjectRuntime>()?
+    let is_supported = get_extension!(context, ObjectRuntime)?
         .protocol_config
         .enable_party_transfer();
     if !is_supported {
@@ -192,9 +186,7 @@ pub fn party_transfer_internal(
         return Ok(NativeResult::err(cost, E_NOT_SUPPORTED));
     }
 
-    let transfer_party_transfer_internal_cost_params = context
-        .extensions_mut()
-        .get::<NativesCostTable>()?
+    let transfer_party_transfer_internal_cost_params = get_extension!(context, NativesCostTable)?
         .transfer_party_transfer_internal_cost_params
         .clone();
 
@@ -256,9 +248,7 @@ pub fn freeze_object(
     debug_assert!(ty_args.len() == 1);
     debug_assert!(args.len() == 1);
 
-    let transfer_freeze_object_cost_params = context
-        .extensions_mut()
-        .get::<NativesCostTable>()?
+    let transfer_freeze_object_cost_params = get_extension!(context, NativesCostTable)?
         .transfer_freeze_object_cost_params
         .clone();
 
@@ -292,9 +282,7 @@ pub fn share_object(
     debug_assert!(ty_args.len() == 1);
     debug_assert!(args.len() == 1);
 
-    let transfer_share_object_cost_params = context
-        .extensions_mut()
-        .get::<NativesCostTable>()?
+    let transfer_share_object_cost_params = get_extension!(context, NativesCostTable)?
         .transfer_share_object_cost_params
         .clone();
 
@@ -340,6 +328,6 @@ fn object_runtime_transfer(
         }
     };
 
-    let obj_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let obj_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     obj_runtime.transfer(owner, object_type, obj, /* end of transaction */ false)
 }

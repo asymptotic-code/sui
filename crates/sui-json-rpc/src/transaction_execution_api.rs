@@ -7,16 +7,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fastcrypto::encoding::Base64;
 use fastcrypto::traits::ToFromBytes;
-use jsonrpsee::core::RpcResult;
 use jsonrpsee::RpcModule;
+use jsonrpsee::core::RpcResult;
 
 use crate::authority_state::StateRead;
 use crate::error::{Error, SuiRpcInputError};
 use crate::{
-    get_balance_changes_from_effect, get_object_changes, with_tracing, ObjectProviderCache,
-    SuiRpcModule,
+    ObjectProviderCache, SuiRpcModule, get_balance_changes_from_effect, get_object_changes,
+    with_tracing,
 };
-use mysten_metrics::spawn_monitored_task;
 use shared_crypto::intent::{AppId, Intent, IntentMessage, IntentScope, IntentVersion};
 use sui_core::authority::AuthorityState;
 use sui_core::authority_client::NetworkAuthorityClient;
@@ -31,14 +30,14 @@ use sui_types::base_types::SuiAddress;
 use sui_types::crypto::default_hash;
 use sui_types::digests::TransactionDigest;
 use sui_types::effects::TransactionEffectsAPI;
-use sui_types::quorum_driver_types::{
-    ExecuteTransactionRequestType, ExecuteTransactionRequestV3, ExecuteTransactionResponseV3,
-};
 use sui_types::signature::GenericSignature;
 use sui_types::storage::PostExecutionPackageResolver;
 use sui_types::sui_serde::BigInt;
 use sui_types::transaction::{
     InputObjectKind, Transaction, TransactionData, TransactionDataAPI, TransactionKind,
+};
+use sui_types::transaction_driver_types::{
+    ExecuteTransactionRequestType, ExecuteTransactionRequestV3, ExecuteTransactionResponseV3,
 };
 use tracing::instrument;
 
@@ -150,11 +149,10 @@ impl TransactionExecutionApi {
 
         let transaction_orchestrator = self.transaction_orchestrator.clone();
         let orch_timer = self.metrics.orchestrator_latency_ms.start_timer();
-        let (response, is_executed_locally) = spawn_monitored_task!(
-            transaction_orchestrator.execute_transaction_block(request, request_type, None)
-        )
-        .await?
-        .map_err(Error::from)?;
+        let (response, is_executed_locally) = transaction_orchestrator
+            .execute_transaction_block(request, request_type, None)
+            .await
+            .map_err(Error::from)?;
         drop(orch_timer);
 
         self.handle_post_orchestration(
@@ -202,14 +200,17 @@ impl TransactionExecutionApi {
             None
         };
 
-        let object_cache = match (response.input_objects, response.output_objects) {
-            (Some(input_objects), Some(output_objects)) => {
-                let mut object_cache = ObjectProviderCache::new(self.state.clone());
+        let object_cache = if opts.show_balance_changes || opts.show_object_changes {
+            let mut object_cache = ObjectProviderCache::new(self.state.clone());
+            if let Some(input_objects) = response.input_objects {
                 object_cache.insert_objects_into_cache(input_objects);
-                object_cache.insert_objects_into_cache(output_objects);
-                Some(object_cache)
             }
-            _ => None,
+            if let Some(output_objects) = response.output_objects {
+                object_cache.insert_objects_into_cache(output_objects);
+            }
+            Some(object_cache)
+        } else {
+            None
         };
 
         let balance_changes = match &object_cache {
@@ -325,7 +326,7 @@ impl TransactionExecutionApi {
 
 #[async_trait]
 impl WriteApiServer for TransactionExecutionApi {
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     async fn execute_transaction_block(
         &self,
         tx_bytes: Base64,

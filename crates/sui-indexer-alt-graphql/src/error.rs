@@ -1,10 +1,21 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::time::Duration;
 
+use anyhow::anyhow;
+use async_graphql::ErrorExtensionValues;
+use async_graphql::ErrorExtensions;
+use async_graphql::Response;
+use async_graphql::Value;
+use axum::Json;
+use axum::response::IntoResponse;
+use tower_http::catch_panic::ResponseForPanic;
+
+use crate::metrics::RpcMetrics;
 use crate::pagination;
-use async_graphql::{ErrorExtensionValues, ErrorExtensions, Response, Value};
 
 /// Error codes for the `extensions.code` field of a GraphQL error that originates from outside
 /// GraphQL.
@@ -12,19 +23,22 @@ use async_graphql::{ErrorExtensionValues, ErrorExtensions, Response, Value};
 /// <https://www.apollographql.com/docs/apollo-server/data/errors/#built-in-error-codes>
 pub(crate) mod code {
     pub const BAD_USER_INPUT: &str = "BAD_USER_INPUT";
+    pub const FEATURE_UNAVAILABLE: &str = "FEATURE_UNAVAILABLE";
     pub const GRAPHQL_PARSE_FAILED: &str = "GRAPHQL_PARSE_FAILED";
     pub const GRAPHQL_VALIDATION_FAILED: &str = "GRAPHQL_VALIDATION_FAILED";
     pub const INTERNAL_SERVER_ERROR: &str = "INTERNAL_SERVER_ERROR";
     pub const REQUEST_TIMEOUT: &str = "REQUEST_TIMEOUT";
+    pub const RESOURCE_EXHAUSTED: &str = "RESOURCE_EXHAUSTED";
 }
 
-#[derive(thiserror::Error, Debug, Clone)]
+#[derive(thiserror::Error, Debug)]
 pub(crate) enum RpcError<E: std::error::Error = Infallible> {
     /// An error that is the user's fault.
     BadUserInput(Arc<E>),
 
-    /// A user error related to pagination and cursors.
-    Pagination(#[from] pagination::Error),
+    /// This feature is not available, because GraphQL does not have access to the underlying
+    /// store.
+    FeatureUnavailable { what: &'static str },
 
     /// An error that is produced by the framework, it gets wrapped so that we can add an error
     /// extension to it.
@@ -33,8 +47,14 @@ pub(crate) enum RpcError<E: std::error::Error = Infallible> {
     /// An error produced by the internal workings of the service (our fault).
     InternalError(Arc<anyhow::Error>),
 
+    /// A user error related to pagination and cursors.
+    Pagination(#[from] pagination::Error),
+
     /// The request took too long to process.
     RequestTimeout { kind: &'static str, limit: Duration },
+
+    /// Expended some limit, such as node count, depth, etc, during query execution.
+    ResourceExhausted(Arc<anyhow::Error>),
 }
 
 impl<E: std::error::Error> From<RpcError<E>> for async_graphql::Error {
@@ -44,9 +64,11 @@ impl<E: std::error::Error> From<RpcError<E>> for async_graphql::Error {
                 ext.set("code", code::BAD_USER_INPUT);
             }),
 
-            RpcError::Pagination(err) => err.to_string().extend_with(|_, ext| {
-                ext.set("code", code::BAD_USER_INPUT);
-            }),
+            RpcError::FeatureUnavailable { what } => {
+                format!("{what} not available").extend_with(|_, ext| {
+                    ext.set("code", code::FEATURE_UNAVAILABLE);
+                })
+            }
 
             RpcError::GraphQlError(mut err) => {
                 fill_error_code(&mut err.extensions, code::INTERNAL_SERVER_ERROR);
@@ -66,9 +88,15 @@ impl<E: std::error::Error> From<RpcError<E>> for async_graphql::Error {
                 let chain: Vec<_> = chain.map(|e| e.to_string()).collect();
                 top.to_string().extend_with(|_, ext| {
                     ext.set("code", code::INTERNAL_SERVER_ERROR);
-                    ext.set("chain", chain);
+                    if !chain.is_empty() {
+                        ext.set("chain", chain);
+                    }
                 })
             }
+
+            RpcError::Pagination(err) => err.to_string().extend_with(|_, ext| {
+                ext.set("code", code::BAD_USER_INPUT);
+            }),
 
             RpcError::RequestTimeout { kind, limit } => {
                 format!("{kind} timed out after {:.2}s", limit.as_secs_f64()).extend_with(
@@ -77,6 +105,39 @@ impl<E: std::error::Error> From<RpcError<E>> for async_graphql::Error {
                     },
                 )
             }
+
+            RpcError::ResourceExhausted(err) => {
+                // Discard the root cause (which will be the main error message), and then capture
+                // the rest as a context chain.
+                let mut chain = err.chain();
+                let Some(top) = chain.next() else {
+                    return "Unknown error".extend_with(|_, ext| {
+                        ext.set("code", code::RESOURCE_EXHAUSTED);
+                    });
+                };
+
+                let chain: Vec<_> = chain.map(|e| e.to_string()).collect();
+                top.to_string().extend_with(|_, ext| {
+                    ext.set("code", code::RESOURCE_EXHAUSTED);
+                    if !chain.is_empty() {
+                        ext.set("chain", chain);
+                    }
+                })
+            }
+        }
+    }
+}
+
+impl<E: std::error::Error> Clone for RpcError<E> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::BadUserInput(e) => Self::BadUserInput(e.clone()),
+            &Self::FeatureUnavailable { what } => Self::FeatureUnavailable { what },
+            Self::GraphQlError(e) => Self::GraphQlError(e.clone()),
+            Self::InternalError(e) => Self::InternalError(e.clone()),
+            Self::Pagination(e) => Self::Pagination(e.clone()),
+            &Self::RequestTimeout { kind, limit } => Self::RequestTimeout { kind, limit },
+            Self::ResourceExhausted(e) => Self::ResourceExhausted(e.clone()),
         }
     }
 }
@@ -126,17 +187,60 @@ pub(crate) fn bad_user_input<E: std::error::Error>(err: E) -> RpcError<E> {
     RpcError::BadUserInput(Arc::new(err))
 }
 
+/// Signal that feature `what` is not available.
+pub(crate) fn feature_unavailable<E: std::error::Error>(what: &'static str) -> RpcError<E> {
+    RpcError::FeatureUnavailable { what }
+}
+
 /// Signal a timeout. `kind` specifies what operation timed out and is included in the error
 /// message.
 pub(crate) fn request_timeout(kind: &'static str, limit: Duration) -> RpcError {
     RpcError::RequestTimeout { kind, limit }
 }
 
+/// Signal some resource has been consumed during query execution.
+pub(crate) fn resource_exhausted<E>(err: impl Into<anyhow::Error>) -> RpcError<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    RpcError::ResourceExhausted(Arc::new(err.into()))
+}
+
+/// Upcast an `RpcError` with no user error type into an `RpcError<E>`.
+pub(crate) fn upcast<E: std::error::Error>(err: RpcError) -> RpcError<E> {
+    match err {
+        RpcError::BadUserInput(e) => match *e.as_ref() {},
+        RpcError::Pagination(e) => RpcError::Pagination(e),
+        RpcError::GraphQlError(e) => RpcError::GraphQlError(e),
+        RpcError::InternalError(e) => RpcError::InternalError(e),
+        RpcError::FeatureUnavailable { what } => RpcError::FeatureUnavailable { what },
+        RpcError::RequestTimeout { kind, limit } => RpcError::RequestTimeout { kind, limit },
+        RpcError::ResourceExhausted(e) => RpcError::ResourceExhausted(e),
+    }
+}
+
+/// Convert an `RpcError<A>` into an `RpcError<B>`, as long as `B` can wrap an `Arc<A>`.
+pub(crate) fn convert<A, B>(err: RpcError<A>) -> RpcError<B>
+where
+    A: std::error::Error,
+    B: std::error::Error + From<Arc<A>>,
+{
+    match err {
+        RpcError::BadUserInput(e) => RpcError::BadUserInput(Arc::new(e.into())),
+        RpcError::Pagination(e) => RpcError::Pagination(e),
+        RpcError::GraphQlError(e) => RpcError::GraphQlError(e),
+        RpcError::InternalError(e) => RpcError::InternalError(e),
+        RpcError::FeatureUnavailable { what } => RpcError::FeatureUnavailable { what },
+        RpcError::RequestTimeout { kind, limit } => RpcError::RequestTimeout { kind, limit },
+        RpcError::ResourceExhausted(e) => RpcError::ResourceExhausted(e),
+    }
+}
+
 /// Add a code to the error, if one does not exist already in the error extensions.
 pub(crate) fn fill_error_code(ext: &mut Option<ErrorExtensionValues>, code: &str) {
     match ext {
-        Some(ref ext) if ext.get("code").is_some() => {}
-        Some(ref mut ext) => ext.set("code", code),
+        Some(ext) if ext.get("code").is_some() => {}
+        Some(ext) => ext.set("code", code),
         None => {
             let mut singleton = ErrorExtensionValues::default();
             singleton.set("code", code);
@@ -163,10 +267,45 @@ pub(crate) fn error_codes(response: &Response) -> Vec<&str> {
         .collect()
 }
 
+/// Handler for panics that occur during request processing. Converts panics into GraphQL error
+/// responses with a 500 status code.
+#[derive(Clone)]
+pub(crate) struct PanicHandler {
+    metrics: Arc<RpcMetrics>,
+}
+
+impl PanicHandler {
+    pub fn new(metrics: Arc<RpcMetrics>) -> Self {
+        Self { metrics }
+    }
+}
+
+impl ResponseForPanic for PanicHandler {
+    type ResponseBody = axum::body::Body;
+
+    fn response_for_panic(
+        &mut self,
+        err: Box<dyn std::any::Any + Send + 'static>,
+    ) -> axum::http::Response<Self::ResponseBody> {
+        self.metrics.queries_panicked.inc();
+
+        let err: RpcError = if let Some(s) = err.downcast_ref::<String>() {
+            anyhow!(s.clone()).context("Request panicked")
+        } else if let Some(s) = err.downcast_ref::<&str>() {
+            anyhow!(s.to_string()).context("Request panicked")
+        } else {
+            anyhow!("Request panicked")
+        }
+        .into();
+
+        let mut res = Json(Response::from_errors(vec![err.into()])).into_response();
+        *res.status_mut() = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+        res
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use anyhow::anyhow;
-
     use super::*;
 
     #[derive(thiserror::Error, Debug)]

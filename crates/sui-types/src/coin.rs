@@ -1,17 +1,17 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::error::ExecutionErrorKind;
-use crate::error::SuiError;
+use crate::error::{SuiError, SuiErrorKind};
+use crate::execution_status::ExecutionErrorKind;
+use crate::{
+    SUI_FRAMEWORK_ADDRESS,
+    base_types::ObjectID,
+    id::{ID, UID},
+};
 use crate::{
     balance::{Balance, Supply},
     error::ExecutionError,
     object::{Data, Object},
-};
-use crate::{
-    base_types::ObjectID,
-    id::{ID, UID},
-    SUI_FRAMEWORK_ADDRESS,
 };
 use move_core_types::{
     account_address::AccountAddress,
@@ -35,6 +35,8 @@ pub const PAY_MODULE_NAME: &IdentStr = ident_str!("pay");
 pub const PAY_JOIN_FUNC_NAME: &IdentStr = ident_str!("join");
 pub const PAY_SPLIT_N_FUNC_NAME: &IdentStr = ident_str!("divide_and_keep");
 pub const PAY_SPLIT_VEC_FUNC_NAME: &IdentStr = ident_str!("split_vec");
+pub const REDEEM_FUNDS_FUNC_NAME: &IdentStr = ident_str!("redeem_funds");
+pub const SEND_FUNDS_FUNC_NAME: &IdentStr = ident_str!("send_funds");
 
 // Rust version of the Move sui::coin::Coin type
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, Eq, PartialEq)]
@@ -164,8 +166,11 @@ impl TreasuryCap {
 
     /// Create a TreasuryCap from BCS bytes
     pub fn from_bcs_bytes(content: &[u8]) -> Result<Self, SuiError> {
-        bcs::from_bytes(content).map_err(|err| SuiError::ObjectDeserializationError {
-            error: format!("Unable to deserialize TreasuryCap object: {}", err),
+        bcs::from_bytes(content).map_err(|err| {
+            SuiErrorKind::ObjectDeserializationError {
+                error: format!("Unable to deserialize TreasuryCap object: {}", err),
+            }
+            .into()
         })
     }
 
@@ -203,9 +208,10 @@ impl TryFrom<Object> for TreasuryCap {
             Data::Package(_) => {}
         }
 
-        Err(SuiError::TypeError {
+        Err(SuiErrorKind::TypeError {
             error: format!("Object type is not a TreasuryCap: {:?}", object),
-        })
+        }
+        .into())
     }
 }
 
@@ -235,8 +241,11 @@ impl CoinMetadata {
 
     /// Create a coin from BCS bytes
     pub fn from_bcs_bytes(content: &[u8]) -> Result<Self, SuiError> {
-        bcs::from_bytes(content).map_err(|err| SuiError::ObjectDeserializationError {
-            error: format!("Unable to deserialize CoinMetadata object: {}", err),
+        bcs::from_bytes(content).map_err(|err| {
+            SuiErrorKind::ObjectDeserializationError {
+                error: format!("Unable to deserialize CoinMetadata object: {}", err),
+            }
+            .into()
         })
     }
 
@@ -281,9 +290,10 @@ impl TryFrom<&Object> for CoinMetadata {
             Data::Package(_) => {}
         }
 
-        Err(SuiError::TypeError {
+        Err(SuiErrorKind::TypeError {
             error: format!("Object type is not a CoinMetadata: {:?}", object),
-        })
+        }
+        .into())
     }
 }
 
@@ -307,11 +317,14 @@ impl RegulatedCoinMetadata {
 
     /// Create a coin from BCS bytes
     pub fn from_bcs_bytes(content: &[u8]) -> Result<Self, SuiError> {
-        bcs::from_bytes(content).map_err(|err| SuiError::ObjectDeserializationError {
-            error: format!(
-                "Unable to deserialize RegulatedCoinMetadata object: {}",
-                err
-            ),
+        bcs::from_bytes(content).map_err(|err| {
+            SuiErrorKind::ObjectDeserializationError {
+                error: format!(
+                    "Unable to deserialize RegulatedCoinMetadata object: {}",
+                    err
+                ),
+            }
+            .into()
         })
     }
 
@@ -356,8 +369,9 @@ impl TryFrom<&Object> for RegulatedCoinMetadata {
             Data::Package(_) => {}
         }
 
-        Err(SuiError::TypeError {
+        Err(SuiErrorKind::TypeError {
             error: format!("Object type is not a RegulatedCoinMetadata: {:?}", object),
-        })
+        }
+        .into())
     }
 }

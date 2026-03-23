@@ -116,19 +116,11 @@ impl BlockV1 {
     }
 
     fn genesis_block(context: &Context, author: AuthorityIndex) -> Self {
-        let timestamp_ms = if context
-            .protocol_config
-            .enforce_checkpoint_timestamp_monotonicity()
-        {
-            context.epoch_start_timestamp_ms
-        } else {
-            0
-        };
         Self {
             epoch: context.committee.epoch(),
             round: GENESIS_ROUND,
             author,
-            timestamp_ms,
+            timestamp_ms: context.epoch_start_timestamp_ms,
             ancestors: vec![],
             transactions: vec![],
             commit_votes: vec![],
@@ -223,19 +215,11 @@ impl BlockV2 {
     }
 
     fn genesis_block(context: &Context, author: AuthorityIndex) -> Self {
-        let timestamp_ms = if context
-            .protocol_config
-            .enforce_checkpoint_timestamp_monotonicity()
-        {
-            context.epoch_start_timestamp_ms
-        } else {
-            0
-        };
         Self {
             epoch: context.committee.epoch(),
             round: GENESIS_ROUND,
             author,
-            timestamp_ms,
+            timestamp_ms: context.epoch_start_timestamp_ms,
             ancestors: vec![],
             transactions: vec![],
             commit_votes: vec![],
@@ -304,7 +288,6 @@ impl Slot {
         Self { round, authority }
     }
 
-    #[cfg(test)]
     pub fn new_for_test(round: Round, authority: u32) -> Self {
         Self {
             round,
@@ -639,7 +622,25 @@ impl TestBlock {
         self
     }
 
-    pub fn set_ancestors(mut self, ancestors: Vec<BlockRef>) -> Self {
+    /// Sorts then sets ancestors in the TestBlock.
+    /// Author's own block is always first, which is expected by BlockVerifier and
+    /// the rest of the system.
+    pub fn set_ancestors(mut self, mut ancestors: Vec<BlockRef>) -> Self {
+        ancestors.sort_by(|a, b| {
+            if a.author == self.block.author {
+                return std::cmp::Ordering::Less;
+            }
+            if b.author == self.block.author {
+                return std::cmp::Ordering::Greater;
+            }
+            a.author.cmp(&b.author)
+        });
+        self.block.ancestors = ancestors;
+        self
+    }
+
+    /// Sets ancestors in the TestBlock exactly as provided.
+    pub fn set_ancestors_raw(mut self, ancestors: Vec<BlockRef>) -> Self {
         self.block.ancestors = ancestors;
         self
     }
@@ -688,7 +689,7 @@ mod tests {
     use fastcrypto::error::FastCryptoError;
 
     use crate::{
-        block::{genesis_blocks, BlockAPI, SignedBlock, TestBlock},
+        block::{BlockAPI, SignedBlock, TestBlock, genesis_blocks},
         context::Context,
         error::ConsensusError,
     };

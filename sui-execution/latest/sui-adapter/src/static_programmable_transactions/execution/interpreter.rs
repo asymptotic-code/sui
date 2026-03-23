@@ -4,10 +4,11 @@
 use crate::{
     execution_mode::ExecutionMode,
     gas_charger::GasCharger,
-    sp,
+    object_runtime, sp,
     static_programmable_transactions::{
         env::Env,
         execution::context::{Context, CtxValue},
+        execution::trace_utils,
         typing::ast as T,
     },
 };
@@ -16,17 +17,17 @@ use move_trace_format::format::MoveTraceBuilder;
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 use sui_types::{
     base_types::TxContext,
-    error::{ExecutionError, ExecutionErrorKind},
+    error::ExecutionError,
     execution::{ExecutionTiming, ResultWithTimings},
-    execution_status::PackageUpgradeError,
+    execution_status::{ExecutionErrorKind, PackageUpgradeError},
     metrics::LimitsMetrics,
     move_package::MovePackage,
     object::Owner,
 };
 use tracing::instrument;
 
-pub fn execute<'env, 'pc, 'vm, 'state, 'linkage, Mode: ExecutionMode>(
-    env: &'env mut Env<'pc, 'vm, 'state, 'linkage>,
+pub fn execute<'env, 'pc, 'vm, 'state, 'linkage, 'extension, Mode: ExecutionMode>(
+    env: &'env mut Env<'pc, 'vm, 'state, 'linkage, 'extension>,
     metrics: Arc<LimitsMetrics>,
     tx_context: Rc<RefCell<TxContext>>,
     gas_charger: &mut GasCharger,
@@ -50,13 +51,16 @@ where
 
     match result {
         Ok(result) => Ok((result, timings)),
-        Err(e) => Err((e, timings)),
+        Err(e) => {
+            trace_utils::trace_execution_error(trace_builder_opt, e.to_string());
+            Err((e, timings))
+        }
     }
 }
 
-pub fn execute_inner<'env, 'pc, 'vm, 'state, 'linkage, Mode: ExecutionMode>(
+pub fn execute_inner<'env, 'pc, 'vm, 'state, 'linkage, 'extension, Mode: ExecutionMode>(
     timings: &mut Vec<ExecutionTiming>,
-    env: &'env mut Env<'pc, 'vm, 'state, 'linkage>,
+    env: &'env mut Env<'pc, 'vm, 'state, 'linkage, 'extension>,
     metrics: Arc<LimitsMetrics>,
     tx_context: Rc<RefCell<TxContext>>,
     gas_charger: &mut GasCharger,
@@ -66,11 +70,15 @@ pub fn execute_inner<'env, 'pc, 'vm, 'state, 'linkage, Mode: ExecutionMode>(
 where
     'pc: 'state,
 {
+    debug_assert_eq!(gas_charger.move_gas_status().stack_height_current(), 0);
     let T::Transaction {
+        gas_payment,
         bytes,
         objects,
+        withdrawals,
         pure,
         receiving,
+        withdrawal_compatibility_conversions: _,
         commands,
     } = ast;
     let mut context = Context::new(
@@ -78,24 +86,24 @@ where
         metrics,
         tx_context,
         gas_charger,
+        gas_payment,
         bytes,
         objects,
+        withdrawals,
         pure,
         receiving,
     )?;
+
+    trace_utils::trace_ptb_summary(&mut context, trace_builder_opt, &commands)?;
+
     let mut mode_results = Mode::empty_results();
-    for (sp!(idx, command), tys) in commands {
+    for sp!(idx, c) in commands {
         let start = Instant::now();
-        if let Err(err) = execute_command::<Mode>(
-            &mut context,
-            &mut mode_results,
-            command,
-            tys,
-            trace_builder_opt.as_mut(),
-        ) {
-            let object_runtime = context.object_runtime()?;
+        if let Err(err) =
+            execute_command::<Mode>(&mut context, &mut mode_results, c, trace_builder_opt)
+        {
             // We still need to record the loaded child objects for replay
-            let loaded_runtime_objects = object_runtime.loaded_runtime_objects();
+            let loaded_runtime_objects = object_runtime!(context)?.loaded_runtime_objects();
             // we do not save the wrapped objects since on error, they should not be modified
             drop(context);
             // TODO wtf is going on with the borrow checker here. 'state is bound into the object
@@ -108,14 +116,16 @@ where
         timings.push(ExecutionTiming::Success(start.elapsed()));
     }
     // Save loaded objects table in case we fail in post execution
-    let object_runtime = context.object_runtime()?;
+    //
     // We still need to record the loaded child objects for replay
     // Record the objects loaded at runtime (dynamic fields + received) for
     // storage rebate calculation.
-    let loaded_runtime_objects = object_runtime.loaded_runtime_objects();
+    let loaded_runtime_objects = object_runtime!(context)?.loaded_runtime_objects();
     // We record what objects were contained in at the start of the transaction
     // for expensive invariant checks
-    let wrapped_object_containers = object_runtime.wrapped_object_containers();
+    let wrapped_object_containers = object_runtime!(context)?.wrapped_object_containers();
+    // We record the generated object IDs for expensive invariant checks
+    let generated_object_ids = object_runtime!(context)?.generated_object_ids();
 
     // apply changes
     let finished = context.finish::<Mode>();
@@ -124,7 +134,9 @@ where
         .save_loaded_runtime_objects(loaded_runtime_objects);
     env.state_view
         .save_wrapped_object_containers(wrapped_object_containers);
-    env.state_view.record_execution_results(finished?);
+    env.state_view.record_execution_results(finished?)?;
+    env.state_view
+        .record_generated_object_ids(generated_object_ids);
     Ok(mode_results)
 }
 
@@ -133,13 +145,25 @@ where
 fn execute_command<Mode: ExecutionMode>(
     context: &mut Context,
     mode_results: &mut Mode::ExecutionResults,
-    command: T::Command_,
-    result_tys: T::ResultType,
-    trace_builder_opt: Option<&mut MoveTraceBuilder>,
+    c: T::Command_,
+    trace_builder_opt: &mut Option<MoveTraceBuilder>,
 ) -> Result<(), ExecutionError> {
+    let T::Command_ {
+        command,
+        result_type,
+        drop_values,
+        consumed_shared_objects: _,
+    } = c;
+    assert_invariant!(
+        context.gas_charger.move_gas_status().stack_height_current() == 0,
+        "stack height did not start at 0"
+    );
+    let is_move_call = matches!(command, T::Command__::MoveCall(_));
+    let num_args = command.arguments_len();
     let mut args_to_update = vec![];
     let result = match command {
-        T::Command_::MoveCall(move_call) => {
+        T::Command__::MoveCall(move_call) => {
+            trace_utils::trace_move_call_start(trace_builder_opt);
             let T::MoveCall {
                 function,
                 arguments,
@@ -153,9 +177,11 @@ fn execute_command<Mode: ExecutionMode>(
                 )
             }
             let arguments = context.arguments(arguments)?;
-            context.vm_move_call(function, arguments, trace_builder_opt)?
+            let res = context.vm_move_call(function, arguments, trace_builder_opt);
+            trace_utils::trace_move_call_end(trace_builder_opt);
+            res?
         }
-        T::Command_::TransferObjects(objects, recipient) => {
+        T::Command__::TransferObjects(objects, recipient) => {
             let object_tys = objects
                 .iter()
                 .map(|sp!(_, (_, ty))| ty.clone())
@@ -166,6 +192,7 @@ fn execute_command<Mode: ExecutionMode>(
                 object_values.len() == object_tys.len(),
                 "object values and types mismatch"
             );
+            trace_utils::trace_transfer(context, trace_builder_opt, &object_values, &object_tys)?;
             for (object_value, ty) in object_values.into_iter().zip(object_tys) {
                 // TODO should we just call a Move function?
                 let recipient = Owner::AddressOwner(recipient.into());
@@ -173,7 +200,8 @@ fn execute_command<Mode: ExecutionMode>(
             }
             vec![]
         }
-        T::Command_::SplitCoins(_, coin, amounts) => {
+        T::Command__::SplitCoins(ty, coin, amounts) => {
+            let mut trace_values = vec![];
             // TODO should we just call a Move function?
             if Mode::TRACK_EXECUTION {
                 args_to_update.push(coin.clone());
@@ -189,6 +217,13 @@ fn execute_command<Mode: ExecutionMode>(
                 };
                 total = new_total;
             }
+            trace_utils::add_move_value_info_from_ctx_value(
+                context,
+                trace_builder_opt,
+                &mut trace_values,
+                &ty,
+                &coin_ref,
+            )?;
             let coin_value = context.copy_value(&coin_ref)?.coin_ref_value()?;
             fp_ensure!(
                 coin_value >= total,
@@ -198,21 +233,48 @@ fn execute_command<Mode: ExecutionMode>(
                 )
             );
             coin_ref.coin_ref_subtract_balance(total)?;
-            amount_values
+            let amounts = amount_values
                 .into_iter()
                 .map(|a| context.new_coin(a))
-                .collect::<Result<_, _>>()?
+                .collect::<Result<Vec<_>, _>>()?;
+            trace_utils::trace_split_coins(
+                context,
+                trace_builder_opt,
+                &ty,
+                trace_values,
+                &amounts,
+                total,
+            )?;
+
+            amounts
         }
-        T::Command_::MergeCoins(_, target, coins) => {
+        T::Command__::MergeCoins(ty, target, coins) => {
+            let mut trace_values = vec![];
             // TODO should we just call a Move function?
             if Mode::TRACK_EXECUTION {
                 args_to_update.push(target.clone());
             }
             let target_ref: CtxValue = context.argument(target)?;
+            trace_utils::add_move_value_info_from_ctx_value(
+                context,
+                trace_builder_opt,
+                &mut trace_values,
+                &ty,
+                &target_ref,
+            )?;
             let coins = context.arguments(coins)?;
             let amounts = coins
                 .into_iter()
-                .map(|coin| context.destroy_coin(coin))
+                .map(|coin| {
+                    trace_utils::add_move_value_info_from_ctx_value(
+                        context,
+                        trace_builder_opt,
+                        &mut trace_values,
+                        &ty,
+                        &coin,
+                    )?;
+                    context.destroy_coin(coin)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let mut additional: u64 = 0;
             for amount in amounts {
@@ -229,17 +291,26 @@ fn execute_command<Mode: ExecutionMode>(
                 ExecutionError::from_kind(ExecutionErrorKind::CoinBalanceOverflow,)
             );
             target_ref.coin_ref_add_balance(additional)?;
+            trace_utils::trace_merge_coins(
+                context,
+                trace_builder_opt,
+                &ty,
+                trace_values,
+                additional,
+            )?;
             vec![]
         }
-        T::Command_::MakeMoveVec(ty, items) => {
+        T::Command__::MakeMoveVec(ty, items) => {
             let items: Vec<CtxValue> = context.arguments(items)?;
+            trace_utils::trace_make_move_vec(context, trace_builder_opt, &items, &ty)?;
             vec![CtxValue::vec_pack(ty, items)?]
         }
-        T::Command_::Publish(module_bytes, dep_ids, linkage) => {
+        T::Command__::Publish(module_bytes, dep_ids, linkage) => {
+            trace_utils::trace_publish_event(trace_builder_opt)?;
             let modules =
                 context.deserialize_modules(&module_bytes, /* is upgrade */ false)?;
 
-            let runtime_id = context.publish_and_init_package::<Mode>(
+            let original_id = context.publish_and_init_package::<Mode>(
                 modules,
                 &dep_ids,
                 linkage,
@@ -250,16 +321,17 @@ fn execute_command<Mode: ExecutionMode>(
                 // no upgrade cap for genesis modules
                 std::vec![]
             } else {
-                std::vec![context.new_upgrade_cap(runtime_id)?]
+                std::vec![context.new_upgrade_cap(original_id)?]
             }
         }
-        T::Command_::Upgrade(
+        T::Command__::Upgrade(
             module_bytes,
             dep_ids,
             current_package_id,
             upgrade_ticket,
             linkage,
         ) => {
+            trace_utils::trace_upgrade_event(trace_builder_opt)?;
             let upgrade_ticket = context
                 .argument::<CtxValue>(upgrade_ticket)?
                 .into_upgrade_ticket()?;
@@ -306,9 +378,23 @@ fn execute_command<Mode: ExecutionMode>(
     };
     if Mode::TRACK_EXECUTION {
         let argument_updates = context.argument_updates(args_to_update)?;
-        let command_result = context.tracked_results(&result, &result_tys)?;
+        let command_result = context.tracked_results(&result, &result_type)?;
         Mode::finish_command_v2(mode_results, argument_updates, command_result)?;
     }
+    assert_invariant!(
+        result.len() == drop_values.len(),
+        "result values and drop values mismatch"
+    );
+    context.charge_command(is_move_call, num_args, result.len())?;
+    let result = result
+        .into_iter()
+        .zip(drop_values)
+        .map(|(value, drop)| if !drop { Some(value) } else { None })
+        .collect::<Vec<_>>();
     context.result(result)?;
+    assert_invariant!(
+        context.gas_charger.move_gas_status().stack_height_current() == 0,
+        "stack height did not end at 0"
+    );
     Ok(())
 }

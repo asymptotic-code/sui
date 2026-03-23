@@ -17,13 +17,13 @@ mod consensus_tests {
     use mysten_metrics::RegistryService;
     use mysten_network::Multiaddr;
     use prometheus::Registry;
-    use rand::{rngs::StdRng, Rng, SeedableRng as _};
+    use rand::{Rng, SeedableRng as _, rngs::StdRng};
     use sui_config::local_ip_utils;
     use sui_macros::sim_test;
     use sui_protocol_config::ProtocolConfig;
     use sui_simulator::{
-        configs::{bimodal_latency_ms, env_config, uniform_latency_ms},
         SimConfig,
+        configs::{bimodal_latency_ms, env_config, uniform_latency_ms},
     };
     use tempfile::TempDir;
     use tokio::task::JoinSet;
@@ -76,7 +76,6 @@ mod consensus_tests {
                 db_dir: Arc::new(TempDir::new().unwrap()),
                 committee: committee.clone(),
                 keypairs: keypairs.clone(),
-                network_type: sui_protocol_config::ConsensusNetwork::Tonic,
                 boot_counter: boot_counters[authority_index],
                 protocol_config: protocol_config.clone(),
                 clock_drift: clock_drifts[authority_index.value() as usize],
@@ -167,7 +166,6 @@ mod consensus_tests {
                 db_dir: Arc::new(TempDir::new().unwrap()),
                 committee: committee.clone(),
                 keypairs: keypairs.clone(),
-                network_type: sui_protocol_config::ConsensusNetwork::Tonic,
                 boot_counter: boot_counters[authority_index],
                 protocol_config: protocol_config.clone(),
                 clock_drift: clock_drifts[authority_index.value() as usize],

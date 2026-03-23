@@ -59,6 +59,7 @@ struct Context {
     tx_context: Location,
     gas: Location,
     object_inputs: Vec<Location>,
+    withdrawal_inputs: Vec<Location>,
     pure_inputs: Vec<Location>,
     receiving_inputs: Vec<Location>,
     results: Vec<Vec<Location>>,
@@ -289,59 +290,88 @@ impl Location {
 }
 
 impl Context {
-    fn new(txn: &T::Transaction) -> Self {
+    fn new(_env: &Env, txn: &T::Transaction) -> anyhow::Result<Self> {
         let T::Transaction {
+            gas_payment,
             bytes: _,
             objects,
+            withdrawals,
             pure,
             receiving,
+            withdrawal_compatibility_conversions: _,
             commands: _,
         } = txn;
         let tx_context = Location::non_ref(T::Location::TxContext);
-        let gas = Location::non_ref(T::Location::GasCoin);
+        let mut gas = Location::non_ref(T::Location::GasCoin);
+        if gas_payment.is_none() {
+            gas.move_value()
+                .map_err(|_| anyhow::anyhow!("gas coin should be initialized"))?;
+        }
         let object_inputs = (0..objects.len())
-            .map(|i| Location::non_ref(T::Location::ObjectInput(i as u16)))
-            .collect();
+            .map(|i| {
+                Ok(Location::non_ref(T::Location::ObjectInput(checked_as!(
+                    i, u16
+                )?)))
+            })
+            .collect::<Result<_, ExecutionError>>()?;
+        let withdrawal_inputs = (0..withdrawals.len())
+            .map(|i| {
+                Ok(Location::non_ref(T::Location::WithdrawalInput(
+                    checked_as!(i, u16)?,
+                )))
+            })
+            .collect::<Result<_, ExecutionError>>()?;
         let pure_inputs = (0..pure.len())
-            .map(|i| Location::non_ref(T::Location::PureInput(i as u16)))
-            .collect();
+            .map(|i| {
+                Ok(Location::non_ref(T::Location::PureInput(checked_as!(
+                    i, u16
+                )?)))
+            })
+            .collect::<Result<_, ExecutionError>>()?;
         let receiving_inputs = (0..receiving.len())
-            .map(|i| Location::non_ref(T::Location::ReceivingInput(i as u16)))
-            .collect();
-        Self {
+            .map(|i| {
+                Ok(Location::non_ref(T::Location::ReceivingInput(checked_as!(
+                    i, u16
+                )?)))
+            })
+            .collect::<Result<_, ExecutionError>>()?;
+        Ok(Self {
             tx_context,
             gas,
             object_inputs,
+            withdrawal_inputs,
             pure_inputs,
             receiving_inputs,
             results: vec![],
             arg_roots: IndexSet::new(),
-        }
+        })
     }
 
-    fn current_command(&self) -> u16 {
-        self.results.len() as u16
+    fn current_command(&self) -> anyhow::Result<u16> {
+        Ok(checked_as!(self.results.len(), u16)?)
     }
 
-    fn add_result_values(&mut self, results: impl IntoIterator<Item = Value>) {
-        let command = self.current_command();
+    fn add_result_values(
+        &mut self,
+        results: impl IntoIterator<Item = Option<Value>>,
+    ) -> anyhow::Result<()> {
+        let command = self.current_command()?;
         self.results.push(
             results
                 .into_iter()
                 .enumerate()
-                .map(|(i, v)| Location {
-                    self_path: Rc::new(PathSet::initial(T::Location::Result(command, i as u16))),
-                    value: Some(v),
+                .map(|(i, v)| {
+                    Ok(Location {
+                        self_path: Rc::new(PathSet::initial(T::Location::Result(
+                            command,
+                            checked_as!(i, u16)?,
+                        ))),
+                        value: v,
+                    })
                 })
-                .collect(),
+                .collect::<Result<_, ExecutionError>>()?,
         );
-    }
-
-    fn add_results(&mut self, results: &[T::Type]) {
-        self.add_result_values(results.iter().map(|t| {
-            debug_assert!(!matches!(t, T::Type::Reference(_, _)));
-            Value::NonRef
-        }));
+        Ok(())
     }
 
     fn location(&self, loc: T::Location) -> anyhow::Result<&Location> {
@@ -352,6 +382,10 @@ impl Context {
                 .object_inputs
                 .get(i as usize)
                 .ok_or_else(|| anyhow::anyhow!("Object input index out of bounds {i}"))?,
+            T::Location::WithdrawalInput(i) => self
+                .withdrawal_inputs
+                .get(i as usize)
+                .ok_or_else(|| anyhow::anyhow!("Withdrawal input index out of bounds {i}"))?,
             T::Location::PureInput(i) => self
                 .pure_inputs
                 .get(i as usize)
@@ -376,6 +410,10 @@ impl Context {
                 .object_inputs
                 .get_mut(i as usize)
                 .ok_or_else(|| anyhow::anyhow!("Object input index out of bounds {i}"))?,
+            T::Location::WithdrawalInput(i) => self
+                .withdrawal_inputs
+                .get_mut(i as usize)
+                .ok_or_else(|| anyhow::anyhow!("Withdrawal input index out of bounds {i}"))?,
             T::Location::PureInput(i) => self
                 .pure_inputs
                 .get_mut(i as usize)
@@ -410,7 +448,7 @@ impl Context {
                     "Borrowed flag mismatch for copy usage: expected {borrowed}, got {is_borrowed} \
                     location {:?} for in command {}",
                     location.self_path,
-                    self.current_command()
+                    self.current_command()?
                 );
             }
         }
@@ -459,6 +497,7 @@ impl Context {
             tx_context,
             gas,
             object_inputs,
+            withdrawal_inputs,
             pure_inputs,
             receiving_inputs,
             results,
@@ -467,6 +506,7 @@ impl Context {
         std::iter::once(tx_context)
             .chain(std::iter::once(gas))
             .chain(object_inputs)
+            .chain(withdrawal_inputs)
             .chain(pure_inputs)
             .chain(receiving_inputs)
             .chain(results.iter().flatten())
@@ -504,69 +544,94 @@ impl Context {
 /// Checks the following
 /// - Values are not used after being moved
 /// - Reference safety is upheld (no dangling references)
-pub fn verify(_env: &Env, txn: &T::Transaction) -> Result<(), ExecutionError> {
-    verify_(txn).map_err(|e| make_invariant_violation!("{}. Transaction {:?}", e, txn))
+pub fn verify(env: &Env, txn: &T::Transaction) -> Result<(), ExecutionError> {
+    verify_(env, txn).map_err(|e| make_invariant_violation!("{}. Transaction {:?}", e, txn))
 }
 
-fn verify_(txn: &T::Transaction) -> anyhow::Result<()> {
-    let mut context = Context::new(txn);
+fn verify_(env: &Env, txn: &T::Transaction) -> anyhow::Result<()> {
+    let mut context = Context::new(env, txn)?;
     let T::Transaction {
+        gas_payment: _,
         bytes: _,
         objects: _,
+        withdrawals: _,
         pure: _,
         receiving: _,
+        withdrawal_compatibility_conversions: _,
         commands,
     } = txn;
-    for (c, result_tys) in commands {
-        debug_assert!(context.arg_roots.is_empty());
-        command(&mut context, c, result_tys)?;
-        context.arg_roots.clear();
+    for c in commands {
+        command(&mut context, c)?;
     }
     Ok(())
 }
 
-fn command(
-    context: &mut Context,
-    sp!(_, command): &T::Command,
-    result_tys: &[T::Type],
-) -> anyhow::Result<()> {
-    match command {
-        T::Command_::MoveCall(move_call) => {
+fn command(context: &mut Context, c: &T::Command) -> anyhow::Result<()> {
+    // process the command
+    debug_assert!(context.arg_roots.is_empty());
+    let results = command_(context, c)?;
+    // drop unused result values by marking them as `None`
+    assert_invariant!(
+        results.len() == c.value.drop_values.len(),
+        "result length mismatch. expected {}, got {}",
+        c.value.drop_values.len(),
+        results.len()
+    );
+    context.add_result_values(
+        results
+            .into_iter()
+            .zip(c.value.drop_values.iter().copied())
+            .map(|(v, drop)| if drop { None } else { Some(v) }),
+    )?;
+    context.arg_roots.clear();
+    Ok(())
+}
+
+fn command_(context: &mut Context, sp!(_, c): &T::Command) -> anyhow::Result<Vec<Value>> {
+    let result_tys = &c.result_type;
+    let results = match &c.command {
+        T::Command__::MoveCall(move_call) => {
             let T::MoveCall {
                 function,
                 arguments,
             } = &**move_call;
             let arg_values = context.arguments(arguments)?;
-            call(context, &function.signature, arg_values)?;
+            call(context, &function.signature, arg_values)?
         }
-        T::Command_::TransferObjects(objs, recipient) => {
+        T::Command__::TransferObjects(objs, recipient) => {
             context.arguments(objs)?;
             context.argument(recipient)?;
-            context.add_results(result_tys);
+            non_ref_results(result_tys)?
         }
-        T::Command_::SplitCoins(_, coin, amounts) => {
+        T::Command__::SplitCoins(_, coin, amounts) => {
             context.arguments(amounts)?;
             let coin_value = context.argument(coin)?;
             write_ref(context, coin_value)?;
-            context.add_results(result_tys);
+            non_ref_results(result_tys)?
         }
-        T::Command_::MergeCoins(_, target, coins) => {
+        T::Command__::MergeCoins(_, target, coins) => {
             context.arguments(coins)?;
             let target_value = context.argument(target)?;
             write_ref(context, target_value)?;
+            non_ref_results(result_tys)?
         }
-        T::Command_::MakeMoveVec(_, arguments) => {
+        T::Command__::MakeMoveVec(_, arguments) => {
             context.arguments(arguments)?;
-            context.add_results(result_tys);
+            non_ref_results(result_tys)?
         }
-        T::Command_::Publish(_, _, _) => context.add_results(result_tys),
-        T::Command_::Upgrade(_, _, _, ticket, _) => {
+        T::Command__::Publish(_, _, _) => non_ref_results(result_tys)?,
+        T::Command__::Upgrade(_, _, _, ticket, _) => {
             context.argument(ticket)?;
-            context.add_results(result_tys);
+            non_ref_results(result_tys)?
         }
-    }
-
-    Ok(())
+    };
+    assert_invariant!(
+        result_tys.len() == results.len(),
+        "result length mismatch. Expected {}, got {}",
+        result_tys.len(),
+        results.len()
+    );
+    Ok(results)
 }
 
 fn write_ref(context: &Context, value: Value) -> anyhow::Result<()> {
@@ -595,7 +660,7 @@ fn call(
     context: &mut Context,
     signature: &T::LoadedFunctionInstantiation,
     arguments: Vec<Value>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<Value>> {
     let return_ = &signature.return_;
     let mut all_paths: PathSet = PathSet::empty();
     let mut imm_paths: PathSet = PathSet::empty();
@@ -631,7 +696,7 @@ fn call(
         imm_paths.is_disjoint(&mut_paths),
         "Mutable and immutable borrows cannot overlap"
     );
-    let command = context.current_command();
+    let command = context.current_command()?;
     let mut_paths = if mut_paths.is_empty() {
         PathSet::unknown_root(command)
     } else {
@@ -642,13 +707,13 @@ fn call(
     } else {
         all_paths
     };
-    let result_values = return_
+    return_
         .iter()
         .enumerate()
         .map(|(i, ty)| {
             let delta = Delta {
                 command,
-                result: i as u16,
+                result: checked_as!(i, u16)?,
             };
             match ty {
                 T::Type::Reference(/* is mut */ true, _) => {
@@ -660,9 +725,20 @@ fn call(
                 _ => Ok(Value::NonRef),
             }
         })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    context.add_result_values(result_values);
-    Ok(())
+        .collect::<anyhow::Result<Vec<_>>>()
+}
+
+fn non_ref_results(results: &[T::Type]) -> anyhow::Result<Vec<Value>> {
+    results
+        .iter()
+        .map(|t| {
+            anyhow::ensure!(
+                !matches!(t, T::Type::Reference(_, _)),
+                "attempted to create a non-reference result from a reference type",
+            );
+            Ok(Value::NonRef)
+        })
+        .collect()
 }
 
 //**************************************************************************************************

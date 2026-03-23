@@ -1,20 +1,22 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use self::db_dump::{dump_table, duplicate_objects_summary, list_tables, table_summary, StoreName};
-use self::index_search::{search_index, SearchRange};
+use self::db_dump::{StoreName, dump_table, list_tables, table_summary};
+use self::index_search::{SearchRange, search_index};
 use crate::db_tool::db_dump::{compact, print_table_metadata, prune_checkpoints, prune_objects};
 use anyhow::{anyhow, bail};
 use clap::Parser;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use sui_core::authority::authority_per_epoch_store::AuthorityEpochTables;
+use sui_core::authority::authority_store_pruner::PrunerWatermarks;
 use sui_core::authority::authority_store_tables::AuthorityPerpetualTables;
 use sui_core::checkpoints::CheckpointStore;
 use sui_types::base_types::{EpochId, ObjectID};
 use sui_types::digests::{CheckpointContentsDigest, TransactionDigest};
 use sui_types::effects::TransactionEffectsAPI;
 use sui_types::messages_checkpoint::{CheckpointDigest, CheckpointSequenceNumber};
-use typed_store::rocks::{safe_drop_db, MetricConf};
+use typed_store::rocks::{MetricConf, safe_drop_db};
 pub mod db_dump;
 mod index_search;
 
@@ -26,7 +28,6 @@ pub enum DbToolCommand {
     IndexSearchKeyRange(IndexSearchKeyRangeOptions),
     IndexSearchCount(IndexSearchCountOptions),
     TableSummary(Options),
-    DuplicatesSummary,
     ListDBMetadata(Options),
     PrintLastConsensusIndex,
     PrintConsensusCommit(PrintConsensusCommitOptions),
@@ -190,7 +191,6 @@ pub async fn execute_db_tool_command(db_path: PathBuf, cmd: DbToolCommand) -> an
         DbToolCommand::TableSummary(d) => {
             print_db_table_summary(d.store_name, d.epoch, db_path, &d.table_name)
         }
-        DbToolCommand::DuplicatesSummary => print_db_duplicates_summary(db_path),
         DbToolCommand::ListDBMetadata(d) => {
             print_table_metadata(d.store_name, d.epoch, db_path, &d.table_name)
         }
@@ -240,23 +240,16 @@ pub fn print_db_all_tables(db_path: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn print_db_duplicates_summary(db_path: PathBuf) -> anyhow::Result<()> {
-    let (total_count, duplicate_count, total_bytes, duplicated_bytes) =
-        duplicate_objects_summary(db_path)?;
-    println!(
-        "Total objects = {}, duplicated objects = {}, total bytes = {}, duplicated bytes = {}",
-        total_count, duplicate_count, total_bytes, duplicated_bytes
-    );
-    Ok(())
-}
-
 pub fn print_last_consensus_index(path: &Path) -> anyhow::Result<()> {
+    #[cfg(not(tidehunter))]
     let epoch_tables = AuthorityEpochTables::open_tables_read_write(
         path.to_path_buf(),
         MetricConf::default(),
         None,
         None,
     );
+    #[cfg(tidehunter)]
+    let epoch_tables = AuthorityEpochTables::open_with_path(&path.to_path_buf(), None);
     let last_index = epoch_tables.get_last_consensus_index()?;
     println!("Last consensus index is {:?}", last_index);
     Ok(())
@@ -272,7 +265,7 @@ pub fn print_consensus_commit(
 }
 
 pub fn print_transaction(path: &Path, opt: PrintTransactionOptions) -> anyhow::Result<()> {
-    let perpetual_db = AuthorityPerpetualTables::open(&path.join("store"), None);
+    let perpetual_db = AuthorityPerpetualTables::open(&path.join("store"), None, None);
     if let Some((epoch, checkpoint_seq_num)) =
         perpetual_db.get_checkpoint_sequence_number(&opt.digest)?
     {
@@ -292,7 +285,7 @@ pub fn print_transaction(path: &Path, opt: PrintTransactionOptions) -> anyhow::R
 }
 
 pub fn print_object(path: &Path, opt: PrintObjectOptions) -> anyhow::Result<()> {
-    let perpetual_db = AuthorityPerpetualTables::open(&path.join("store"), None);
+    let perpetual_db = AuthorityPerpetualTables::open(&path.join("store"), None, None);
 
     let obj = if let Some(version) = opt.version {
         perpetual_db.get_object_by_key_fallible(&opt.id, version.into())?
@@ -310,7 +303,10 @@ pub fn print_object(path: &Path, opt: PrintObjectOptions) -> anyhow::Result<()> 
 }
 
 pub fn print_checkpoint(path: &Path, opt: PrintCheckpointOptions) -> anyhow::Result<()> {
-    let checkpoint_store = CheckpointStore::new(&path.join("checkpoints"));
+    let checkpoint_store = CheckpointStore::new(
+        &path.join("checkpoints"),
+        Arc::new(PrunerWatermarks::default()),
+    );
     let checkpoint = checkpoint_store
         .get_checkpoint_by_digest(&opt.digest)?
         .ok_or(anyhow!(
@@ -331,7 +327,10 @@ pub fn print_checkpoint_content(
     path: &Path,
     opt: PrintCheckpointContentOptions,
 ) -> anyhow::Result<()> {
-    let checkpoint_store = CheckpointStore::new(&path.join("checkpoints"));
+    let checkpoint_store = CheckpointStore::new(
+        &path.join("checkpoints"),
+        Arc::new(PrunerWatermarks::default()),
+    );
     let contents = checkpoint_store
         .get_checkpoint_contents(&opt.digest)?
         .ok_or(anyhow!(
@@ -378,7 +377,10 @@ pub async fn reset_db_to_genesis(path: &Path) -> anyhow::Result<()> {
     )
     .await?;
 
-    let checkpoint_db = CheckpointStore::new(&path.join("checkpoints"));
+    let checkpoint_db = CheckpointStore::new(
+        &path.join("checkpoints"),
+        Arc::new(PrunerWatermarks::default()),
+    );
     checkpoint_db.reset_db_for_execution_since_genesis()?;
 
     Ok(())
@@ -392,7 +394,10 @@ pub fn rewind_checkpoint_execution(
     epoch: EpochId,
     checkpoint_sequence_number: u64,
 ) -> anyhow::Result<()> {
-    let checkpoint_db = CheckpointStore::new(&path.join("checkpoints"));
+    let checkpoint_db = CheckpointStore::new(
+        &path.join("checkpoints"),
+        Arc::new(PrunerWatermarks::default()),
+    );
     let Some(checkpoint) =
         checkpoint_db.get_checkpoint_by_sequence_number(checkpoint_sequence_number)?
     else {
@@ -471,7 +476,10 @@ pub fn set_checkpoint_watermark(
     path: &Path,
     options: SetCheckpointWatermarkOptions,
 ) -> anyhow::Result<()> {
-    let checkpoint_db = CheckpointStore::new(&path.join("checkpoints"));
+    let checkpoint_db = CheckpointStore::new(
+        &path.join("checkpoints"),
+        Arc::new(PrunerWatermarks::default()),
+    );
 
     if let Some(highest_verified) = options.highest_verified {
         let Some(checkpoint) = checkpoint_db.get_checkpoint_by_sequence_number(highest_verified)?

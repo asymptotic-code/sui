@@ -3,30 +3,29 @@
 
 use std::str::FromStr;
 
+use crate::keytool::CommandOutput;
 use crate::keytool::read_authority_keypair_from_file;
 use crate::keytool::read_keypair_from_file;
-use crate::keytool::CommandOutput;
 
-use super::write_keypair_to_file;
 use super::KeyToolCommand;
+use super::write_keypair_to_file;
 use anyhow::Ok;
 use fastcrypto::ed25519::Ed25519KeyPair;
 use fastcrypto::encoding::Base64;
 use fastcrypto::encoding::Encoding;
 use fastcrypto::encoding::Hex;
 use fastcrypto::traits::ToFromBytes;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use shared_crypto::intent::Intent;
 use shared_crypto::intent::IntentScope;
 use sui_keys::key_identity::KeyIdentity;
 use sui_keys::keystore::{AccountKeystore, FileBasedKeystore, InMemKeystore, Keystore};
+use sui_sdk::wallet_context::WalletContext;
 use sui_types::base_types::ObjectDigest;
 use sui_types::base_types::ObjectID;
 use sui_types::base_types::SequenceNumber;
 use sui_types::base_types::SuiAddress;
-use sui_types::crypto::get_key_pair;
-use sui_types::crypto::get_key_pair_from_rng;
 use sui_types::crypto::AuthorityKeyPair;
 use sui_types::crypto::Ed25519SuiSignature;
 use sui_types::crypto::EncodeDecodeBase64;
@@ -36,8 +35,10 @@ use sui_types::crypto::Signature;
 use sui_types::crypto::SignatureScheme;
 use sui_types::crypto::SuiKeyPair;
 use sui_types::crypto::SuiSignatureInner;
-use sui_types::transaction::TransactionData;
+use sui_types::crypto::get_key_pair;
+use sui_types::crypto::get_key_pair_from_rng;
 use sui_types::transaction::TEST_ONLY_GAS_UNIT_FOR_TRANSFER;
+use sui_types::transaction::TransactionData;
 use tempfile::TempDir;
 use tokio::test;
 
@@ -50,14 +51,18 @@ async fn test_addresses_command() -> Result<(), anyhow::Error> {
 
     // Add another 3 Secp256k1 KeyPairs
     for _ in 0..3 {
-        keystore.import(None, SuiKeyPair::Secp256k1(get_key_pair().1))?;
+        keystore
+            .import(None, SuiKeyPair::Secp256k1(get_key_pair().1))
+            .await?;
     }
+
+    let mut context = WalletContext::new_for_tests(keystore, None, None);
 
     // List all addresses with flag
     KeyToolCommand::List {
         sort_by_alias: true,
     }
-    .execute(&mut keystore)
+    .execute(&mut context)
     .await
     .unwrap();
     Ok(())
@@ -67,12 +72,18 @@ async fn test_addresses_command() -> Result<(), anyhow::Error> {
 async fn test_flag_in_signature_and_keypair() -> Result<(), anyhow::Error> {
     let mut keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
 
-    keystore.import(None, SuiKeyPair::Secp256k1(get_key_pair().1))?;
-    keystore.import(None, SuiKeyPair::Ed25519(get_key_pair().1))?;
+    keystore
+        .import(None, SuiKeyPair::Secp256k1(get_key_pair().1))
+        .await?;
+    keystore
+        .import(None, SuiKeyPair::Ed25519(get_key_pair().1))
+        .await?;
 
     for pk in keystore.entries() {
         let pk1 = pk.clone();
-        let sig = keystore.sign_secure(&(&pk).into(), b"hello", Intent::sui_transaction())?;
+        let sig = keystore
+            .sign_secure(&(&pk).into(), b"hello", Intent::sui_transaction())
+            .await?;
         match sig {
             Signature::Ed25519SuiSignature(_) => {
                 // signature contains corresponding flag
@@ -166,7 +177,7 @@ async fn test_sui_operations_config() {
     let contents = vec![kp.encode_base64()];
     let res = std::fs::write(path, serde_json::to_string_pretty(&contents).unwrap());
     assert!(res.is_ok());
-    let read = FileBasedKeystore::new(&path1);
+    let read = FileBasedKeystore::load_or_create(&path1);
     assert!(read.is_ok());
     assert_eq!(
         SuiAddress::from_str("7d20dcdb2bca4f508ea9613994683eb4e76e9c4ed371169677c1be02aaf0b58e")
@@ -182,7 +193,7 @@ async fn test_sui_operations_config() {
     let contents = vec![kp.encode_base64()];
     let res = std::fs::write(path2, serde_json::to_string_pretty(&contents).unwrap());
     assert!(res.is_ok());
-    let read = FileBasedKeystore::new(&path3);
+    let read = FileBasedKeystore::load_or_create(&path3);
     assert_eq!(
         SuiAddress::from_str("160ef6ce4f395208a12119c5011bf8d8ceb760e3159307c819bd0197d154d384")
             .unwrap(),
@@ -203,7 +214,7 @@ async fn test_load_keystore_err() {
     assert!(res.is_ok());
 
     // cannot load keypair due to missing flag
-    assert!(FileBasedKeystore::new(&path2).is_err());
+    assert!(FileBasedKeystore::load_or_create(&path2).is_err());
 }
 
 #[test]
@@ -231,14 +242,15 @@ async fn test_private_keys_import_export() -> Result<(), anyhow::Error> {
     ];
     // assert correctness
     for (private_key, private_key_hex, private_key_base64, address) in TEST_CASES {
-        let mut keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+        let keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+        let mut context = WalletContext::new_for_tests(keystore, None, None);
         KeyToolCommand::Import {
             alias: None,
             input_string: private_key.to_string(),
             key_scheme: SignatureScheme::ED25519,
             derivation_path: None,
         }
-        .execute(&mut keystore)
+        .execute(&mut context)
         .await?;
         let kp = SuiKeyPair::decode(private_key).unwrap();
         let kp_from_hex = SuiKeyPair::Ed25519(
@@ -251,13 +263,13 @@ async fn test_private_keys_import_export() -> Result<(), anyhow::Error> {
 
         let addr = SuiAddress::from_str(address).unwrap();
         assert_eq!(SuiAddress::from(&kp.public()), addr);
-        assert!(keystore.addresses().contains(&addr));
+        assert!(context.config.keystore.addresses().contains(&addr));
 
         // Export output shows the private key in Bech32
         let output = KeyToolCommand::Export {
             key_identity: KeyIdentity::Address(addr),
         }
-        .execute(&mut keystore)
+        .execute(&mut context)
         .await?;
         match output {
             CommandOutput::Export(exported) => {
@@ -268,7 +280,8 @@ async fn test_private_keys_import_export() -> Result<(), anyhow::Error> {
     }
 
     for (private_key, _, _, addr) in TEST_CASES {
-        let mut keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+        let keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+        let mut context = WalletContext::new_for_tests(keystore, None, None);
         // assert failure when private key is malformed
         let output = KeyToolCommand::Import {
             alias: None,
@@ -276,7 +289,7 @@ async fn test_private_keys_import_export() -> Result<(), anyhow::Error> {
             key_scheme: SignatureScheme::ED25519,
             derivation_path: None,
         }
-        .execute(&mut keystore)
+        .execute(&mut context)
         .await;
         assert!(output.is_err());
 
@@ -287,7 +300,7 @@ async fn test_private_keys_import_export() -> Result<(), anyhow::Error> {
             key_scheme: SignatureScheme::ED25519,
             derivation_path: None,
         }
-        .execute(&mut keystore)
+        .execute(&mut context)
         .await;
         assert!(output.is_err());
     }
@@ -298,24 +311,39 @@ async fn test_private_keys_import_export() -> Result<(), anyhow::Error> {
 #[test]
 async fn test_mnemonics_ed25519() -> Result<(), anyhow::Error> {
     // Test case matches with /mysten/sui/sdk/typescript/test/unit/cryptography/ed25519-keypair.test.ts
-    const TEST_CASES: [[&str; 3]; 3] = [["film crazy soon outside stand loop subway crumble thrive popular green nuclear struggle pistol arm wife phrase warfare march wheat nephew ask sunny firm", "suiprivkey1qrwsjvr6gwaxmsvxk4cfun99ra8uwxg3c9pl0nhle7xxpe4s80y05ctazer", "a2d14fad60c56049ecf75246a481934691214ce413e6a8ae2fe6834c173a6133"],
-    ["require decline left thought grid priority false tiny gasp angle royal system attack beef setup reward aunt skill wasp tray vital bounce inflict level", "suiprivkey1qzdvpa77ct272ultqcy20dkw78dysnfyg90fhcxkdm60el0qht9mvzlsh4j", "1ada6e6f3f3e4055096f606c746690f1108fcc2ca479055cc434a3e1d3f758aa"],
-    ["organ crash swim stick traffic remember army arctic mesh slice swear summer police vast chaos cradle squirrel hood useless evidence pet hub soap lake", "suiprivkey1qqqscjyyr64jea849dfv9cukurqj2swx0m3rr4hr7sw955jy07tzgcde5ut", "e69e896ca10f5a77732769803cc2b5707f0ab9d4407afb5e4b4464b89769af14"]];
+    const TEST_CASES: [[&str; 3]; 3] = [
+        [
+            "film crazy soon outside stand loop subway crumble thrive popular green nuclear struggle pistol arm wife phrase warfare march wheat nephew ask sunny firm",
+            "suiprivkey1qrwsjvr6gwaxmsvxk4cfun99ra8uwxg3c9pl0nhle7xxpe4s80y05ctazer",
+            "a2d14fad60c56049ecf75246a481934691214ce413e6a8ae2fe6834c173a6133",
+        ],
+        [
+            "require decline left thought grid priority false tiny gasp angle royal system attack beef setup reward aunt skill wasp tray vital bounce inflict level",
+            "suiprivkey1qzdvpa77ct272ultqcy20dkw78dysnfyg90fhcxkdm60el0qht9mvzlsh4j",
+            "1ada6e6f3f3e4055096f606c746690f1108fcc2ca479055cc434a3e1d3f758aa",
+        ],
+        [
+            "organ crash swim stick traffic remember army arctic mesh slice swear summer police vast chaos cradle squirrel hood useless evidence pet hub soap lake",
+            "suiprivkey1qqqscjyyr64jea849dfv9cukurqj2swx0m3rr4hr7sw955jy07tzgcde5ut",
+            "e69e896ca10f5a77732769803cc2b5707f0ab9d4407afb5e4b4464b89769af14",
+        ],
+    ];
 
     for t in TEST_CASES {
-        let mut keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+        let keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+        let mut context = WalletContext::new_for_tests(keystore, None, None);
         KeyToolCommand::Import {
             alias: None,
             input_string: t[0].to_string(),
             key_scheme: SignatureScheme::ED25519,
             derivation_path: None,
         }
-        .execute(&mut keystore)
+        .execute(&mut context)
         .await?;
         let kp = SuiKeyPair::decode(t[1]).unwrap();
         let addr = SuiAddress::from_str(t[2]).unwrap();
         assert_eq!(SuiAddress::from(&kp.public()), addr);
-        assert!(keystore.addresses().contains(&addr));
+        assert!(context.config.keystore.addresses().contains(&addr));
     }
     Ok(())
 }
@@ -323,24 +351,39 @@ async fn test_mnemonics_ed25519() -> Result<(), anyhow::Error> {
 #[test]
 async fn test_mnemonics_secp256k1() -> Result<(), anyhow::Error> {
     // Test case matches with /mysten/sui/sdk/typescript/test/unit/cryptography/secp256k1-keypair.test.ts
-    const TEST_CASES: [[&str; 3]; 3] = [["film crazy soon outside stand loop subway crumble thrive popular green nuclear struggle pistol arm wife phrase warfare march wheat nephew ask sunny firm", "suiprivkey1qyqr6yvxdqkh32ep4pk9caqvphmk9epn6rhkczcrhaeermsyvwsg783y9am", "9e8f732575cc5386f8df3c784cd3ed1b53ce538da79926b2ad54dcc1197d2532"],
-    ["require decline left thought grid priority false tiny gasp angle royal system attack beef setup reward aunt skill wasp tray vital bounce inflict level", "suiprivkey1q8hexn5m2u36tx39ln5e22hfseadknp7d2qlkhe30ejy7fc6am5aqkqpqsj", "9fd5a804ed6b46d36949ff7434247f0fd594673973ece24aede6b86a7b5dae01"],
-    ["organ crash swim stick traffic remember army arctic mesh slice swear summer police vast chaos cradle squirrel hood useless evidence pet hub soap lake", "suiprivkey1qxx6yf53jgxvsmccst8cuwnj0rx4k4uzvn9aalvag7ns0xf0g8j2x246jst", "60287d7c38dee783c2ab1077216124011774be6b0764d62bd05f32c88979d5c5"]];
+    const TEST_CASES: [[&str; 3]; 3] = [
+        [
+            "film crazy soon outside stand loop subway crumble thrive popular green nuclear struggle pistol arm wife phrase warfare march wheat nephew ask sunny firm",
+            "suiprivkey1qyqr6yvxdqkh32ep4pk9caqvphmk9epn6rhkczcrhaeermsyvwsg783y9am",
+            "9e8f732575cc5386f8df3c784cd3ed1b53ce538da79926b2ad54dcc1197d2532",
+        ],
+        [
+            "require decline left thought grid priority false tiny gasp angle royal system attack beef setup reward aunt skill wasp tray vital bounce inflict level",
+            "suiprivkey1q8hexn5m2u36tx39ln5e22hfseadknp7d2qlkhe30ejy7fc6am5aqkqpqsj",
+            "9fd5a804ed6b46d36949ff7434247f0fd594673973ece24aede6b86a7b5dae01",
+        ],
+        [
+            "organ crash swim stick traffic remember army arctic mesh slice swear summer police vast chaos cradle squirrel hood useless evidence pet hub soap lake",
+            "suiprivkey1qxx6yf53jgxvsmccst8cuwnj0rx4k4uzvn9aalvag7ns0xf0g8j2x246jst",
+            "60287d7c38dee783c2ab1077216124011774be6b0764d62bd05f32c88979d5c5",
+        ],
+    ];
 
     for t in TEST_CASES {
-        let mut keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+        let keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+        let mut context = WalletContext::new_for_tests(keystore, None, None);
         KeyToolCommand::Import {
             alias: None,
             input_string: t[0].to_string(),
             key_scheme: SignatureScheme::Secp256k1,
             derivation_path: None,
         }
-        .execute(&mut keystore)
+        .execute(&mut context)
         .await?;
         let kp = SuiKeyPair::decode(t[1]).unwrap();
         let addr = SuiAddress::from_str(t[2]).unwrap();
         assert_eq!(SuiAddress::from(&kp.public()), addr);
-        assert!(keystore.addresses().contains(&addr));
+        assert!(context.config.keystore.addresses().contains(&addr));
     }
     Ok(())
 }
@@ -367,20 +410,21 @@ async fn test_mnemonics_secp256r1() -> Result<(), anyhow::Error> {
     ];
 
     for [mnemonics, sk, address] in TEST_CASES {
-        let mut keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+        let keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+        let mut context = WalletContext::new_for_tests(keystore, None, None);
         KeyToolCommand::Import {
             alias: None,
             input_string: mnemonics.to_string(),
             key_scheme: SignatureScheme::Secp256r1,
             derivation_path: None,
         }
-        .execute(&mut keystore)
+        .execute(&mut context)
         .await?;
 
         let kp = SuiKeyPair::decode(sk).unwrap();
         let addr = SuiAddress::from_str(address).unwrap();
         assert_eq!(SuiAddress::from(&kp.public()), addr);
-        assert!(keystore.addresses().contains(&addr));
+        assert!(context.config.keystore.addresses().contains(&addr));
     }
 
     Ok(())
@@ -388,124 +432,148 @@ async fn test_mnemonics_secp256r1() -> Result<(), anyhow::Error> {
 
 #[test]
 async fn test_invalid_derivation_path() -> Result<(), anyhow::Error> {
-    let mut keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
-    assert!(KeyToolCommand::Import {
-        alias: None,
-        input_string: TEST_MNEMONIC.to_string(),
-        key_scheme: SignatureScheme::ED25519,
-        derivation_path: Some("m/44'/1'/0'/0/0".parse().unwrap()),
-    }
-    .execute(&mut keystore)
-    .await
-    .is_err());
+    let keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+    let mut context = WalletContext::new_for_tests(keystore, None, None);
+    assert!(
+        KeyToolCommand::Import {
+            alias: None,
+            input_string: TEST_MNEMONIC.to_string(),
+            key_scheme: SignatureScheme::ED25519,
+            derivation_path: Some("m/44'/1'/0'/0/0".parse().unwrap()),
+        }
+        .execute(&mut context)
+        .await
+        .is_err()
+    );
 
-    assert!(KeyToolCommand::Import {
-        alias: None,
-        input_string: TEST_MNEMONIC.to_string(),
-        key_scheme: SignatureScheme::ED25519,
-        derivation_path: Some("m/0'/784'/0'/0/0".parse().unwrap()),
-    }
-    .execute(&mut keystore)
-    .await
-    .is_err());
+    assert!(
+        KeyToolCommand::Import {
+            alias: None,
+            input_string: TEST_MNEMONIC.to_string(),
+            key_scheme: SignatureScheme::ED25519,
+            derivation_path: Some("m/0'/784'/0'/0/0".parse().unwrap()),
+        }
+        .execute(&mut context)
+        .await
+        .is_err()
+    );
 
-    assert!(KeyToolCommand::Import {
-        alias: None,
-        input_string: TEST_MNEMONIC.to_string(),
-        key_scheme: SignatureScheme::ED25519,
-        derivation_path: Some("m/54'/784'/0'/0/0".parse().unwrap()),
-    }
-    .execute(&mut keystore)
-    .await
-    .is_err());
+    assert!(
+        KeyToolCommand::Import {
+            alias: None,
+            input_string: TEST_MNEMONIC.to_string(),
+            key_scheme: SignatureScheme::ED25519,
+            derivation_path: Some("m/54'/784'/0'/0/0".parse().unwrap()),
+        }
+        .execute(&mut context)
+        .await
+        .is_err()
+    );
 
-    assert!(KeyToolCommand::Import {
-        alias: None,
-        input_string: TEST_MNEMONIC.to_string(),
-        key_scheme: SignatureScheme::Secp256k1,
-        derivation_path: Some("m/54'/784'/0'/0'/0'".parse().unwrap()),
-    }
-    .execute(&mut keystore)
-    .await
-    .is_err());
+    assert!(
+        KeyToolCommand::Import {
+            alias: None,
+            input_string: TEST_MNEMONIC.to_string(),
+            key_scheme: SignatureScheme::Secp256k1,
+            derivation_path: Some("m/54'/784'/0'/0'/0'".parse().unwrap()),
+        }
+        .execute(&mut context)
+        .await
+        .is_err()
+    );
 
-    assert!(KeyToolCommand::Import {
-        alias: None,
-        input_string: TEST_MNEMONIC.to_string(),
-        key_scheme: SignatureScheme::Secp256k1,
-        derivation_path: Some("m/44'/784'/0'/0/0".parse().unwrap()),
-    }
-    .execute(&mut keystore)
-    .await
-    .is_err());
+    assert!(
+        KeyToolCommand::Import {
+            alias: None,
+            input_string: TEST_MNEMONIC.to_string(),
+            key_scheme: SignatureScheme::Secp256k1,
+            derivation_path: Some("m/44'/784'/0'/0/0".parse().unwrap()),
+        }
+        .execute(&mut context)
+        .await
+        .is_err()
+    );
 
     Ok(())
 }
 
 #[test]
 async fn test_valid_derivation_path() -> Result<(), anyhow::Error> {
-    let mut keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
-    assert!(KeyToolCommand::Import {
-        alias: None,
-        input_string: TEST_MNEMONIC.to_string(),
-        key_scheme: SignatureScheme::ED25519,
-        derivation_path: Some("m/44'/784'/0'/0'/0'".parse().unwrap()),
-    }
-    .execute(&mut keystore)
-    .await
-    .is_ok());
+    let keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+    let mut context = WalletContext::new_for_tests(keystore, None, None);
 
-    assert!(KeyToolCommand::Import {
-        alias: None,
-        input_string: TEST_MNEMONIC.to_string(),
-        key_scheme: SignatureScheme::ED25519,
-        derivation_path: Some("m/44'/784'/0'/0'/1'".parse().unwrap()),
-    }
-    .execute(&mut keystore)
-    .await
-    .is_ok());
+    assert!(
+        KeyToolCommand::Import {
+            alias: None,
+            input_string: TEST_MNEMONIC.to_string(),
+            key_scheme: SignatureScheme::ED25519,
+            derivation_path: Some("m/44'/784'/0'/0'/0'".parse().unwrap()),
+        }
+        .execute(&mut context)
+        .await
+        .is_ok()
+    );
 
-    assert!(KeyToolCommand::Import {
-        alias: None,
-        input_string: TEST_MNEMONIC.to_string(),
-        key_scheme: SignatureScheme::ED25519,
-        derivation_path: Some("m/44'/784'/1'/0'/1'".parse().unwrap()),
-    }
-    .execute(&mut keystore)
-    .await
-    .is_ok());
+    assert!(
+        KeyToolCommand::Import {
+            alias: None,
+            input_string: TEST_MNEMONIC.to_string(),
+            key_scheme: SignatureScheme::ED25519,
+            derivation_path: Some("m/44'/784'/0'/0'/1'".parse().unwrap()),
+        }
+        .execute(&mut context)
+        .await
+        .is_ok()
+    );
 
-    assert!(KeyToolCommand::Import {
-        alias: None,
-        input_string: TEST_MNEMONIC.to_string(),
-        key_scheme: SignatureScheme::Secp256k1,
-        derivation_path: Some("m/54'/784'/0'/0/1".parse().unwrap()),
-    }
-    .execute(&mut keystore)
-    .await
-    .is_ok());
+    assert!(
+        KeyToolCommand::Import {
+            alias: None,
+            input_string: TEST_MNEMONIC.to_string(),
+            key_scheme: SignatureScheme::ED25519,
+            derivation_path: Some("m/44'/784'/1'/0'/1'".parse().unwrap()),
+        }
+        .execute(&mut context)
+        .await
+        .is_ok()
+    );
 
-    assert!(KeyToolCommand::Import {
-        alias: None,
-        input_string: TEST_MNEMONIC.to_string(),
-        key_scheme: SignatureScheme::Secp256k1,
-        derivation_path: Some("m/54'/784'/1'/0/1".parse().unwrap()),
-    }
-    .execute(&mut keystore)
-    .await
-    .is_ok());
+    assert!(
+        KeyToolCommand::Import {
+            alias: None,
+            input_string: TEST_MNEMONIC.to_string(),
+            key_scheme: SignatureScheme::Secp256k1,
+            derivation_path: Some("m/54'/784'/0'/0/1".parse().unwrap()),
+        }
+        .execute(&mut context)
+        .await
+        .is_ok()
+    );
+
+    assert!(
+        KeyToolCommand::Import {
+            alias: None,
+            input_string: TEST_MNEMONIC.to_string(),
+            key_scheme: SignatureScheme::Secp256k1,
+            derivation_path: Some("m/54'/784'/1'/0/1".parse().unwrap()),
+        }
+        .execute(&mut context)
+        .await
+        .is_ok()
+    );
     Ok(())
 }
 
 #[test]
 async fn test_keytool_bls12381() -> Result<(), anyhow::Error> {
-    let mut keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+    let keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(0));
+    let mut context = WalletContext::new_for_tests(keystore, None, None);
     KeyToolCommand::Generate {
         key_scheme: SignatureScheme::BLS12381,
         derivation_path: None,
         word_length: None,
     }
-    .execute(&mut keystore)
+    .execute(&mut context)
     .await?;
     Ok(())
 }
@@ -513,10 +581,11 @@ async fn test_keytool_bls12381() -> Result<(), anyhow::Error> {
 #[test]
 async fn test_sign_command() -> Result<(), anyhow::Error> {
     // Add a keypair
-    let mut keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(1));
-    let binding = keystore.addresses();
+    let keystore = Keystore::from(InMemKeystore::new_insecure_for_tests(1));
+    let mut context = WalletContext::new_for_tests(keystore, None, None);
+    let binding = context.config.keystore.addresses();
     let sender = binding.first().unwrap();
-    let alias = keystore.get_alias(sender).unwrap();
+    let alias = context.config.keystore.get_alias(sender).unwrap();
 
     // Create a dummy TransactionData
     let gas = (
@@ -542,7 +611,7 @@ async fn test_sign_command() -> Result<(), anyhow::Error> {
         data: Base64::encode(bcs::to_bytes(&tx_data)?),
         intent: Some(Intent::sui_app(IntentScope::PersonalMessage)),
     }
-    .execute(&mut keystore)
+    .execute(&mut context)
     .await?;
 
     // Sign an intent message for the transaction data without intent passed in, so default is used.
@@ -551,7 +620,7 @@ async fn test_sign_command() -> Result<(), anyhow::Error> {
         data: Base64::encode(bcs::to_bytes(&tx_data)?),
         intent: None,
     }
-    .execute(&mut keystore)
+    .execute(&mut context)
     .await?;
 
     // Sign an intent message for the transaction data without intent passed in, so default is used.
@@ -561,7 +630,7 @@ async fn test_sign_command() -> Result<(), anyhow::Error> {
         data: Base64::encode(bcs::to_bytes(&tx_data)?),
         intent: None,
     }
-    .execute(&mut keystore)
+    .execute(&mut context)
     .await?;
     Ok(())
 }

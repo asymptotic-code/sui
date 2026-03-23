@@ -5,8 +5,8 @@ use crate::drivers::Interval;
 use crate::in_memory_wallet::InMemoryWallet;
 use crate::system_state_observer::SystemStateObserver;
 use crate::workloads::payload::Payload;
-use crate::workloads::workload::{ExpectedFailureType, Workload, STORAGE_COST_PER_COIN};
-use crate::workloads::workload::{WorkloadBuilder, ESTIMATED_COMPUTATION_COST};
+use crate::workloads::workload::{ESTIMATED_COMPUTATION_COST, WorkloadBuilder};
+use crate::workloads::workload::{ExpectedFailureType, STORAGE_COST_PER_COIN, Workload};
 use crate::workloads::{Gas, GasCoinConfig, WorkloadBuilderInfo, WorkloadParams};
 use crate::{ExecutionEffects, ValidatorProxy};
 use async_trait::async_trait;
@@ -214,14 +214,16 @@ pub struct BatchPaymentWorkload {
 impl Workload<dyn Payload> for BatchPaymentWorkload {
     async fn init(
         &mut self,
-        _proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        _execution_proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        _fullnode_proxies: Vec<Arc<dyn ValidatorProxy + Sync + Send>>,
         _system_state_observer: Arc<SystemStateObserver>,
     ) {
     }
 
     async fn make_test_payloads(
         &self,
-        _proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        _execution_proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        _fullnode_proxies: Vec<Arc<dyn ValidatorProxy + Sync + Send>>,
         system_state_observer: Arc<SystemStateObserver>,
     ) -> Vec<Box<dyn Payload>> {
         let mut gas_by_address: HashMap<SuiAddress, Vec<Gas>> = HashMap::new();

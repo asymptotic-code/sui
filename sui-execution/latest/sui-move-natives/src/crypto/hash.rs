@@ -1,16 +1,18 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
-use crate::NativesCostTable;
+use crate::{NativesCostTable, get_extension};
 use fastcrypto::hash::{Blake2b256, HashFunction, Keccak256};
 use move_binary_format::errors::PartialVMResult;
 use move_core_types::gas_algebra::InternalGas;
-use move_vm_runtime::{native_charge_gas_early_exit, native_functions::NativeContext};
-use move_vm_types::{
-    loaded_data::runtime_types::Type,
-    natives::function::NativeResult,
+use move_vm_runtime::{
+    execution::{
+        Type,
+        values::{Value, VectorRef},
+    },
+    natives::functions::NativeResult,
     pop_arg,
-    values::{Value, VectorRef},
 };
+use move_vm_runtime::{native_charge_gas_early_exit, natives::functions::NativeContext};
 use smallvec::smallvec;
 use std::{collections::VecDeque, ops::Mul};
 
@@ -32,7 +34,7 @@ fn hash<H: HashFunction<DIGEST_SIZE>, const DIGEST_SIZE: usize>(
     debug_assert!(args.len() == 1);
 
     let msg = pop_arg!(args, VectorRef);
-    let msg_ref = msg.as_bytes_ref();
+    let msg_ref = msg.as_bytes_ref()?;
 
     let block_size = block_size as usize;
 
@@ -48,7 +50,7 @@ fn hash<H: HashFunction<DIGEST_SIZE>, const DIGEST_SIZE: usize>(
     Ok(NativeResult::ok(
         context.gas_used(),
         smallvec![Value::vector_u8(
-            H::digest(msg.as_bytes_ref().as_slice()).digest
+            H::digest(msg.as_bytes_ref()?.as_slice()).digest
         )],
     ))
 }
@@ -76,9 +78,7 @@ pub fn keccak256(
     args: VecDeque<Value>,
 ) -> PartialVMResult<NativeResult> {
     // Load the cost parameters from the protocol config
-    let hash_keccak256_cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let hash_keccak256_cost_params = get_extension!(context, NativesCostTable)?
         .hash_keccak256_cost_params
         .clone();
     // Charge the base cost for this oper
@@ -116,9 +116,7 @@ pub fn blake2b256(
     args: VecDeque<Value>,
 ) -> PartialVMResult<NativeResult> {
     // Load the cost parameters from the protocol config
-    let hash_blake2b256_cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let hash_blake2b256_cost_params = get_extension!(context, NativesCostTable)?
         .hash_blake2b256_cost_params
         .clone();
     // Charge the base cost for this oper

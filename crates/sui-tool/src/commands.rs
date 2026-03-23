@@ -1,25 +1,28 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::db_tool::{DbToolCommand, execute_db_tool_command, print_db_all_tables};
 use crate::{
-    check_completed_snapshot,
-    db_tool::{execute_db_tool_command, print_db_all_tables, DbToolCommand},
-    download_db_snapshot, download_formal_snapshot, get_latest_available_epoch, get_object,
-    get_transaction_block, make_clients, restore_from_db_checkpoint, ConciseObjectOutput,
-    GroupedObjectOutput, SnapshotVerifyMode, VerboseObjectOutput,
+    ConciseObjectOutput, GroupedObjectOutput, SnapshotVerifyMode, VerboseObjectOutput,
+    check_completed_snapshot, download_db_snapshot, download_formal_snapshot,
+    get_latest_available_epoch, get_object, get_transaction_block, make_clients,
+    restore_from_db_checkpoint,
 };
 use anyhow::Result;
-use consensus_core::storage::{rocksdb_store::RocksDBStore, Store};
+use consensus_core::storage::{Store, rocksdb_store::RocksDBStore};
 use consensus_core::{BlockAPI, CommitAPI, CommitRange};
-use futures::{future::join_all, StreamExt};
+use futures::TryStreamExt;
+use futures::future::join_all;
 use std::path::PathBuf;
 use std::{collections::BTreeMap, env, sync::Arc};
 use sui_config::genesis::Genesis;
 use sui_core::authority_client::AuthorityAPI;
 use sui_protocol_config::Chain;
-use sui_replay::{execute_replay_command, ReplayToolCommand};
-use sui_sdk::{rpc_types::SuiTransactionBlockResponseOptions, SuiClient, SuiClientBuilder};
+use sui_replay::{ReplayToolCommand, execute_replay_command};
+use sui_rpc_api::Client;
+use sui_types::gas_coin::GasCoin;
 use sui_types::messages_consensus::ConsensusTransaction;
+use sui_types::transaction::Transaction;
 use telemetry_subscribers::TracingHandle;
 
 use sui_types::{
@@ -27,14 +30,11 @@ use sui_types::{
 };
 
 use clap::*;
-use fastcrypto::encoding::Encoding;
-use sui_config::object_storage_config::{ObjectStoreConfig, ObjectStoreType};
 use sui_config::Config;
-use sui_core::authority_aggregator::AuthorityAggregatorBuilder;
+use sui_config::object_storage_config::{ObjectStoreConfig, ObjectStoreType};
 use sui_types::messages_checkpoint::{
     CheckpointRequest, CheckpointResponse, CheckpointSequenceNumber,
 };
-use sui_types::transaction::{SenderSignedData, Transaction};
 
 #[derive(Parser, Clone, ValueEnum)]
 pub enum Verbosity {
@@ -225,8 +225,7 @@ pub enum ToolCommand {
         /// skip downloading indexes dir
         #[clap(long = "skip-indexes")]
         skip_indexes: bool,
-        /// Number of parallel downloads to perform. Defaults to a reasonable
-        /// value based on number of available logical cores.
+        /// Number of parallel downloads to perform. Defaults to 50, max 200.
         #[clap(long = "num-parallel-downloads")]
         num_parallel_downloads: Option<usize>,
         /// Network to download snapshot for. Defaults to "mainnet".
@@ -271,6 +270,10 @@ pub enum ToolCommand {
         /// and output will be reduced to necessary status information.
         #[clap(long = "verbose")]
         verbose: bool,
+        /// Number of retries for failed HTTP requests when downloading snapshot files.
+        /// Defaults to 3 retries. Set to 0 to disable retries.
+        #[clap(long = "max-retries", default_value = "3")]
+        max_retries: usize,
     },
 
     // Restore from formal (slim, DB agnostic) snapshot. Note that this is only supported
@@ -287,8 +290,7 @@ pub enum ToolCommand {
         genesis: PathBuf,
         #[clap(long = "path")]
         path: PathBuf,
-        /// Number of parallel downloads to perform. Defaults to a reasonable
-        /// value based on number of available logical cores.
+        /// Number of parallel downloads to perform. Defaults to 50, max 200.
         #[clap(long = "num-parallel-downloads")]
         num_parallel_downloads: Option<usize>,
         /// Verification mode to employ.
@@ -334,12 +336,10 @@ pub enum ToolCommand {
         #[clap(long = "verbose")]
         verbose: bool,
 
-        /// If provided, all checkpoint summaries from genesis to the end of the target epoch
-        /// will be downloaded and (if --verify is provided) full checkpoint chain verification
-        /// will be performed. If omitted, only end of epoch checkpoint summaries will be
-        /// downloaded, and (if --verify is provided) will be verified via committee signature.
-        #[clap(long = "all-checkpoints")]
-        all_checkpoints: bool,
+        /// Number of retries for failed HTTP requests when downloading snapshot files.
+        /// Defaults to 3 retries. Set to 0 to disable retries.
+        #[clap(long = "max-retries", default_value = "3")]
+        max_retries: usize,
     },
 
     #[clap(name = "replay")]
@@ -367,23 +367,10 @@ pub enum ToolCommand {
         #[command(subcommand)]
         cmd: ReplayToolCommand,
     },
-
-    /// Ask all validators to sign a transaction through AuthorityAggregator.
-    #[command(name = "sign-transaction")]
-    SignTransaction {
-        #[arg(long = "genesis")]
-        genesis: PathBuf,
-
-        #[arg(
-            long,
-            help = "The Base64-encoding of the bcs bytes of SenderSignedData"
-        )]
-        sender_signed_data: String,
-    },
 }
 
 async fn check_locked_object(
-    sui_client: &Arc<SuiClient>,
+    sui_client: &Client,
     committee: Arc<BTreeMap<AuthorityPublicKeyBytes, u64>>,
     id: ObjectID,
     rescue: bool,
@@ -425,14 +412,8 @@ async fn check_locked_object(
         })
         .await?
         .transaction;
-    let res = sui_client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            Transaction::new(tx),
-            SuiTransactionBlockResponseOptions::full_content(),
-            None,
-        )
-        .await;
+    let tx = Transaction::new(tx);
+    let res = sui_client.clone().execute_transaction(&tx).await;
     match res {
         Ok(_) => {
             println!("Transaction executed successfully ({:?})", tx_digest);
@@ -490,14 +471,12 @@ impl ToolCommand {
                 rescue,
                 address,
             } => {
-                let sui_client =
-                    Arc::new(SuiClientBuilder::default().build(fullnode_rpc_url).await?);
+                let sui_client = Client::new(fullnode_rpc_url)?;
                 let committee = Arc::new(
                     sui_client
-                        .governance_api()
-                        .get_committee_info(None)
+                        .get_committee(None)
                         .await?
-                        .validators
+                        .voting_rights
                         .into_iter()
                         .collect::<BTreeMap<_, _>>(),
                 );
@@ -506,11 +485,10 @@ impl ToolCommand {
                     None => {
                         let address = address.expect("Either id or address must be provided");
                         sui_client
-                            .coin_read_api()
-                            .get_coins_stream(address, None)
-                            .map(|c| c.coin_object_id)
-                            .collect()
-                            .await
+                            .list_owned_objects(address, Some(GasCoin::type_()))
+                            .map_ok(|o| o.id())
+                            .try_collect()
+                            .await?
                     }
                 };
                 for ids in object_ids.chunks(30) {
@@ -537,8 +515,7 @@ impl ToolCommand {
                 verbosity,
                 concise_no_header,
             } => {
-                let sui_client =
-                    Arc::new(SuiClientBuilder::default().build(fullnode_rpc_url).await?);
+                let sui_client = Client::new(fullnode_rpc_url)?;
                 let clients = Arc::new(make_clients(&sui_client).await?);
                 let output = get_object(id, version, validator, clients).await?;
 
@@ -546,10 +523,9 @@ impl ToolCommand {
                     Verbosity::Grouped => {
                         let committee = Arc::new(
                             sui_client
-                                .governance_api()
-                                .get_committee_info(None)
+                                .get_committee(None)
                                 .await?
-                                .validators
+                                .voting_rights
                                 .into_iter()
                                 .collect::<BTreeMap<_, _>>(),
                         );
@@ -623,8 +599,7 @@ impl ToolCommand {
                 sequence_number,
                 fullnode_rpc_url,
             } => {
-                let sui_client =
-                    Arc::new(SuiClientBuilder::default().build(fullnode_rpc_url).await?);
+                let sui_client = Client::new(fullnode_rpc_url)?;
                 let clients = make_clients(&sui_client).await?;
 
                 for (name, (_, client)) in clients {
@@ -679,18 +654,14 @@ impl ToolCommand {
                 no_sign_request,
                 latest,
                 verbose,
-                all_checkpoints,
+                max_retries,
             } => {
                 if !verbose {
                     tracing_handle
                         .update_log("off")
                         .expect("Failed to update log level");
                 }
-                let num_parallel_downloads = num_parallel_downloads.unwrap_or_else(|| {
-                    num_cpus::get()
-                        .checked_sub(1)
-                        .expect("Failed to get number of CPUs")
-                });
+                let num_parallel_downloads = num_parallel_downloads.unwrap_or(50).min(200);
                 let snapshot_bucket =
                     snapshot_bucket.or_else(|| match (network, no_sign_request) {
                         (Chain::Mainnet, false) => Some(
@@ -811,7 +782,7 @@ impl ToolCommand {
                     num_parallel_downloads,
                     network,
                     verify,
-                    all_checkpoints,
+                    max_retries,
                 )
                 .await?;
             }
@@ -827,17 +798,21 @@ impl ToolCommand {
                 no_sign_request,
                 latest,
                 verbose,
+                max_retries,
             } => {
+                if no_sign_request {
+                    anyhow::bail!(
+                        "The --no-sign-request flag is no longer supported. \
+                        Please use S3 or GCS buckets with --snapshot-bucket-type and --snapshot-bucket instead. \
+                        For more information, see: https://docs.sui.io/guides/operator/snapshots#mysten-labs-managed-snapshots"
+                    );
+                }
                 if !verbose {
                     tracing_handle
                         .update_log("off")
                         .expect("Failed to update log level");
                 }
-                let num_parallel_downloads = num_parallel_downloads.unwrap_or_else(|| {
-                    num_cpus::get()
-                        .checked_sub(1)
-                        .expect("Failed to get number of CPUs")
-                });
+                let num_parallel_downloads = num_parallel_downloads.unwrap_or(50).min(200);
                 let snapshot_bucket =
                     snapshot_bucket.or_else(|| match (network, no_sign_request) {
                         (Chain::Mainnet, false) => Some(
@@ -936,8 +911,8 @@ impl ToolCommand {
                                 }
                             } else {
                                 panic!(
-                                "--snapshot-path must be specified for --snapshot-bucket-type=file"
-                            );
+                                    "--snapshot-path must be specified for --snapshot-bucket-type=file"
+                                );
                             }
                         }
                     }
@@ -963,6 +938,7 @@ impl ToolCommand {
                     snapshot_store_config,
                     skip_indexes,
                     num_parallel_downloads,
+                    max_retries,
                 )
                 .await?;
             }
@@ -976,21 +952,6 @@ impl ToolCommand {
             } => {
                 execute_replay_command(rpc_url, safety_checks, use_authority, cfg_path, chain, cmd)
                     .await?;
-            }
-            ToolCommand::SignTransaction {
-                genesis,
-                sender_signed_data,
-            } => {
-                let genesis = Genesis::load(genesis)?;
-                let sender_signed_data = bcs::from_bytes::<SenderSignedData>(
-                    &fastcrypto::encoding::Base64::decode(sender_signed_data.as_str()).unwrap(),
-                )
-                .unwrap();
-                let transaction = Transaction::new(sender_signed_data);
-                let (agg, _) =
-                    AuthorityAggregatorBuilder::from_genesis(&genesis).build_network_clients();
-                let result = agg.process_transaction(transaction, None).await;
-                println!("{:?}", result);
             }
         };
         Ok(())

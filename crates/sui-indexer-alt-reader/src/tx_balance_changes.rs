@@ -1,20 +1,21 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::{BTreeSet, HashMap},
-    sync::Arc,
-};
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 
 use async_graphql::dataloader::Loader;
-use diesel::{ExpressionMethods, JoinOnDsl, QueryDsl, SelectableHelper};
-use sui_indexer_alt_schema::{
-    schema::{tx_balance_changes, tx_digests},
-    transactions::StoredTxBalanceChange,
-};
+use diesel::ExpressionMethods;
+use diesel::JoinOnDsl;
+use diesel::QueryDsl;
+use diesel::SelectableHelper;
+use sui_indexer_alt_schema::schema::tx_balance_changes;
+use sui_indexer_alt_schema::schema::tx_digests;
+use sui_indexer_alt_schema::transactions::StoredTxBalanceChange;
 use sui_types::digests::TransactionDigest;
 
-use crate::{error::Error, pg_reader::PgReader};
+use crate::error::Error;
+use crate::pg_reader::PgReader;
 
 /// Key for fetching a transaction's balance changes by digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,12 +24,12 @@ pub struct TxBalanceChangeKey(pub TransactionDigest);
 #[async_trait::async_trait]
 impl Loader<TxBalanceChangeKey> for PgReader {
     type Value = StoredTxBalanceChange;
-    type Error = Arc<Error>;
+    type Error = Error;
 
     async fn load(
         &self,
         keys: &[TxBalanceChangeKey],
-    ) -> Result<HashMap<TxBalanceChangeKey, Self::Value>, Self::Error> {
+    ) -> Result<HashMap<TxBalanceChangeKey, Self::Value>, Error> {
         use tx_balance_changes::dsl as b;
         use tx_digests::dsl as t;
 
@@ -36,7 +37,7 @@ impl Loader<TxBalanceChangeKey> for PgReader {
             return Ok(HashMap::new());
         }
 
-        let mut conn = self.connect().await.map_err(Arc::new)?;
+        let mut conn = self.connect().await?;
 
         let digests: BTreeSet<_> = keys.iter().map(|d| d.0.into_inner()).collect();
         let balance_changes: Vec<(Vec<u8>, StoredTxBalanceChange)> = conn
@@ -46,8 +47,7 @@ impl Loader<TxBalanceChangeKey> for PgReader {
                     .select((t::tx_digest, StoredTxBalanceChange::as_select()))
                     .filter(t::tx_digest.eq_any(digests)),
             )
-            .await
-            .map_err(Arc::new)?;
+            .await?;
 
         let digest_to_balance_changes: HashMap<_, _> = balance_changes.into_iter().collect();
 

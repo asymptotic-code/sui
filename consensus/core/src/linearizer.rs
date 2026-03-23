@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 
 use crate::{
     block::{BlockAPI, VerifiedBlock},
-    commit::{sort_sub_dag_blocks, Commit, CommittedSubDag, TrustedCommit},
+    commit::{Commit, CommittedSubDag, TrustedCommit, sort_sub_dag_blocks},
     context::Context,
     dag_state::DagState,
 };
@@ -114,6 +114,9 @@ impl Linearizer {
             to_commit,
             timestamp_ms,
             commit.reference(),
+            self.context
+                .protocol_config
+                .consensus_always_accept_system_transactions(),
         );
 
         (sub_dag, commit)
@@ -308,8 +311,7 @@ pub(crate) fn median_timestamp_by_stake(
             "Total stake {} < quorum threshold {}",
             total_stake,
             context.committee.quorum_threshold()
-        )
-        .to_string());
+        ));
     }
 
     Ok(median_timestamps_by_stake_inner(timestamps, total_stake))
@@ -339,13 +341,13 @@ mod tests {
 
     use super::*;
     use crate::{
+        CommitIndex, TestBlock,
         commit::{CommitAPI as _, CommitDigest, DEFAULT_WAVE_LENGTH},
         context::Context,
         leader_schedule::{LeaderSchedule, LeaderSwapTable},
         storage::mem_store::MemStore,
         test_dag_builder::DagBuilder,
         test_dag_parser::parse_dag,
-        CommitIndex, TestBlock,
     };
 
     #[rstest]

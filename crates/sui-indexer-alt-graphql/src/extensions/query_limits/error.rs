@@ -1,9 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use async_graphql::{
-    parser::types::OperationType, ErrorExtensions, Name, PathSegment, Pos, ServerError,
-};
+use async_graphql::ErrorExtensions;
+use async_graphql::PathSegment;
+use async_graphql::Pos;
+use async_graphql::ServerError;
+use async_graphql::parser::types::OperationType;
 
 use crate::error::code;
 
@@ -50,9 +52,6 @@ pub(super) enum ErrorKind {
 
     #[error("Fragment {0} referred to but not found in document")]
     UnknownFragment(String),
-
-    #[error("Variable {0} is not provided in the query")]
-    VariableNotFound(Name),
 }
 
 impl Error {

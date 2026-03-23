@@ -11,20 +11,24 @@
 //! in this module and saved in the `ReplayTransaction` instance.
 
 use crate::{
-    artifacts::{Artifact, ArtifactManager},
-    data_store::DataStore,
-    execution::{execute_transaction_to_effects, ReplayExecutor},
-    replay_interface::{EpochStore, ObjectKey, ObjectStore, TransactionStore, VersionQuery},
+    artifacts::{Artifact, ArtifactManager, MoveCallInfo, ReplayCacheSummary},
+    execution::{ReplayExecutor, execute_transaction_to_effects},
     tracing::save_trace_output,
 };
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, Error, Result, anyhow, bail};
 use move_trace_format::format::MoveTraceBuilder;
-use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
-use sui_types::{base_types::SequenceNumber, TypeTag};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+use std::time::Instant;
+use sui_data_store::{
+    EpochStore, ObjectKey, ObjectStore, ReadDataStore, TransactionStore, VersionQuery,
+};
+use sui_types::{TypeTag, base_types::SequenceNumber};
 use sui_types::{
     base_types::{ObjectID, SuiAddress},
     digests::TransactionDigest,
-    effects::{InputSharedObject, TransactionEffects, TransactionEffectsAPI, UnchangedSharedKind},
+    effects::{
+        InputConsensusObject, TransactionEffects, TransactionEffectsAPI, UnchangedConsensusKind,
+    },
     object::Object,
     transaction::{
         CallArg, Command, GasData, InputObjects, ObjectArg, TransactionData, TransactionDataAPI,
@@ -32,13 +36,60 @@ use sui_types::{
     },
 };
 use sui_types::{
+    execution_status::{ExecutionErrorKind, ExecutionFailure, ExecutionStatus},
     gas::SuiGasStatusAPI,
     transaction::{InputObjectKind, ObjectReadResult, ObjectReadResultKind},
 };
-use tracing::{debug, trace};
+use tracing::{debug, error, info_span, trace, warn};
 
 pub type ObjectVersion = u64;
 pub type PackageVersion = u64;
+
+// moved to summary_metrics.rs
+
+/// Provides executors for transaction replay, with optional caching.
+/// When caching is enabled, executors are cached per protocol version to avoid recreation.
+/// When caching is disabled, a fresh executor is created for each transaction.
+pub struct ExecutorProvider {
+    cache: BTreeMap<u64, ReplayExecutor>, // u64 is protocol version
+    cache_enabled: bool,
+}
+
+impl ExecutorProvider {
+    pub fn new(cache_enabled: bool) -> Self {
+        Self {
+            cache: BTreeMap::new(),
+            cache_enabled,
+        }
+    }
+
+    /// Get or create an executor for the given epoch.
+    /// If caching is disabled, always creates a new executor.
+    /// If caching is enabled, reuses cached executors (by protocol version) or creates and caches new ones.
+    pub fn get_or_create(
+        &mut self,
+        epoch: u64,
+        epoch_store: &dyn EpochStore,
+    ) -> anyhow::Result<ReplayExecutor> {
+        let protocol_config = epoch_store
+            .protocol_config(epoch)?
+            .ok_or_else(|| anyhow!("Protocol config missing for epoch {}", epoch))?;
+
+        if !self.cache_enabled {
+            return ReplayExecutor::new(protocol_config);
+        }
+
+        let protocol_version = protocol_config.version.as_u64();
+
+        if let Some(executor) = self.cache.get(&protocol_version) {
+            return Ok(executor.clone());
+        }
+
+        let executor = ReplayExecutor::new(protocol_config)?;
+        self.cache.insert(protocol_version, executor.clone());
+        Ok(executor)
+    }
+}
 
 // `ReplayTransaction` contains all the data needed to replay a transaction.
 // The `object_cache` will contain all the objects and packages touched by the transaction.
@@ -55,25 +106,58 @@ pub struct ReplayTransaction {
 //
 // Run a single transaction and print results to stdout
 //
-pub(crate) async fn replay_transaction(
+pub(crate) async fn replay_transaction<S: ReadDataStore>(
     artifact_manager: &ArtifactManager<'_>,
     tx_digest: &str,
-    data_store: &DataStore,
+    data_store: &S,
+    network: String,
     trace: bool,
-) -> anyhow::Result<()> {
-    // load a `ReplayTranaction`
-    let replay_txn = match ReplayTransaction::load(tx_digest, data_store, data_store, data_store) {
+    executor_provider: &mut ExecutorProvider,
+) -> Result<u128> {
+    let _span = info_span!("replay_tx", tx_digest = %tx_digest).entered();
+    // load a `ReplayTransaction`
+    let replay_txn = match ReplayTransaction::load(
+        tx_digest,
+        data_store,
+        data_store,
+        data_store,
+        executor_provider,
+    ) {
         Ok(replay_txn) => replay_txn,
         Err(e) => {
             bail!("Failed to load transaction {}: {:?}", tx_digest, e);
         }
     };
 
+    // If the on-chain effects show an early execution error (transaction never entered the VM),
+    // skip replay — there is nothing to re-execute.
+    // Record data and effects.
+    if is_early_execution_error(replay_txn.effects.status()) {
+        warn!(
+            tx_digest = %tx_digest,
+            status = ?replay_txn.effects.status(),
+            "Transaction had early execution error on-chain; skipping replay execution",
+        );
+        artifact_manager
+            .member(Artifact::TransactionData)
+            .serialize_artifact(&replay_txn.txn_data)
+            .transpose()?
+            .unwrap();
+        artifact_manager
+            .member(Artifact::TransactionEffects)
+            .serialize_artifact(&replay_txn.effects)
+            .transpose()?
+            .unwrap();
+        return Ok(0);
+    }
+
     // replay the transaction
     let mut trace_builder_opt = trace.then(MoveTraceBuilder::new);
 
+    let exec_t0 = Instant::now();
     let (result, context_and_effects) =
         execute_transaction_to_effects(replay_txn, data_store, data_store, &mut trace_builder_opt)?;
+    let exec_ms = exec_t0.elapsed().as_millis();
 
     // TODO: make tracing better abstracted? different tracers?
     if let Some(trace_builder) = trace_builder_opt {
@@ -87,12 +171,18 @@ pub(crate) async fn replay_transaction(
     }
 
     // Save results
-    tracing::info!(
-        "Executed transaction {}: {:?}. Saving artifacts under {}",
-        tx_digest,
-        result,
-        artifact_manager.base_path.display()
+    debug!(
+        tx_digest = %tx_digest,
+        result = ?result,
+        output_dir = %artifact_manager.base_path.display(),
+        "Executed transaction",
     );
+
+    artifact_manager
+        .member(Artifact::TransactionData)
+        .serialize_artifact(&context_and_effects.txn_data)
+        .transpose()?
+        .unwrap();
 
     artifact_manager
         .member(Artifact::TransactionEffects)
@@ -106,37 +196,94 @@ pub(crate) async fn replay_transaction(
         .transpose()?
         .unwrap();
 
-    verify_txn_and_save_forked_effects(
+    // Save the replay cache summary
+    let cache_summary = ReplayCacheSummary::from_cache(
+        context_and_effects.expected_effects.executed_epoch(),
+        context_and_effects.checkpoint,
+        network.clone(),
+        context_and_effects.protocol_version,
+        &context_and_effects.object_cache,
+    );
+    artifact_manager
+        .member(Artifact::ReplayCacheSummary)
+        .serialize_artifact(&cache_summary)
+        .transpose()?
+        .unwrap();
+
+    // Save move call info if the transaction is a ProgrammableTransaction
+    if let sui_types::transaction::TransactionKind::ProgrammableTransaction(ptb) =
+        context_and_effects.txn_data.kind()
+    {
+        debug!(tx_digest = %tx_digest, "Extracting move call info for {} commands", ptb.commands.len());
+        match MoveCallInfo::from_transaction(ptb, &context_and_effects.object_cache) {
+            Ok(move_call_info) => {
+                let successful_extractions = move_call_info
+                    .command_signatures
+                    .iter()
+                    .filter(|s| s.is_some())
+                    .count();
+                debug!(tx_digest = %tx_digest, "Successfully extracted {} function signatures out of {} commands",
+                    successful_extractions, move_call_info.command_signatures.len());
+
+                artifact_manager
+                    .member(Artifact::MoveCallInfo)
+                    .serialize_artifact(&move_call_info)
+                    .transpose()?
+                    .unwrap();
+            }
+            Err(e) => {
+                warn!(tx_digest = %tx_digest, "Failed to extract move call info: {}", e);
+            }
+        }
+    }
+
+    verify_txn_and_save_effects(
         artifact_manager,
         &context_and_effects.expected_effects,
         &context_and_effects.execution_effects,
     )?;
 
-    Ok(())
+    Ok(exec_ms)
 }
 
-fn verify_txn_and_save_forked_effects(
+fn verify_txn_and_save_effects(
     artifact_manager: &ArtifactManager<'_>,
     expected_effects: &TransactionEffects,
     effects: &TransactionEffects,
-) -> anyhow::Result<()> {
+) -> Result<()> {
+    // If replayed effects are different from the expected ones
+    // (obtained from the chain), save the forked effects and the expected effects
+    // so that they can be diffed in the output.
+    // If replayed and expected effects are the same, save the replayed effects
+    // and try removing the forked effects (if any) so that the output just shows
+    // the replayed effects rather than (now spurious) effects diff.
     if effects != expected_effects {
-        tracing::error!(
-            "Transaction effects do not match expected effects for transaction {}. Saving to ",
-            effects.transaction_digest()
+        error!(
+            tx_digest = %effects.transaction_digest(),
+            "Transaction effects do not match expected effects for transaction {}; saving forked effects",
+            effects.transaction_digest(),
         );
         artifact_manager
             .member(Artifact::ForkedTransactionEffects)
             .serialize_artifact(effects)
             .transpose()?
             .unwrap();
-        bail!(
-            "Transaction effects do not match expected effects for transaction {}",
-            effects.transaction_digest()
-        );
+        artifact_manager
+            .member(Artifact::TransactionEffects)
+            .serialize_artifact(expected_effects)
+            .transpose()?
+            .unwrap();
     } else {
-        Ok(())
+        artifact_manager
+            .member(Artifact::TransactionEffects)
+            .serialize_artifact(effects)
+            .transpose()?
+            .unwrap();
+        artifact_manager
+            .member(Artifact::ForkedTransactionEffects)
+            .try_remove_artifact()?;
     }
+    Ok(())
 }
 
 impl ReplayTransaction {
@@ -146,8 +293,9 @@ impl ReplayTransaction {
         txn_store: &dyn TransactionStore,
         epoch_store: &dyn EpochStore,
         object_store: &dyn ObjectStore,
-    ) -> Result<Self, anyhow::Error> {
-        debug!("Start load transaction");
+        executor_provider: &mut ExecutorProvider,
+    ) -> Result<Self, Error> {
+        debug!(op = "load_tx", phase = "start", tx_digest = %tx_digest, "load transaction");
 
         let digest = tx_digest
             .parse()
@@ -155,22 +303,23 @@ impl ReplayTransaction {
 
         //
         // load transaction data and effects
-        let (txn_data, effects, checkpoint) = txn_store.transaction_data_and_effects(tx_digest)?;
+        let transaction_info = txn_store
+            .transaction_data_and_effects(tx_digest)?
+            .ok_or_else(|| anyhow!(format!("Transaction not found for digest: {}", tx_digest)))?;
+        let txn_data = transaction_info.data;
+        let effects = transaction_info.effects;
+        let checkpoint = transaction_info.checkpoint;
 
         //
         // load all objects and packages used by the transaction
         let object_cache = load_transaction_objects(&txn_data, &effects, checkpoint, object_store)?;
 
         //
-        // instantiate the executor
+        // get or create the executor for this epoch
         let epoch = effects.executed_epoch();
-        let protocol_config = epoch_store
-            .protocol_config(epoch)
-            .unwrap_or_else(|e| panic!("Failed to get protocol config: {:?}", e));
-        let executor =
-            ReplayExecutor::new(protocol_config, None).unwrap_or_else(|e| panic!("{:?}", e));
+        let executor = executor_provider.get_or_create(epoch, epoch_store)?;
 
-        debug!("End load transaction");
+        debug!(op = "load_tx", phase = "end", tx_digest = %tx_digest, "load transaction");
 
         Ok(Self {
             digest,
@@ -201,6 +350,106 @@ impl ReplayTransaction {
     pub fn checkpoint(&self) -> u64 {
         self.checkpoint
     }
+
+    pub fn digest(&self) -> &TransactionDigest {
+        &self.digest
+    }
+
+    // Get `InputObjects` from a set of (ObjectId, version) pairs, where version is a u64.
+    // This is currently called from `execute_transaction_to_effects` but it could
+    // be computed for a `ReplayTransaction` and cached.
+    pub fn get_input_objects_for_replay(&self) -> Result<InputObjects, anyhow::Error> {
+        let _deleted_shared_info_map: BTreeMap<ObjectID, (TransactionDigest, SequenceNumber)> =
+            BTreeMap::new();
+        let mut resolved_input_objs = vec![];
+        let input_objects_kind = self.txn_data.input_objects().context(format!(
+            "Failed to get input objects from transaction {}",
+            self.digest,
+        ))?;
+        for kind in input_objects_kind.iter() {
+            match kind {
+                InputObjectKind::MovePackage(pkg_id) => {
+                    self
+                        .object_cache
+                        .get(pkg_id)
+                        .map(|pkgs| {
+                            debug_assert!(
+                                pkgs.len() == 1,
+                                "Expected only one version for package {}",
+                                pkg_id
+                            );
+                            let (_version, pkg) = pkgs.iter().next().unwrap();
+                            resolved_input_objs.push(ObjectReadResult {
+                                input_object_kind: *kind,
+                                object: ObjectReadResultKind::Object(pkg.clone()),
+                            })
+                        })
+                        .ok_or_else(|| anyhow::anyhow!(
+                            format!(
+                                "Package {} not found in transaction cache. Should have been loaded already",
+                                pkg_id,
+                            )
+                        ))?;
+                }
+                InputObjectKind::ImmOrOwnedMoveObject((obj_id, version, _digest)) => {
+                    let object = self
+                        .object_cache
+                        .get(obj_id)
+                        .ok_or_else(|| anyhow::anyhow!(
+                            format!(
+                                "Object id {}[{}] not found in transaction cache. Should have been loaded already",
+                                obj_id, version,
+                            )
+                        ))?
+                        .get(&version.value())
+                        .ok_or_else(|| anyhow::anyhow!(
+                            format!(
+                                "Object version {}[{}] not found in transaction cache. Should have been loaded already",
+                                obj_id, version,
+                            )
+                        ))?;
+                    let input_object_kind =
+                        InputObjectKind::ImmOrOwnedMoveObject(object.compute_object_reference());
+                    resolved_input_objs.push(ObjectReadResult {
+                        input_object_kind,
+                        object: ObjectReadResultKind::Object(object.clone()),
+                    });
+                }
+                InputObjectKind::SharedMoveObject {
+                    id,
+                    initial_shared_version,
+                    mutability,
+                } => {
+                    let input_object_kind = InputObjectKind::SharedMoveObject {
+                        id: *id,
+                        initial_shared_version: *initial_shared_version,
+                        mutability: *mutability,
+                    };
+                    let versions =
+                        self.object_cache
+                            .get(id)
+                            .ok_or_else(|| anyhow::anyhow!(
+                                format!(
+                                    "Shared Object id {} not found in transaction cache. Should have been loaded already",
+                                    id,
+                                )
+                            ))?;
+                    debug_assert!(
+                        versions.len() == 1,
+                        "Expected only one version for shared object {}",
+                        id
+                    );
+                    let (_version, obj) = versions.iter().next().unwrap();
+                    resolved_input_objs.push(ObjectReadResult {
+                        input_object_kind,
+                        object: ObjectReadResultKind::Object(obj.clone()),
+                    });
+                }
+            }
+        }
+        trace!("resolved input objects: {:#?}", resolved_input_objs);
+        Ok(InputObjects::new(resolved_input_objs))
+    }
 }
 
 // Load the objects and packages used by the transaction.
@@ -211,7 +460,7 @@ fn load_transaction_objects(
     effects: &TransactionEffects,
     checkpoint: u64,
     object_store: &dyn ObjectStore,
-) -> Result<BTreeMap<ObjectID, BTreeMap<ObjectVersion, Object>>, anyhow::Error> {
+) -> Result<BTreeMap<ObjectID, BTreeMap<ObjectVersion, Object>>, Error> {
     // collect all package ids required by the transaction
     let mut packages = get_packages(txn_data)?;
 
@@ -243,7 +492,7 @@ fn load_transaction_objects(
 // For move calls is the package of the call.
 // For vector commands the packages of the type parameter.
 // For publish and upgrade commands, the packages of the dependencies.
-fn get_packages(txn_data: &TransactionData) -> Result<BTreeSet<ObjectID>, anyhow::Error> {
+fn get_packages(txn_data: &TransactionData) -> Result<BTreeSet<ObjectID>, Error> {
     let mut packages = BTreeSet::new();
     if let TransactionKind::ProgrammableTransaction(ptb) = txn_data.kind() {
         for cmd in &ptb.commands {
@@ -293,7 +542,7 @@ fn load_objects(
         BTreeMap<ObjectID, BTreeMap<ObjectVersion, Object>>, // objets loaded
         BTreeSet<ObjectID>,                                  // packages referenced
     ),
-    anyhow::Error,
+    Error,
 > {
     let mut packages = BTreeSet::new();
     let mut object_cache: BTreeMap<ObjectID, BTreeMap<ObjectVersion, Object>> = BTreeMap::new();
@@ -303,7 +552,7 @@ fn load_objects(
             // REVIEW: a `None` is simply ignored, is that correct?
             continue;
         }
-        let object = object.unwrap();
+        let (object, _version) = object.unwrap();
         let object_id = object.id();
         if let Some(tag) = object.as_inner().struct_tag() {
             packages_from_type_tag(&tag.into(), &mut packages);
@@ -327,7 +576,7 @@ fn load_packages(
     packages: &BTreeSet<ObjectID>,
     checkpoint: u64,
     object_store: &dyn ObjectStore,
-) -> Result<BTreeMap<ObjectID, BTreeMap<ObjectVersion, Object>>, anyhow::Error> {
+) -> Result<BTreeMap<ObjectID, BTreeMap<ObjectVersion, Object>>, Error> {
     let pkg_object_keys = packages
         .iter()
         .map(|pkg_id| ObjectKey {
@@ -335,9 +584,9 @@ fn load_packages(
             version_query: VersionQuery::AtCheckpoint(checkpoint),
         })
         .collect::<Vec<_>>();
-    debug!("Start load_packages");
+    debug!(op = "load_packages", phase = "start", "load_packages");
     let (objects, packages) = load_objects(&pkg_object_keys, object_store)?;
-    debug!("End load_packages");
+    debug!(op = "load_packages", phase = "end", "load_packages");
     debug_assert!(
         packages.is_empty(),
         "Packages should be empty from packages load, there is no type parameter in packages"
@@ -350,7 +599,7 @@ fn load_packages(
 fn get_txn_object_keys(
     txn_data: &TransactionData,
     effects: &TransactionEffects,
-) -> Result<Vec<ObjectKey>, anyhow::Error> {
+) -> Result<Vec<ObjectKey>, Error> {
     let input_object_ids = get_input_ids(txn_data)?;
     trace!("Input Object IDs: {:#?}", input_object_ids);
     let effects_object_ids = get_effects_ids(effects)?;
@@ -380,7 +629,7 @@ fn get_txn_object_keys(
 // That includes:
 // - the gas coins
 // -- all `CallArg::Object` to PTBs
-fn get_input_ids(txn_data: &TransactionData) -> Result<BTreeSet<ObjectKey>, anyhow::Error> {
+fn get_input_ids(txn_data: &TransactionData) -> Result<BTreeSet<ObjectKey>, Error> {
     // grab all coins
     let mut object_keys: BTreeSet<ObjectKey> = txn_data
         .gas_data()
@@ -403,11 +652,7 @@ fn get_input_ids(txn_data: &TransactionData) -> Result<BTreeSet<ObjectKey>, anyh
                             object_id: *id,
                             version_query: VersionQuery::Version(seq_num.value()),
                         }),
-                        ObjectArg::SharedObject {
-                            id: _,
-                            initial_shared_version: _,
-                            mutable: _,
-                        } => {
+                        ObjectArg::SharedObject { .. } => {
                             None // will be in transaction effects
                         }
                         ObjectArg::Receiving((id, seq_num, _digest)) => Some(ObjectKey {
@@ -425,145 +670,43 @@ fn get_input_ids(txn_data: &TransactionData) -> Result<BTreeSet<ObjectKey>, anyh
     Ok(object_keys)
 }
 
-// Get the input shared objects and unchanged shared objects from the transaction effects
-fn get_effects_ids(effects: &TransactionEffects) -> Result<BTreeSet<ObjectKey>, anyhow::Error> {
+// Get the input shared objects and unchanged consensus objects from the transaction effects
+fn get_effects_ids(effects: &TransactionEffects) -> Result<BTreeSet<ObjectKey>, Error> {
     let mut object_keys = effects
-        .input_shared_objects()
+        .input_consensus_objects()
         .iter()
-        .map(|input_shared_object| match input_shared_object {
-            InputSharedObject::MutateConsensusStreamEnded(object_id, version)
-            | InputSharedObject::ReadConsensusStreamEnded(object_id, version)
-            | InputSharedObject::Cancelled(object_id, version) => ObjectKey {
+        .map(|input_consensus_object| match input_consensus_object {
+            InputConsensusObject::MutateConsensusStreamEnded(object_id, version)
+            | InputConsensusObject::ReadConsensusStreamEnded(object_id, version)
+            | InputConsensusObject::Cancelled(object_id, version) => ObjectKey {
                 object_id: *object_id,
                 version_query: VersionQuery::Version(version.value()),
             },
-            InputSharedObject::Mutate((object_id, version, _digest))
-            | InputSharedObject::ReadOnly((object_id, version, _digest)) => ObjectKey {
+            InputConsensusObject::Mutate((object_id, version, _digest))
+            | InputConsensusObject::ReadOnly((object_id, version, _digest)) => ObjectKey {
                 object_id: *object_id,
                 version_query: VersionQuery::Version(version.value()),
             },
         })
         .collect::<BTreeSet<_>>();
     effects
-        .unchanged_shared_objects()
+        .unchanged_consensus_objects()
         .iter()
         .for_each(|(obj_id, kind)| match kind {
-            UnchangedSharedKind::ReadOnlyRoot((ver, _digest)) => {
+            UnchangedConsensusKind::ReadOnlyRoot((ver, _digest)) => {
                 object_keys.insert(ObjectKey {
                     object_id: *obj_id,
                     version_query: VersionQuery::Version(ver.value()),
                 });
             }
-            UnchangedSharedKind::MutateConsensusStreamEnded(_)
-            | UnchangedSharedKind::ReadConsensusStreamEnded(_)
-            | UnchangedSharedKind::Cancelled(_)
-            | UnchangedSharedKind::PerEpochConfig => {
-                trace!("Ignored `UnchangedSharedKind`: {:?}", kind);
+            UnchangedConsensusKind::MutateConsensusStreamEnded(_)
+            | UnchangedConsensusKind::ReadConsensusStreamEnded(_)
+            | UnchangedConsensusKind::Cancelled(_)
+            | UnchangedConsensusKind::PerEpochConfig => {
+                trace!("Ignored `UnchangedConsensusKind`: {:?}", kind);
             }
         });
     Ok(object_keys)
-}
-
-//
-// `InputObjects` for `execute_transaction_to_effects`
-//
-
-// Get `InputObjects` from a set of (ObjectId, version) pairs, where version is a u64.
-// This is currently called from `execute_transaction_to_effects` but it could
-// be computed for a `ReplayTransactoin` and cached.
-pub fn get_input_objects_for_replay(
-    txn: &TransactionData,
-    tx_digest: &TransactionDigest,
-    object_cache: &BTreeMap<ObjectID, BTreeMap<u64, Object>>, // objects used by the transaction
-) -> Result<InputObjects, anyhow::Error> {
-    let _deleted_shared_info_map: BTreeMap<ObjectID, (TransactionDigest, SequenceNumber)> =
-        BTreeMap::new();
-    let mut resolved_input_objs = vec![];
-    let input_objects_kind = txn.input_objects().context(format!(
-        "Failed to get input objects from transaction {}",
-        tx_digest
-    ))?;
-    for kind in input_objects_kind.iter() {
-        match kind {
-            InputObjectKind::MovePackage(pkg_id) => {
-                object_cache
-                    .get(pkg_id)
-                    .map(|pkgs| {
-                        debug_assert!(
-                            pkgs.len() == 1,
-                            "Expected only one version for package {}",
-                            pkg_id
-                        );
-                        let (_version, pkg) = pkgs.iter().next().unwrap();
-                        resolved_input_objs.push(ObjectReadResult {
-                            input_object_kind: *kind,
-                            object: ObjectReadResultKind::Object(pkg.clone()),
-                        })
-                    })
-                    .ok_or_else(|| anyhow::anyhow!(
-                        format!(
-                            "Package {} not found in transaction cache. Should have been loaded already",
-                            pkg_id,
-                        )
-                    ))?;
-            }
-            InputObjectKind::ImmOrOwnedMoveObject((obj_id, version, _digest)) => {
-                let object = object_cache
-                    .get(obj_id)
-                    .ok_or_else(|| anyhow::anyhow!(
-                        format!(
-                            "Object id {}[{}] not found in transaction cache. Should have been loaded already",
-                            obj_id, version,
-                        )
-                    ))?
-                    .get(&version.value())
-                    .ok_or_else(|| anyhow::anyhow!(
-                        format!(
-                            "Object version {}[{}] not found in transaction cache. Should have been loaded already",
-                            obj_id, version,
-                        )
-                    ))?;
-                let input_object_kind =
-                    InputObjectKind::ImmOrOwnedMoveObject(object.compute_object_reference());
-                resolved_input_objs.push(ObjectReadResult {
-                    input_object_kind,
-                    object: ObjectReadResultKind::Object(object.clone()),
-                });
-            }
-            InputObjectKind::SharedMoveObject {
-                id,
-                initial_shared_version,
-                mutable,
-            } => {
-                let input_object_kind = InputObjectKind::SharedMoveObject {
-                    id: *id,
-                    initial_shared_version: *initial_shared_version,
-                    mutable: *mutable,
-                };
-                let versions =
-                    object_cache
-                        .get(id)
-                        .ok_or_else(|| anyhow::anyhow!(
-                            format!(
-                                "Shared Object id {} not found in transaction cache. Should have been loaded already",
-                                id,
-                            )
-                        ))?;
-                debug_assert!(
-                    versions.len() == 1,
-                    "Expected only one version for shared object {}",
-                    id
-                );
-                let (_version, obj) = versions.iter().next().unwrap();
-                resolved_input_objs.push(ObjectReadResult {
-                    input_object_kind,
-                    object: ObjectReadResultKind::Object(obj.clone()),
-                });
-            }
-        }
-    }
-    trace!("resolved input objects: {:#?}", resolved_input_objs);
-    Ok(InputObjects::new(resolved_input_objs))
 }
 
 // get the package info from the type tag and insert the packages of the type tags (if any)
@@ -588,5 +731,23 @@ fn packages_from_type_tag(typ: &TypeTag, packages: &mut BTreeSet<ObjectID>) {
         | TypeTag::U16
         | TypeTag::U32
         | TypeTag::U256 => (),
+    }
+}
+
+/// Returns true if the given execution status represents an early execution error
+/// (i.e., the transaction was predetermined to fail and the Move VM was never invoked).
+// REVIEW: there does not seem to be a predicate for this condition in core code.
+//         So this may be a bit of a brittle function, but it's replay anyway....
+fn is_early_execution_error(status: &ExecutionStatus) -> bool {
+    match status {
+        ExecutionStatus::Failure(ExecutionFailure { error, .. }) => matches!(
+            error,
+            ExecutionErrorKind::CertificateDenied
+                | ExecutionErrorKind::InputObjectDeleted
+                | ExecutionErrorKind::ExecutionCancelledDueToSharedObjectCongestion { .. }
+                | ExecutionErrorKind::ExecutionCancelledDueToRandomnessUnavailable
+                | ExecutionErrorKind::InsufficientFundsForWithdraw
+        ),
+        ExecutionStatus::Success => false,
     }
 }

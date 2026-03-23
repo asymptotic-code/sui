@@ -5,11 +5,12 @@ use lsp_types::Position;
 use move_command_line_common::files::FileHash;
 use move_compiler::{
     expansion::ast::{Address, ModuleIdent_},
-    shared::files::MappedFiles,
-    unit_test::filter_test_members::UNIT_TEST_POISON_FUN_NAME,
+    shared::{files::MappedFiles, stdlib_definitions::UNIT_TEST_POISON_INJECTION_NAME},
 };
 use move_ir_types::location::*;
 use move_symbol_pool::Symbol;
+use std::path::PathBuf;
+use url::Url;
 
 /// Produces module ident string of the form pkg::module to be used as a map key
 /// It's important that these are consistent between parsing AST and typed AST.
@@ -78,6 +79,18 @@ pub fn lsp_position_to_loc(
     files.line_char_offset_to_loc_opt(file_hash, line_offset, char_offset)
 }
 
+/// Converts a file URI to a canonicalized PathBuf. Falls back to the raw
+/// `to_file_path()` result if canonicalization fails (e.g., file not yet on disk).
+pub fn canonical_path_from_uri(uri: &Url) -> Option<PathBuf> {
+    let path = uri.to_file_path().ok()?;
+    Some(canonicalize_path(path))
+}
+
+/// Canonicalize a PathBuf, falling back to the original if canonicalization fails.
+pub fn canonicalize_path(path: PathBuf) -> PathBuf {
+    dunce::canonicalize(&path).unwrap_or(path)
+}
+
 /// Some functions defined in a module need to be ignored.
 pub fn ignored_function(name: Symbol) -> bool {
     // In test mode (that's how IDE compiles Move source files),
@@ -85,5 +98,5 @@ pub fn ignored_function(name: Symbol) -> bool {
     // publishing of modules compiled in test mode. We need to
     // ignore its definition to avoid spurious on-hover display
     // of this function's info whe hovering close to `module` keyword.
-    name == UNIT_TEST_POISON_FUN_NAME
+    name == UNIT_TEST_POISON_INJECTION_NAME
 }

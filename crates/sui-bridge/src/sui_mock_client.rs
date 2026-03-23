@@ -6,26 +6,23 @@
 use crate::error::{BridgeError, BridgeResult};
 use crate::test_utils::DUMMY_MUTALBE_BRIDGE_OBJECT_ARG;
 use async_trait::async_trait;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
-use sui_json_rpc_types::SuiTransactionBlockResponse;
-use sui_json_rpc_types::{EventFilter, EventPage, SuiEvent};
+use sui_json_rpc_types::SuiEvent;
 use sui_types::base_types::ObjectID;
 use sui_types::base_types::ObjectRef;
 use sui_types::bridge::{
-    BridgeCommitteeSummary, BridgeSummary, MoveTypeParsedTokenTransferMessage,
+    BridgeCommitteeSummary, BridgeSummary, MoveTypeBridgeRecord, MoveTypeParsedTokenTransferMessage,
 };
 use sui_types::digests::TransactionDigest;
-use sui_types::event::EventID;
 use sui_types::gas_coin::GasCoin;
 use sui_types::object::Owner;
 use sui_types::transaction::ObjectArg;
 use sui_types::transaction::Transaction;
-use sui_types::Identifier;
 
-use crate::sui_client::SuiClientInner;
-use crate::types::{BridgeAction, BridgeActionStatus, IsBridgePaused};
+use crate::sui_client::{ExecuteTransactionResult, SuiClientInner};
+use crate::types::{BridgeAction, BridgeActionStatus, IsBridgePaused, SuiEvents};
 
 /// Mock client used in test environments.
 #[allow(clippy::type_complexity)]
@@ -34,18 +31,19 @@ pub struct SuiMockClient {
     // the top two fields do not change during tests so we don't need them to be Arc<Mutex>>
     chain_identifier: String,
     latest_checkpoint_sequence_number: Arc<AtomicU64>,
-    events: Arc<Mutex<HashMap<(ObjectID, Identifier, Option<EventID>), EventPage>>>,
-    past_event_query_params: Arc<Mutex<VecDeque<(ObjectID, Identifier, Option<EventID>)>>>,
     events_by_tx_digest:
         Arc<Mutex<HashMap<TransactionDigest, Result<Vec<SuiEvent>, sui_sdk::error::Error>>>>,
     transaction_responses:
-        Arc<Mutex<HashMap<TransactionDigest, BridgeResult<SuiTransactionBlockResponse>>>>,
-    wildcard_transaction_response: Arc<Mutex<Option<BridgeResult<SuiTransactionBlockResponse>>>>,
+        Arc<Mutex<HashMap<TransactionDigest, BridgeResult<ExecuteTransactionResult>>>>,
+    wildcard_transaction_response: Arc<Mutex<Option<BridgeResult<ExecuteTransactionResult>>>>,
     get_object_info: Arc<Mutex<HashMap<ObjectID, (GasCoin, ObjectRef, Owner)>>>,
     onchain_status: Arc<Mutex<HashMap<(u8, u64), BridgeActionStatus>>>,
     bridge_committee_summary: Arc<Mutex<Option<BridgeCommitteeSummary>>>,
     is_paused: Arc<Mutex<Option<IsBridgePaused>>>,
     requested_transactions_tx: tokio::sync::broadcast::Sender<TransactionDigest>,
+    // gRPC-related mock data
+    bridge_records: Arc<Mutex<HashMap<(u8, u64), MoveTypeBridgeRecord>>>,
+    next_seq_nums: Arc<Mutex<HashMap<u8, u64>>>,
 }
 
 impl SuiMockClient {
@@ -53,8 +51,6 @@ impl SuiMockClient {
         Self {
             chain_identifier: "".to_string(),
             latest_checkpoint_sequence_number: Arc::new(AtomicU64::new(0)),
-            events: Default::default(),
-            past_event_query_params: Default::default(),
             events_by_tx_digest: Default::default(),
             transaction_responses: Default::default(),
             wildcard_transaction_response: Default::default(),
@@ -63,20 +59,9 @@ impl SuiMockClient {
             bridge_committee_summary: Default::default(),
             is_paused: Default::default(),
             requested_transactions_tx: tokio::sync::broadcast::channel(10000).0,
+            bridge_records: Default::default(),
+            next_seq_nums: Default::default(),
         }
-    }
-
-    pub fn add_event_response(
-        &self,
-        package: ObjectID,
-        module: Identifier,
-        cursor: EventID,
-        events: EventPage,
-    ) {
-        self.events
-            .lock()
-            .unwrap()
-            .insert((package, module, Some(cursor)), events);
     }
 
     pub fn add_events_by_tx_digest(&self, tx_digest: TransactionDigest, events: Vec<SuiEvent>) {
@@ -96,7 +81,7 @@ impl SuiMockClient {
     pub fn add_transaction_response(
         &self,
         tx_digest: TransactionDigest,
-        response: BridgeResult<SuiTransactionBlockResponse>,
+        response: BridgeResult<ExecuteTransactionResult>,
     ) {
         self.transaction_responses
             .lock()
@@ -124,7 +109,7 @@ impl SuiMockClient {
 
     pub fn set_wildcard_transaction_response(
         &self,
-        response: BridgeResult<SuiTransactionBlockResponse>,
+        response: BridgeResult<ExecuteTransactionResult>,
     ) {
         *self.wildcard_transaction_response.lock().unwrap() = Some(response);
     }
@@ -146,76 +131,71 @@ impl SuiMockClient {
     ) -> tokio::sync::broadcast::Receiver<TransactionDigest> {
         self.requested_transactions_tx.subscribe()
     }
+
+    /// Add a bridge record for testing gRPC-based iteration
+    pub fn add_bridge_record(
+        &self,
+        source_chain_id: u8,
+        seq_num: u64,
+        record: MoveTypeBridgeRecord,
+    ) {
+        self.bridge_records
+            .lock()
+            .unwrap()
+            .insert((source_chain_id, seq_num), record);
+    }
+
+    /// Set the next sequence number for a source chain
+    pub fn set_next_seq_num(&self, source_chain_id: u8, next_seq_num: u64) {
+        self.next_seq_nums
+            .lock()
+            .unwrap()
+            .insert(source_chain_id, next_seq_num);
+    }
 }
 
 #[async_trait]
 impl SuiClientInner for SuiMockClient {
-    type Error = sui_sdk::error::Error;
-
-    // Unwraps in this function: We assume the responses are pre-populated
-    // by the test before calling into this function.
-    async fn query_events(
-        &self,
-        query: EventFilter,
-        cursor: Option<EventID>,
-    ) -> Result<EventPage, Self::Error> {
-        let events = self.events.lock().unwrap();
-        match query {
-            EventFilter::MoveEventModule { package, module } => {
-                self.past_event_query_params.lock().unwrap().push_back((
-                    package,
-                    module.clone(),
-                    cursor,
-                ));
-                Ok(events
-                    .get(&(package, module.clone(), cursor))
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "No preset events found for package: {:?}, module: {:?}, cursor: {:?}",
-                            package, module, cursor
-                        )
-                    }))
-            }
-            _ => unimplemented!(),
-        }
-    }
-
     async fn get_events_by_tx_digest(
         &self,
         tx_digest: TransactionDigest,
-    ) -> Result<Vec<SuiEvent>, Self::Error> {
+    ) -> Result<SuiEvents, BridgeError> {
         let events = self.events_by_tx_digest.lock().unwrap();
 
         match events
             .get(&tx_digest)
             .unwrap_or_else(|| panic!("No preset events found for tx_digest: {:?}", tx_digest))
         {
-            Ok(events) => Ok(events.clone()),
+            Ok(events) => Ok(SuiEvents {
+                transaction_digest: tx_digest,
+                checkpoint: None,
+                timestamp_ms: None,
+                events: events.clone(),
+            }),
             // sui_sdk::error::Error is not Clone
-            Err(_) => Err(sui_sdk::error::Error::DataError("".to_string())),
+            Err(_) => Err(sui_sdk::error::Error::DataError("".to_string()).into()),
         }
     }
 
-    async fn get_chain_identifier(&self) -> Result<String, Self::Error> {
+    async fn get_chain_identifier(&self) -> Result<String, BridgeError> {
         Ok(self.chain_identifier.clone())
     }
 
-    async fn get_latest_checkpoint_sequence_number(&self) -> Result<u64, Self::Error> {
+    async fn get_latest_checkpoint_sequence_number(&self) -> Result<u64, BridgeError> {
         Ok(self
             .latest_checkpoint_sequence_number
             .load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    async fn get_mutable_bridge_object_arg(&self) -> Result<ObjectArg, Self::Error> {
+    async fn get_mutable_bridge_object_arg(&self) -> Result<ObjectArg, BridgeError> {
         Ok(DUMMY_MUTALBE_BRIDGE_OBJECT_ARG)
     }
 
-    async fn get_reference_gas_price(&self) -> Result<u64, Self::Error> {
+    async fn get_reference_gas_price(&self) -> Result<u64, BridgeError> {
         Ok(1000)
     }
 
-    async fn get_bridge_summary(&self) -> Result<BridgeSummary, Self::Error> {
+    async fn get_bridge_summary(&self) -> Result<BridgeSummary, BridgeError> {
         Ok(BridgeSummary {
             bridge_version: 0,
             message_version: 0,
@@ -267,10 +247,18 @@ impl SuiClientInner for SuiMockClient {
         unimplemented!()
     }
 
+    async fn get_bridge_record(
+        &self,
+        _source_chain_id: u8,
+        _seq_number: u64,
+    ) -> Result<Option<MoveTypeBridgeRecord>, BridgeError> {
+        todo!()
+    }
+
     async fn execute_transaction_block_with_effects(
         &self,
         tx: Transaction,
-    ) -> Result<SuiTransactionBlockResponse, BridgeError> {
+    ) -> Result<ExecuteTransactionResult, BridgeError> {
         self.requested_transactions_tx.send(*tx.digest()).unwrap();
         match self.transaction_responses.lock().unwrap().get(tx.digest()) {
             Some(response) => response.clone(),
@@ -298,5 +286,34 @@ impl SuiClientInner for SuiMockClient {
                     gas_object_id
                 )
             })
+    }
+
+    async fn get_bridge_records_in_range(
+        &self,
+        source_chain_id: u8,
+        start_seq_num: u64,
+        end_seq_num: u64,
+    ) -> Result<Vec<(u64, MoveTypeBridgeRecord)>, BridgeError> {
+        let records = self.bridge_records.lock().unwrap();
+        let mut result = Vec::new();
+        for seq_num in start_seq_num..=end_seq_num {
+            if let Some(record) = records.get(&(source_chain_id, seq_num)) {
+                result.push((seq_num, (*record).clone()));
+            }
+        }
+        Ok(result)
+    }
+
+    async fn get_token_transfer_next_seq_number(
+        &self,
+        source_chain_id: u8,
+    ) -> Result<u64, BridgeError> {
+        Ok(self
+            .next_seq_nums
+            .lock()
+            .unwrap()
+            .get(&source_chain_id)
+            .copied()
+            .unwrap_or(0))
     }
 }

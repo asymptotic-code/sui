@@ -11,15 +11,15 @@ use anyhow::Result;
 use arc_swap::ArcSwapOption;
 use consensus_config::{AuthorityIndex, Committee, NetworkKeyPair, Parameters, ProtocolKeyPair};
 use consensus_core::{
-    to_socket_addr, Clock, CommitConsumerArgs, CommitConsumerMonitor, CommittedSubDag,
-    ConsensusAuthority, TransactionClient, TransactionVerifier,
+    Clock, CommitConsumerArgs, CommitConsumerMonitor, CommittedSubDag, ConsensusAuthority,
+    NetworkType, TransactionClient, TransactionVerifier, to_socket_addr,
 };
 use consensus_types::block::BlockTimestampMs;
-use mysten_metrics::monitored_mpsc::unbounded_channel;
 use mysten_metrics::monitored_mpsc::UnboundedReceiver;
+use mysten_metrics::monitored_mpsc::unbounded_channel;
 use parking_lot::Mutex;
 use prometheus::Registry;
-use sui_protocol_config::{ConsensusNetwork, ProtocolConfig};
+use sui_protocol_config::ProtocolConfig;
 use tempfile::TempDir;
 use tracing::{info, trace};
 
@@ -29,7 +29,6 @@ pub struct Config {
     pub db_dir: Arc<TempDir>,
     pub committee: Committee,
     pub keypairs: Vec<(NetworkKeyPair, ProtocolKeyPair)>,
-    pub network_type: ConsensusNetwork,
     pub boot_counter: u64,
     pub clock_drift: BlockTimestampMs,
     pub protocol_config: ProtocolConfig,
@@ -267,7 +266,6 @@ pub(crate) async fn make_authority(
         db_dir,
         committee,
         keypairs,
-        network_type,
         boot_counter,
         protocol_config,
         clock_drift,
@@ -289,11 +287,11 @@ pub(crate) async fn make_authority(
     let protocol_keypair = keypairs[authority_index].1.clone();
     let network_keypair = keypairs[authority_index].0.clone();
 
-    let (commit_consumer, commit_receiver, _) = CommitConsumerArgs::new(0, 0);
+    let (commit_consumer, commit_receiver) = CommitConsumerArgs::new(0, 0);
     let commit_consumer_monitor = commit_consumer.monitor();
 
     let authority = ConsensusAuthority::start(
-        network_type,
+        NetworkType::Tonic,
         0,
         authority_index,
         committee,

@@ -8,12 +8,13 @@ use sui_bridge_indexer_alt::handlers::error_handler::ErrorTransactionHandler;
 use sui_bridge_indexer_alt::handlers::governance_action_handler::GovernanceActionHandler;
 use sui_bridge_indexer_alt::handlers::token_transfer_data_handler::TokenTransferDataHandler;
 use sui_bridge_indexer_alt::handlers::token_transfer_handler::TokenTransferHandler;
+use sui_bridge_indexer_alt::metrics::BridgeIndexerMetrics;
 use sui_bridge_schema::MIGRATIONS;
-use sui_indexer_alt_framework::ingestion::ClientArgs;
+use sui_indexer_alt_framework::ingestion::{ClientArgs, ingestion_client::IngestionClientArgs};
 use sui_indexer_alt_framework::postgres::DbArgs;
+use sui_indexer_alt_framework::service::Error;
 use sui_indexer_alt_framework::{Indexer, IndexerArgs};
 use sui_indexer_alt_metrics::{MetricsArgs, MetricsService};
-use tokio_util::sync::CancellationToken;
 use url::Url;
 
 #[derive(Parser)]
@@ -48,14 +49,14 @@ async fn main() -> Result<(), anyhow::Error> {
         remote_store_url,
     } = Args::parse();
 
-    let cancel = CancellationToken::new();
+    let is_bounded_job = indexer_args.last_checkpoint.is_some();
     let registry = Registry::new_custom(Some("bridge".into()), None)
         .context("Failed to create Prometheus registry.")?;
-    let metrics = MetricsService::new(
-        MetricsArgs { metrics_address },
-        registry,
-        cancel.child_token(),
-    );
+
+    // Initialize bridge-specific metrics
+    let bridge_metrics = BridgeIndexerMetrics::new(&registry);
+
+    let metrics = MetricsService::new(MetricsArgs { metrics_address }, registry);
 
     let metrics_prefix = None;
     let mut indexer = Indexer::new_from_pg(
@@ -63,22 +64,24 @@ async fn main() -> Result<(), anyhow::Error> {
         db_args,
         indexer_args,
         ClientArgs {
-            remote_store_url: Some(remote_store_url),
-            local_ingestion_path: None,
-            rpc_api_url: None,
-            rpc_username: None,
-            rpc_password: None,
+            ingestion: IngestionClientArgs {
+                remote_store_url: Some(remote_store_url),
+                ..Default::default()
+            },
+            ..Default::default()
         },
         Default::default(),
         Some(&MIGRATIONS),
         metrics_prefix,
         metrics.registry(),
-        cancel.clone(),
     )
     .await?;
 
     indexer
-        .concurrent_pipeline(TokenTransferHandler::default(), Default::default())
+        .concurrent_pipeline(
+            TokenTransferHandler::new(bridge_metrics.clone()),
+            Default::default(),
+        )
         .await?;
 
     indexer
@@ -86,18 +89,33 @@ async fn main() -> Result<(), anyhow::Error> {
         .await?;
 
     indexer
-        .concurrent_pipeline(GovernanceActionHandler::default(), Default::default())
+        .concurrent_pipeline(
+            GovernanceActionHandler::new(bridge_metrics.clone()),
+            Default::default(),
+        )
         .await?;
 
     indexer
         .concurrent_pipeline(ErrorTransactionHandler, Default::default())
         .await?;
 
-    let h_indexer = indexer.run().await?;
-    let h_metrics = metrics.run().await?;
+    let s_indexer = indexer.run().await?;
+    let s_metrics = metrics.run().await?;
 
-    let _ = h_indexer.await;
-    cancel.cancel();
-    let _ = h_metrics.await;
-    Ok(())
+    match s_indexer.attach(s_metrics).main().await {
+        Ok(()) => Ok(()),
+        Err(Error::Terminated) => {
+            if is_bounded_job {
+                std::process::exit(1);
+            } else {
+                Ok(())
+            }
+        }
+        Err(Error::Aborted) => {
+            std::process::exit(1);
+        }
+        Err(Error::Task(_)) => {
+            std::process::exit(2);
+        }
+    }
 }

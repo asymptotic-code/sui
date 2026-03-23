@@ -28,6 +28,7 @@ More entry functions might be added in the future depending on the use cases.
 -  [Function `is_authorized`](#sui_display_is_authorized)
 -  [Function `version`](#sui_display_version)
 -  [Function `fields`](#sui_display_fields)
+-  [Function `destroy`](#sui_display_destroy)
 -  [Function `create_internal`](#sui_display_create_internal)
 -  [Function `add_internal`](#sui_display_add_internal)
 
@@ -39,8 +40,13 @@ More entry functions might be added in the future depending on the use cases.
 <b>use</b> <a href="../std/string.md#std_string">std::string</a>;
 <b>use</b> <a href="../std/type_name.md#std_type_name">std::type_name</a>;
 <b>use</b> <a href="../std/vector.md#std_vector">std::vector</a>;
+<b>use</b> <a href="../sui/accumulator.md#sui_accumulator">sui::accumulator</a>;
+<b>use</b> <a href="../sui/accumulator_settlement.md#sui_accumulator_settlement">sui::accumulator_settlement</a>;
 <b>use</b> <a href="../sui/address.md#sui_address">sui::address</a>;
+<b>use</b> <a href="../sui/bcs.md#sui_bcs">sui::bcs</a>;
+<b>use</b> <a href="../sui/dynamic_field.md#sui_dynamic_field">sui::dynamic_field</a>;
 <b>use</b> <a href="../sui/event.md#sui_event">sui::event</a>;
+<b>use</b> <a href="../sui/hash.md#sui_hash">sui::hash</a>;
 <b>use</b> <a href="../sui/hex.md#sui_hex">sui::hex</a>;
 <b>use</b> <a href="../sui/object.md#sui_object">sui::object</a>;
 <b>use</b> <a href="../sui/package.md#sui_package">sui::package</a>;
@@ -500,6 +506,32 @@ Read the <code><a href="../sui/display.md#sui_display_fields">fields</a></code> 
 
 <pre><code><b>public</b> <b>fun</b> <a href="../sui/display.md#sui_display_fields">fields</a>&lt;T: key&gt;(d: &<a href="../sui/display.md#sui_display_Display">Display</a>&lt;T&gt;): &VecMap&lt;String, String&gt; {
     &d.<a href="../sui/display.md#sui_display_fields">fields</a>
+}
+</code></pre>
+
+
+
+</details>
+
+<a name="sui_display_destroy"></a>
+
+## Function `destroy`
+
+Allow destroying legacy display objects.
+
+
+<pre><code><b>public</b>(<a href="../sui/package.md#sui_package">package</a>) <b>fun</b> <a href="../sui/display.md#sui_display_destroy">destroy</a>&lt;T: key&gt;(<a href="../sui/display.md#sui_display">display</a>: <a href="../sui/display.md#sui_display_Display">sui::display::Display</a>&lt;T&gt;)
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b>(<a href="../sui/package.md#sui_package">package</a>) <b>fun</b> <a href="../sui/display.md#sui_display_destroy">destroy</a>&lt;T: key&gt;(<a href="../sui/display.md#sui_display">display</a>: <a href="../sui/display.md#sui_display_Display">Display</a>&lt;T&gt;) {
+    <b>let</b> <a href="../sui/display.md#sui_display_Display">Display</a> { id, .. } = <a href="../sui/display.md#sui_display">display</a>;
+    id.delete();
 }
 </code></pre>
 

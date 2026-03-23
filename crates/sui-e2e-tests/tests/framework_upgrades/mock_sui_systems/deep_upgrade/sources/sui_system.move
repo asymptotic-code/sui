@@ -101,4 +101,16 @@ module sui_system::sui_system {
         let self = load_system_state_mut(wrapper);
         sui_system_state_inner::store_execution_time_estimates(self, estimates_bytes)
     }
+
+    fun store_execution_time_estimates_v2(wrapper: &mut SuiSystemState, estimate_chunks: vector<vector<u8>>) {
+        let self = load_system_state_mut(wrapper);
+        sui_system_state_inner::store_execution_time_estimates_v2(self, estimate_chunks)
+    }
+
+    fun write_accumulator_storage_cost(
+        _wrapper: &mut SuiSystemState,
+        _storage_cost: u64,
+        _ctx: &TxContext,
+    ) {
+    }
 }

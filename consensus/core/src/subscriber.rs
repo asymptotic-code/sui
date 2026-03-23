@@ -16,7 +16,7 @@ use crate::{
     context::Context,
     dag_state::DagState,
     error::ConsensusError,
-    network::{NetworkClient, NetworkService},
+    network::{ValidatorNetworkClient, ValidatorNetworkService},
 };
 
 /// Subscriber manages the block stream subscriptions to other peers, taking care of retrying
@@ -24,7 +24,7 @@ use crate::{
 /// service for processing.
 /// Currently subscription management for individual peer is not exposed, but it could become
 /// useful in future.
-pub(crate) struct Subscriber<C: NetworkClient, S: NetworkService> {
+pub(crate) struct Subscriber<C: ValidatorNetworkClient, S: ValidatorNetworkService> {
     context: Arc<Context>,
     network_client: Arc<C>,
     authority_service: Arc<S>,
@@ -32,7 +32,7 @@ pub(crate) struct Subscriber<C: NetworkClient, S: NetworkService> {
     subscriptions: Arc<Mutex<Box<[Option<JoinHandle<()>>]>>>,
 }
 
-impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
+impl<C: ValidatorNetworkClient, S: ValidatorNetworkService> Subscriber<C, S> {
     pub(crate) fn new(
         context: Arc<Context>,
         network_client: Arc<C>,
@@ -118,13 +118,15 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
         last_received: Round,
     ) {
         const IMMEDIATE_RETRIES: i64 = 3;
+        const MIN_TIMEOUT: Duration = Duration::from_millis(500);
         // When not immediately retrying, limit retry delay between 100ms and 10s.
-        const INITIAL_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-        const MAX_RETRY_INTERVAL: Duration = Duration::from_secs(10);
-        const RETRY_INTERVAL_MULTIPLIER: f32 = 1.2;
+        let mut backoff = mysten_common::backoff::ExponentialBackoff::new(
+            Duration::from_millis(100),
+            Duration::from_secs(10),
+        );
+
         let peer_hostname = &context.committee.authority(peer).hostname;
         let mut retries: i64 = 0;
-        let mut delay = INITIAL_RETRY_INTERVAL;
         'subscription: loop {
             context
                 .metrics
@@ -133,7 +135,9 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                 .with_label_values(&[peer_hostname])
                 .set(0);
 
+            let mut delay = Duration::ZERO;
             if retries > IMMEDIATE_RETRIES {
+                delay = backoff.next().unwrap();
                 debug!(
                     "Delaying retry {} of peer {} subscription, in {} seconds",
                     retries,
@@ -141,21 +145,16 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                     delay.as_secs_f32(),
                 );
                 sleep(delay).await;
-                // Update delay for the next retry.
-                delay = delay
-                    .mul_f32(RETRY_INTERVAL_MULTIPLIER)
-                    .min(MAX_RETRY_INTERVAL);
             } else if retries > 0 {
                 // Retry immediately, but still yield to avoid monopolizing the thread.
                 tokio::task::yield_now().await;
-            } else {
-                // First attempt, reset delay for next retries but no waiting.
-                delay = INITIAL_RETRY_INTERVAL;
             }
             retries += 1;
 
+            // Use longer timeout when retry delay is long, to adapt to slow network.
+            let request_timeout = MIN_TIMEOUT.max(delay);
             let mut blocks = match network_client
-                .subscribe_blocks(peer, last_received, MAX_RETRY_INTERVAL)
+                .subscribe_blocks(peer, last_received, request_timeout)
                 .await
             {
                 Ok(blocks) => {
@@ -167,7 +166,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                         .metrics
                         .node_metrics
                         .subscriber_connection_attempts
-                        .with_label_values(&[peer_hostname, "success"])
+                        .with_label_values(&[peer_hostname.as_str(), "success"])
                         .inc();
                     blocks
                 }
@@ -180,7 +179,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                         .metrics
                         .node_metrics
                         .subscriber_connection_attempts
-                        .with_label_values(&[peer_hostname, "failure"])
+                        .with_label_values(&[peer_hostname.as_str(), "failure"])
                         .inc();
                     continue 'subscription;
                 }
@@ -203,9 +202,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                             .subscribed_blocks
                             .with_label_values(&[peer_hostname])
                             .inc();
-                        let result = authority_service
-                            .handle_send_block(peer, block.clone())
-                            .await;
+                        let result = authority_service.handle_send_block(peer, block).await;
                         if let Err(e) = result {
                             match e {
                                 ConsensusError::BlockRejected { block_ref, reason } => {
@@ -241,18 +238,18 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
 
 #[cfg(test)]
 mod test {
-    use anemo::async_trait;
+    use async_trait::async_trait;
     use bytes::Bytes;
     use consensus_types::block::BlockRef;
     use futures::stream;
 
     use super::*;
     use crate::{
+        VerifiedBlock,
         commit::CommitRange,
         error::ConsensusResult,
-        network::{test_network::TestService, BlockStream, ExtendedSerializedBlock},
+        network::{BlockStream, ExtendedSerializedBlock, test_network::TestService},
         storage::mem_store::MemStore,
-        VerifiedBlock,
     };
 
     struct SubscriberTestClient {}
@@ -264,9 +261,7 @@ mod test {
     }
 
     #[async_trait]
-    impl NetworkClient for SubscriberTestClient {
-        const SUPPORT_STREAMING: bool = true;
-
+    impl ValidatorNetworkClient for SubscriberTestClient {
         async fn send_block(
             &self,
             _peer: AuthorityIndex,

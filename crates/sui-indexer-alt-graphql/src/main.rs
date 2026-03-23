@@ -4,15 +4,16 @@
 use anyhow::Context;
 use clap::Parser;
 use prometheus::Registry;
-use sui_indexer_alt_graphql::{
-    args::{Args, Command},
-    config::{IndexerConfig, RpcLayer},
-    start_rpc,
-};
-use sui_indexer_alt_metrics::{uptime, MetricsService};
-use tokio::{fs, signal};
-use tokio_util::sync::CancellationToken;
-use tracing::info;
+use sui_futures::service::Error;
+use sui_indexer_alt_graphql::args::Args;
+use sui_indexer_alt_graphql::args::Command;
+use sui_indexer_alt_graphql::config::IndexerConfig;
+use sui_indexer_alt_graphql::config::RpcLayer;
+use sui_indexer_alt_graphql::start_rpc;
+use sui_indexer_alt_metrics::MetricsService;
+use sui_indexer_alt_metrics::uptime;
+use telemetry_subscribers::TelemetryConfig;
+use tokio::fs;
 
 // Define the `GIT_REVISION` const
 bin_version::git_revision!();
@@ -32,16 +33,24 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     // Enable tracing, configured by environment variables.
-    let _guard = telemetry_subscribers::TelemetryConfig::new()
+    let _guard = TelemetryConfig::new()
+        // ErrorLayer is disabled by default in TelemetryConfig, but enabled by default in GraphQL
+        // to give useful error output for debugging request timeouts.
+        .with_enable_error_layer(true)
         .with_env()
         .init();
+
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install CryptoProvider");
 
     match args.command {
         Command::Rpc {
             database_url,
-            bigtable_instance,
+            fullnode_args,
             db_args,
-            bigtable_args,
+            kv_args,
+            consistent_reader_args,
             rpc_args,
             system_package_task_args,
             metrics_args,
@@ -74,52 +83,44 @@ async fn main() -> anyhow::Result<()> {
                 pg_pipelines.extend(config.pipelines().map(|p| p.to_owned()));
             }
 
-            let cancel = CancellationToken::new();
-
             let registry = Registry::new_custom(Some("graphql_alt".into()), None)
                 .context("Failed to create Prometheus registry.")?;
 
-            let metrics = MetricsService::new(metrics_args, registry, cancel.child_token());
-
-            let h_ctrl_c = tokio::spawn({
-                let cancel = cancel.clone();
-                async move {
-                    tokio::select! {
-                        _ = cancel.cancelled() => {}
-                        _ = signal::ctrl_c() => {
-                            info!("Received Ctrl-C, shutting down...");
-                            cancel.cancel();
-                        }
-                    }
-                }
-            });
+            let metrics = MetricsService::new(metrics_args, registry);
 
             metrics
                 .registry()
                 .register(uptime(VERSION)?)
                 .context("Failed to register uptime metric.")?;
 
-            let h_rpc = start_rpc(
+            let s_rpc = start_rpc(
                 Some(database_url),
-                bigtable_instance,
+                fullnode_args,
                 db_args,
-                bigtable_args,
+                kv_args,
+                consistent_reader_args,
                 rpc_args,
                 system_package_task_args,
                 VERSION,
                 rpc_config,
                 pg_pipelines,
                 metrics.registry(),
-                cancel.child_token(),
             )
             .await?;
 
-            let h_metrics = metrics.run().await?;
+            let s_metrics = metrics.run().await?;
 
-            let _ = h_rpc.await;
-            cancel.cancel();
-            let _ = h_metrics.await;
-            let _ = h_ctrl_c.await;
+            match s_rpc.attach(s_metrics).main().await {
+                Ok(()) | Err(Error::Terminated) => {}
+
+                Err(Error::Aborted) => {
+                    std::process::exit(1);
+                }
+
+                Err(Error::Task(_)) => {
+                    std::process::exit(2);
+                }
+            }
         }
 
         Command::GenerateConfig => {

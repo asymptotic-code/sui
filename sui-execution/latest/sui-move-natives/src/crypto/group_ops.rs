@@ -1,23 +1,25 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 use crate::object_runtime::ObjectRuntime;
-use crate::NativesCostTable;
+use crate::{NativesCostTable, get_extension};
 use fastcrypto::error::{FastCryptoError, FastCryptoResult};
 use fastcrypto::groups::{
-    bls12381 as bls, FromTrustedByteArray, GroupElement, HashToGroupElement, MultiScalarMul,
-    Pairing,
+    FromTrustedByteArray, GroupElement, HashToGroupElement, MultiScalarMul, Pairing,
+    bls12381 as bls, ristretto255 as ristretto,
 };
 use fastcrypto::serde_helpers::ToFromByteArray;
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::gas_algebra::InternalGas;
 use move_core_types::vm_status::StatusCode;
 use move_vm_runtime::native_charge_gas_early_exit;
-use move_vm_runtime::native_functions::NativeContext;
-use move_vm_types::{
-    loaded_data::runtime_types::Type,
-    natives::function::NativeResult,
+use move_vm_runtime::natives::functions::NativeContext;
+use move_vm_runtime::{
+    execution::{
+        Type,
+        values::{Value, VectorRef},
+    },
+    natives::functions::NativeResult,
     pop_arg,
-    values::{Value, VectorRef},
 };
 use smallvec::smallvec;
 use std::collections::VecDeque;
@@ -27,34 +29,32 @@ pub const INVALID_INPUT_ERROR: u64 = 1;
 pub const INPUT_TOO_LONG_ERROR: u64 = 2;
 
 fn is_supported(context: &NativeContext) -> PartialVMResult<bool> {
-    Ok(context
-        .extensions()
-        .get::<ObjectRuntime>()?
+    Ok(get_extension!(context, ObjectRuntime)?
         .protocol_config
         .enable_group_ops_native_functions())
 }
 
 fn is_msm_supported(context: &NativeContext) -> PartialVMResult<bool> {
-    Ok(context
-        .extensions()
-        .get::<ObjectRuntime>()?
+    Ok(get_extension!(context, ObjectRuntime)?
         .protocol_config
         .enable_group_ops_native_function_msm())
 }
 
 fn is_uncompressed_g1_supported(context: &NativeContext) -> PartialVMResult<bool> {
-    Ok(context
-        .extensions()
-        .get::<ObjectRuntime>()?
+    Ok(get_extension!(context, ObjectRuntime)?
         .protocol_config
         .uncompressed_g1_group_elements())
 }
 
+fn is_ristretto_supported(context: &NativeContext) -> PartialVMResult<bool> {
+    Ok(get_extension!(context, ObjectRuntime)?
+        .protocol_config
+        .enable_ristretto255_group_ops())
+}
+
 fn v2_native_charge(context: &NativeContext, cost: InternalGas) -> PartialVMResult<InternalGas> {
     Ok(
-        if context
-            .extensions()
-            .get::<ObjectRuntime>()?
+        if get_extension!(context, ObjectRuntime)?
             .protocol_config
             .native_charging_v2()
         {
@@ -135,6 +135,20 @@ pub struct GroupOpsCostParams {
     pub bls12381_uncompressed_g1_sum_cost_per_term: Option<InternalGas>,
     // limit the number of terms in a sum
     pub bls12381_uncompressed_g1_sum_max_terms: Option<u64>,
+    pub ristretto_decode_scalar_cost: Option<InternalGas>,
+    pub ristretto_decode_point_cost: Option<InternalGas>,
+    // costs for decode, add, and encode output
+    pub ristretto_scalar_add_cost: Option<InternalGas>,
+    pub ristretto_point_add_cost: Option<InternalGas>,
+    // costs for decode, sub, and encode output
+    pub ristretto_scalar_sub_cost: Option<InternalGas>,
+    pub ristretto_point_sub_cost: Option<InternalGas>,
+    // costs for decode, mul, and encode output
+    pub ristretto_scalar_mul_cost: Option<InternalGas>,
+    pub ristretto_point_mul_cost: Option<InternalGas>,
+    // costs for decode, div, and encode output
+    pub ristretto_scalar_div_cost: Option<InternalGas>,
+    pub ristretto_point_div_cost: Option<InternalGas>,
 }
 
 macro_rules! native_charge_gas_early_exit_option {
@@ -159,6 +173,8 @@ enum Groups {
     BLS12381G2 = 2,
     BLS12381GT = 3,
     BLS12381UncompressedG1 = 4,
+    RistrettoScalar = 5,
+    RistrettoPoint = 6,
 }
 
 impl Groups {
@@ -169,6 +185,8 @@ impl Groups {
             2 => Some(Groups::BLS12381G2),
             3 => Some(Groups::BLS12381GT),
             4 => Some(Groups::BLS12381UncompressedG1),
+            5 => Some(Groups::RistrettoScalar),
+            6 => Some(Groups::RistrettoPoint),
             _ => None,
         }
     }
@@ -236,12 +254,10 @@ pub fn internal_validate(
     }
 
     let bytes_ref = pop_arg!(args, VectorRef);
-    let bytes = bytes_ref.as_bytes_ref();
+    let bytes = bytes_ref.as_bytes_ref()?;
     let group_type = pop_arg!(args, u8);
 
-    let cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let cost_params = get_extension!(context, NativesCostTable)?
         .group_ops_cost_params
         .clone();
 
@@ -257,6 +273,20 @@ pub fn internal_validate(
         Some(Groups::BLS12381G2) => {
             native_charge_gas_early_exit_option!(context, cost_params.bls12381_decode_g2_cost);
             parse_untrusted::<bls::G2Element, { bls::G2Element::BYTE_LENGTH }>(&bytes).is_ok()
+        }
+        Some(Groups::RistrettoScalar) => {
+            if !is_ristretto_supported(context)? {
+                return Ok(NativeResult::err(cost, NOT_SUPPORTED_ERROR));
+            }
+            native_charge_gas_early_exit_option!(context, cost_params.ristretto_decode_scalar_cost);
+            parse_untrusted::<ristretto::RistrettoScalar, { ristretto::RISTRETTO_SCALAR_BYTE_LENGTH }>(&bytes).is_ok()
+        }
+        Some(Groups::RistrettoPoint) => {
+            if !is_ristretto_supported(context)? {
+                return Ok(NativeResult::err(cost, NOT_SUPPORTED_ERROR));
+            }
+            native_charge_gas_early_exit_option!(context, cost_params.ristretto_decode_point_cost);
+            parse_untrusted::<ristretto::RistrettoPoint, { ristretto::RISTRETTO_POINT_BYTE_LENGTH }>(&bytes).is_ok()
         }
         _ => false,
     };
@@ -286,14 +316,12 @@ pub fn internal_add(
     }
 
     let e2_ref = pop_arg!(args, VectorRef);
-    let e2 = e2_ref.as_bytes_ref();
+    let e2 = e2_ref.as_bytes_ref()?;
     let e1_ref = pop_arg!(args, VectorRef);
-    let e1 = e1_ref.as_bytes_ref();
+    let e1 = e1_ref.as_bytes_ref()?;
     let group_type = pop_arg!(args, u8);
 
-    let cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let cost_params = get_extension!(context, NativesCostTable)?
         .group_ops_cost_params
         .clone();
 
@@ -313,6 +341,28 @@ pub fn internal_add(
         Some(Groups::BLS12381GT) => {
             native_charge_gas_early_exit_option!(context, cost_params.bls12381_gt_add_cost);
             binary_op::<bls::GTElement, { bls::GTElement::BYTE_LENGTH }>(|a, b| Ok(a + b), &e1, &e2)
+        }
+        Some(Groups::RistrettoScalar) => {
+            if !is_ristretto_supported(context)? {
+                return Ok(NativeResult::err(cost, NOT_SUPPORTED_ERROR));
+            }
+            native_charge_gas_early_exit_option!(context, cost_params.ristretto_scalar_add_cost);
+            binary_op::<ristretto::RistrettoScalar, { ristretto::RISTRETTO_SCALAR_BYTE_LENGTH }>(
+                |a, b| Ok(a + b),
+                &e1,
+                &e2,
+            )
+        }
+        Some(Groups::RistrettoPoint) => {
+            if !is_ristretto_supported(context)? {
+                return Ok(NativeResult::err(cost, NOT_SUPPORTED_ERROR));
+            }
+            native_charge_gas_early_exit_option!(context, cost_params.ristretto_point_add_cost);
+            binary_op::<ristretto::RistrettoPoint, { ristretto::RISTRETTO_POINT_BYTE_LENGTH }>(
+                |a, b| Ok(a + b),
+                &e1,
+                &e2,
+            )
         }
         _ => Err(FastCryptoError::InvalidInput),
     };
@@ -339,14 +389,12 @@ pub fn internal_sub(
     }
 
     let e2_ref = pop_arg!(args, VectorRef);
-    let e2 = e2_ref.as_bytes_ref();
+    let e2 = e2_ref.as_bytes_ref()?;
     let e1_ref = pop_arg!(args, VectorRef);
-    let e1 = e1_ref.as_bytes_ref();
+    let e1 = e1_ref.as_bytes_ref()?;
     let group_type = pop_arg!(args, u8);
 
-    let cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let cost_params = get_extension!(context, NativesCostTable)?
         .group_ops_cost_params
         .clone();
 
@@ -366,6 +414,28 @@ pub fn internal_sub(
         Some(Groups::BLS12381GT) => {
             native_charge_gas_early_exit_option!(context, cost_params.bls12381_gt_sub_cost);
             binary_op::<bls::GTElement, { bls::GTElement::BYTE_LENGTH }>(|a, b| Ok(a - b), &e1, &e2)
+        }
+        Some(Groups::RistrettoScalar) => {
+            if !is_ristretto_supported(context)? {
+                return Ok(NativeResult::err(cost, NOT_SUPPORTED_ERROR));
+            }
+            native_charge_gas_early_exit_option!(context, cost_params.ristretto_scalar_sub_cost);
+            binary_op::<ristretto::RistrettoScalar, { ristretto::RISTRETTO_SCALAR_BYTE_LENGTH }>(
+                |a, b| Ok(a - b),
+                &e1,
+                &e2,
+            )
+        }
+        Some(Groups::RistrettoPoint) => {
+            if !is_ristretto_supported(context)? {
+                return Ok(NativeResult::err(cost, NOT_SUPPORTED_ERROR));
+            }
+            native_charge_gas_early_exit_option!(context, cost_params.ristretto_point_sub_cost);
+            binary_op::<ristretto::RistrettoPoint, { ristretto::RISTRETTO_POINT_BYTE_LENGTH }>(
+                |a, b| Ok(a - b),
+                &e1,
+                &e2,
+            )
         }
         _ => Err(FastCryptoError::InvalidInput),
     };
@@ -392,14 +462,12 @@ pub fn internal_mul(
     }
 
     let e2_ref = pop_arg!(args, VectorRef);
-    let e2 = e2_ref.as_bytes_ref();
+    let e2 = e2_ref.as_bytes_ref()?;
     let e1_ref = pop_arg!(args, VectorRef);
-    let e1 = e1_ref.as_bytes_ref();
+    let e1 = e1_ref.as_bytes_ref()?;
     let group_type = pop_arg!(args, u8);
 
-    let cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let cost_params = get_extension!(context, NativesCostTable)?
         .group_ops_cost_params
         .clone();
 
@@ -435,6 +503,29 @@ pub fn internal_mul(
                 { bls::GTElement::BYTE_LENGTH },
             >(|a, b| Ok(b * a), &e1, &e2)
         }
+        Some(Groups::RistrettoScalar) => {
+            if !is_ristretto_supported(context)? {
+                return Ok(NativeResult::err(cost, NOT_SUPPORTED_ERROR));
+            }
+            native_charge_gas_early_exit_option!(context, cost_params.ristretto_scalar_mul_cost);
+            binary_op::<ristretto::RistrettoScalar, { ristretto::RISTRETTO_SCALAR_BYTE_LENGTH }>(
+                |a, b| Ok(b * a),
+                &e1,
+                &e2,
+            )
+        }
+        Some(Groups::RistrettoPoint) => {
+            if !is_ristretto_supported(context)? {
+                return Ok(NativeResult::err(cost, NOT_SUPPORTED_ERROR));
+            }
+            native_charge_gas_early_exit_option!(context, cost_params.ristretto_point_mul_cost);
+            binary_op_diff::<
+                ristretto::RistrettoScalar,
+                ristretto::RistrettoPoint,
+                { ristretto::RISTRETTO_SCALAR_BYTE_LENGTH },
+                { ristretto::RISTRETTO_POINT_BYTE_LENGTH },
+            >(|a, b| Ok(b * a), &e1, &e2)
+        }
         _ => Err(FastCryptoError::InvalidInput),
     };
 
@@ -460,14 +551,12 @@ pub fn internal_div(
     }
 
     let e2_ref = pop_arg!(args, VectorRef);
-    let e2 = e2_ref.as_bytes_ref();
+    let e2 = e2_ref.as_bytes_ref()?;
     let e1_ref = pop_arg!(args, VectorRef);
-    let e1 = e1_ref.as_bytes_ref();
+    let e1 = e1_ref.as_bytes_ref()?;
     let group_type = pop_arg!(args, u8);
 
-    let cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let cost_params = get_extension!(context, NativesCostTable)?
         .group_ops_cost_params
         .clone();
 
@@ -503,6 +592,29 @@ pub fn internal_div(
                 { bls::GTElement::BYTE_LENGTH },
             >(|a, b| b / a, &e1, &e2)
         }
+        Some(Groups::RistrettoScalar) => {
+            if !is_ristretto_supported(context)? {
+                return Ok(NativeResult::err(cost, NOT_SUPPORTED_ERROR));
+            }
+            native_charge_gas_early_exit_option!(context, cost_params.ristretto_scalar_div_cost);
+            binary_op::<ristretto::RistrettoScalar, { ristretto::RISTRETTO_SCALAR_BYTE_LENGTH }>(
+                |a, b| b / a,
+                &e1,
+                &e2,
+            )
+        }
+        Some(Groups::RistrettoPoint) => {
+            if !is_ristretto_supported(context)? {
+                return Ok(NativeResult::err(cost, NOT_SUPPORTED_ERROR));
+            }
+            native_charge_gas_early_exit_option!(context, cost_params.ristretto_point_div_cost);
+            binary_op_diff::<
+                ristretto::RistrettoScalar,
+                ristretto::RistrettoPoint,
+                { ristretto::RISTRETTO_SCALAR_BYTE_LENGTH },
+                { ristretto::RISTRETTO_POINT_BYTE_LENGTH },
+            >(|a, b| b / a, &e1, &e2)
+        }
         _ => Err(FastCryptoError::InvalidInput),
     };
 
@@ -529,16 +641,14 @@ pub fn internal_hash_to(
     }
 
     let m_ref = pop_arg!(args, VectorRef);
-    let m = m_ref.as_bytes_ref();
+    let m = m_ref.as_bytes_ref()?;
     let group_type = pop_arg!(args, u8);
 
     if m.is_empty() {
         return Ok(NativeResult::err(cost, INVALID_INPUT_ERROR));
     }
 
-    let cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let cost_params = get_extension!(context, NativesCostTable)?
         .group_ops_cost_params
         .clone();
 
@@ -617,8 +727,8 @@ where
 {
     if points.is_empty()
         || scalars.is_empty()
-        || scalars.len() % SCALAR_SIZE != 0
-        || points.len() % POINT_SIZE != 0
+        || !scalars.len().is_multiple_of(SCALAR_SIZE)
+        || !points.len().is_multiple_of(POINT_SIZE)
         || points.len() / POINT_SIZE != scalars.len() / SCALAR_SIZE
     {
         return Ok(NativeResult::err(context.gas_used(), INVALID_INPUT_ERROR));
@@ -686,14 +796,12 @@ pub fn internal_multi_scalar_mul(
     }
 
     let elements_ref = pop_arg!(args, VectorRef);
-    let elements = elements_ref.as_bytes_ref();
+    let elements = elements_ref.as_bytes_ref()?;
     let scalars_ref = pop_arg!(args, VectorRef);
-    let scalars = scalars_ref.as_bytes_ref();
+    let scalars = scalars_ref.as_bytes_ref()?;
     let group_type = pop_arg!(args, u8);
 
-    let cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let cost_params = get_extension!(context, NativesCostTable)?
         .group_ops_cost_params
         .clone();
 
@@ -758,14 +866,12 @@ pub fn internal_pairing(
     }
 
     let e2_ref = pop_arg!(args, VectorRef);
-    let e2 = e2_ref.as_bytes_ref();
+    let e2 = e2_ref.as_bytes_ref()?;
     let e1_ref = pop_arg!(args, VectorRef);
-    let e1 = e1_ref.as_bytes_ref();
+    let e1 = e1_ref.as_bytes_ref()?;
     let group_type = pop_arg!(args, u8);
 
-    let cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let cost_params = get_extension!(context, NativesCostTable)?
         .group_ops_cost_params
         .clone();
 
@@ -805,13 +911,11 @@ pub fn internal_convert(
     }
 
     let e_ref = pop_arg!(args, VectorRef);
-    let e = e_ref.as_bytes_ref();
+    let e = e_ref.as_bytes_ref()?;
     let to_type = pop_arg!(args, u8);
     let from_type = pop_arg!(args, u8);
 
-    let cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let cost_params = get_extension!(context, NativesCostTable)?
         .group_ops_cost_params
         .clone();
 
@@ -862,9 +966,7 @@ pub fn internal_sum(
         return Ok(NativeResult::err(cost, NOT_SUPPORTED_ERROR));
     }
 
-    let cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let cost_params = get_extension!(context, NativesCostTable)?
         .group_ops_cost_params
         .clone();
 
@@ -899,18 +1001,20 @@ pub fn internal_sum(
             );
 
             // Read the input vector
-            (0..length)
+            let input_values: Vec<Vec<u8>> = (0..length)
                 .map(|i| {
                     inputs
                         .borrow_elem(i as usize, &Type::Vector(Box::new(Type::U8)))
                         .and_then(Value::value_as::<VectorRef>)
+                        .and_then(|v| Ok(v.as_bytes_ref()?.to_vec()))
+                })
+                .collect::<PartialVMResult<Vec<_>>>()?;
+
+            input_values
+                .into_iter()
+                .map(|v| {
+                    v.try_into()
                         .map_err(|_| FastCryptoError::InvalidInput)
-                        .and_then(|v| {
-                            v.as_bytes_ref()
-                                .to_vec()
-                                .try_into()
-                                .map_err(|_| FastCryptoError::InvalidInput)
-                        })
                         .map(bls::G1ElementUncompressed::from_trusted_byte_array)
                 })
                 .collect::<FastCryptoResult<Vec<_>>>()

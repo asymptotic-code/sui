@@ -1,30 +1,32 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 use crate::object_runtime::ObjectRuntime;
-use crate::NativesCostTable;
+use crate::{NativesCostTable, get_extension};
 use fastcrypto_zkp::bn254::poseidon::poseidon_bytes;
 use move_binary_format::errors::PartialVMResult;
 use move_core_types::gas_algebra::InternalGas;
 use move_core_types::vm_status::StatusCode;
-use move_vm_runtime::{native_charge_gas_early_exit, native_functions::NativeContext};
-use move_vm_types::natives::function::PartialVMError;
-use move_vm_types::{
-    loaded_data::runtime_types::Type,
-    natives::function::NativeResult,
+use move_vm_runtime::{
+    execution::{
+        Type,
+        values::{Value, VectorRef},
+    },
+    natives::functions::{NativeResult, PartialVMError},
     pop_arg,
-    values::{Value, VectorRef},
 };
+use move_vm_runtime::{native_charge_gas_early_exit, natives::functions::NativeContext};
 use smallvec::smallvec;
 use std::collections::VecDeque;
 use std::ops::Mul;
 
 pub const NON_CANONICAL_INPUT: u64 = 0;
 pub const NOT_SUPPORTED_ERROR: u64 = 1;
+pub const TOO_MANY_INPUTS: u64 = 2;
+
+pub const MAX_POSEIDON_INPUTS: u64 = 16;
 
 fn is_supported(context: &NativeContext) -> PartialVMResult<bool> {
-    Ok(context
-        .extensions()
-        .get::<ObjectRuntime>()?
+    Ok(get_extension!(context, ObjectRuntime)?
         .protocol_config
         .enable_poseidon())
 }
@@ -54,9 +56,7 @@ pub fn poseidon_bn254_internal(
     }
 
     // Load the cost parameters from the protocol config
-    let cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let cost_params = get_extension!(context, NativesCostTable)?
         .poseidon_bn254_cost_params
         .clone();
 
@@ -81,6 +81,10 @@ pub fn poseidon_bn254_internal(
         .len(&Type::Vector(Box::new(Type::U8)))?
         .value_as::<u64>()?;
 
+    if length > MAX_POSEIDON_INPUTS {
+        return Ok(NativeResult::err(context.gas_used(), TOO_MANY_INPUTS));
+    }
+
     // Charge the msg dependent costs
     native_charge_gas_early_exit!(
         context,
@@ -97,10 +101,10 @@ pub fn poseidon_bn254_internal(
     let field_elements = (0..length)
         .map(|i| {
             let reference = inputs.borrow_elem(i as usize, &Type::Vector(Box::new(Type::U8)))?;
-            let value = reference.value_as::<VectorRef>()?.as_bytes_ref().clone();
+            let value = reference.value_as::<VectorRef>()?.as_bytes_ref()?.clone();
             Ok(value)
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<PartialVMResult<Vec<_>>>()?;
 
     match poseidon_bytes(&field_elements) {
         Ok(result) => Ok(NativeResult::ok(

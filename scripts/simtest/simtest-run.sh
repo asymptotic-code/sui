@@ -51,10 +51,14 @@ MSIM_WATCHDOG_TIMEOUT_MS=60000 \
 scripts/simtest/cargo-simtest simtest \
   --color always \
   --test-threads "$NUM_CPUS" \
+  --package consensus-simtests \
   --package sui-core \
   --package sui-e2e-tests \
   --profile simtestnightly \
   -E "$TEST_FILTER" 2>&1 | tee "$LOG_FILE"
+
+# Clean up temp files from the e2e phase to prevent /tmp (tmpfs) from filling up.
+rm -rf /tmp/tmp.* /tmp/sui-* 2>/dev/null
 
 echo ""
 echo "============================================="
@@ -83,6 +87,9 @@ done
 
 # wait for all the jobs to end
 wait
+
+# Clean up temp files from the stress phase before running determinism tests.
+rm -rf /tmp/tmp.* /tmp/sui-* 2>/dev/null
 
 echo ""
 echo "==========================="

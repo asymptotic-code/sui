@@ -6,14 +6,14 @@ use consensus_types::block::{BlockRef, TransactionIndex};
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
-    block::{genesis_blocks, BlockAPI, SignedBlock, GENESIS_ROUND},
+    VerifiedBlock,
+    block::{BlockAPI, GENESIS_ROUND, SignedBlock, genesis_blocks},
     context::Context,
     error::{ConsensusError, ConsensusResult},
     transaction::TransactionVerifier,
-    VerifiedBlock,
 };
 
-pub(crate) trait BlockVerifier: Send + Sync + 'static {
+pub trait BlockVerifier: Send + Sync + 'static {
     /// Verifies a block and its transactions, checking signatures, size limits,
     /// and transaction validity. All honest validators should produce the same verification
     /// outcome for the same block, so any verification error should be due to equivocation.
@@ -24,6 +24,7 @@ pub(crate) trait BlockVerifier: Send + Sync + 'static {
     /// validators may vote differently on transactions.
     ///
     /// The method takes both the SignedBlock and its serialized bytes, to avoid re-serializing the block.
+    #[allow(private_interfaces)]
     fn verify_and_vote(
         &self,
         block: SignedBlock,
@@ -217,11 +218,11 @@ impl BlockVerifier for SignedBlockVerifier {
     }
 }
 
-#[cfg(test)]
-pub(crate) struct NoopBlockVerifier;
+/// Allows all transactions to pass verification, for testing.
+pub struct NoopBlockVerifier;
 
-#[cfg(test)]
 impl BlockVerifier for NoopBlockVerifier {
+    #[allow(private_interfaces)]
     fn verify_and_vote(
         &self,
         _block: SignedBlock,
@@ -299,7 +300,7 @@ mod test {
         let verifier = SignedBlockVerifier::new(context.clone(), Arc::new(TxnSizeVerifier {}));
 
         let test_block = TestBlock::new(10, AUTHOR)
-            .set_ancestors(vec![
+            .set_ancestors_raw(vec![
                 BlockRef::new(9, AuthorityIndex::new_for_test(2), BlockDigest::MIN),
                 BlockRef::new(9, AuthorityIndex::new_for_test(0), BlockDigest::MIN),
                 BlockRef::new(9, AuthorityIndex::new_for_test(1), BlockDigest::MIN),
@@ -388,7 +389,7 @@ mod test {
         {
             let block = test_block
                 .clone()
-                .set_ancestors(vec![
+                .set_ancestors_raw(vec![
                     BlockRef::new(9, AuthorityIndex::new_for_test(2), BlockDigest::MIN),
                     BlockRef::new(9, AuthorityIndex::new_for_test(0), BlockDigest::MIN),
                     BlockRef::new(9, AuthorityIndex::new_for_test(1), BlockDigest::MIN),
@@ -409,7 +410,7 @@ mod test {
         {
             let block = test_block
                 .clone()
-                .set_ancestors(vec![
+                .set_ancestors_raw(vec![
                     BlockRef::new(9, AuthorityIndex::new_for_test(2), BlockDigest::MIN),
                     BlockRef::new(9, AuthorityIndex::new_for_test(0), BlockDigest::MIN),
                     BlockRef::new(8, AuthorityIndex::new_for_test(1), BlockDigest::MIN),
@@ -430,7 +431,7 @@ mod test {
         {
             let block = test_block
                 .clone()
-                .set_ancestors(vec![
+                .set_ancestors_raw(vec![
                     BlockRef::new(9, AuthorityIndex::new_for_test(2), BlockDigest::MIN),
                     BlockRef::new(9, AuthorityIndex::new_for_test(0), BlockDigest::MIN),
                     BlockRef::new(8, AuthorityIndex::new_for_test(1), BlockDigest::MIN),
@@ -449,7 +450,7 @@ mod test {
         {
             let block = test_block
                 .clone()
-                .set_ancestors(vec![
+                .set_ancestors_raw(vec![
                     BlockRef::new(9, AuthorityIndex::new_for_test(0), BlockDigest::MIN),
                     BlockRef::new(8, AuthorityIndex::new_for_test(1), BlockDigest::MIN),
                     BlockRef::new(8, AuthorityIndex::new_for_test(3), BlockDigest::MIN),
@@ -470,7 +471,7 @@ mod test {
         {
             let block = test_block
                 .clone()
-                .set_ancestors(vec![
+                .set_ancestors_raw(vec![
                     BlockRef::new(9, AuthorityIndex::new_for_test(0), BlockDigest::MIN),
                     BlockRef::new(8, AuthorityIndex::new_for_test(1), BlockDigest::MIN),
                     BlockRef::new(8, AuthorityIndex::new_for_test(2), BlockDigest::MIN),
@@ -492,7 +493,7 @@ mod test {
         {
             let block = test_block
                 .clone()
-                .set_ancestors(vec![
+                .set_ancestors_raw(vec![
                     BlockRef::new(8, AuthorityIndex::new_for_test(2), BlockDigest::MIN),
                     BlockRef::new(8, AuthorityIndex::new_for_test(1), BlockDigest::MIN),
                     BlockRef::new(8, AuthorityIndex::new_for_test(1), BlockDigest::MIN),
@@ -580,7 +581,7 @@ mod test {
         let author_protocol_keypair = &keypairs[AUTHOR as usize].1;
         let verifier = SignedBlockVerifier::new(context.clone(), Arc::new(TxnSizeVerifier {}));
 
-        let base_block = TestBlock::new(10, AUTHOR).set_ancestors(vec![
+        let base_block = TestBlock::new(10, AUTHOR).set_ancestors_raw(vec![
             BlockRef::new(9, AuthorityIndex::new_for_test(2), BlockDigest::MIN),
             BlockRef::new(9, AuthorityIndex::new_for_test(0), BlockDigest::MIN),
             BlockRef::new(9, AuthorityIndex::new_for_test(1), BlockDigest::MIN),

@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Mysten Labs <build@mystenlabs.com>"]
 license = "Apache-2.0"
 publish = false
-edition = "2021"
+edition = "2024"
 
 [lints]
 workspace = true
@@ -58,8 +58,8 @@ tap.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["full", "tracing", "test-util"] }
-tokio-retry.workspace = true
 tokio-stream.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 twox-hash.workspace = true
 
@@ -70,7 +70,6 @@ fastcrypto-zkp.workspace = true
 move-binary-format.workspace = true
 move-bytecode-utils.workspace = true
 move-core-types.workspace = true
-move-package.workspace = true
 move-symbol-pool.workspace = true
 mysten-common.workspace = true
 mysten-network.workspace = true
@@ -78,8 +77,10 @@ telemetry-subscribers.workspace = true
 typed-store.workspace = true
 
 mysten-metrics.workspace = true
+prost.workspace = true
 shared-crypto.workspace = true
 sui-config.workspace = true
+sui-rpc.workspace = true
 sui-authority-aggregation.workspace = true
 sui-execution.workspace = true
 sui-framework.workspace = true
@@ -95,6 +96,7 @@ sui-storage.workspace = true
 sui-tls.workspace = true
 sui-types.workspace = true
 nonempty.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 sui-move-build.workspace = true
@@ -106,7 +108,6 @@ insta.workspace = true
 more-asserts.workspace = true
 pretty_assertions.workspace = true
 rstest.workspace = true
-serde-reflection.workspace = true
 serde_yaml.workspace = true
 num-bigint = "0.4.4"
 
@@ -128,10 +129,9 @@ moka = { workspace = true, default-features = false, features = [
 [target.'cfg(not(msim))'.dependencies]
 moka = { workspace = true, features = ["sync"] }
 
-[[example]]
-name = "generate-format"
-path = "src/generate_format.rs"
-test = false
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true
 
 [[bench]]
 name = "verified_cert_cache_bench"

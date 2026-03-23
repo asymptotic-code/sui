@@ -6,17 +6,16 @@ use fastcrypto::{
 };
 use move_binary_format::errors::PartialVMResult;
 use move_core_types::gas_algebra::InternalGas;
-use move_vm_runtime::{native_charge_gas_early_exit, native_functions::NativeContext};
-use move_vm_types::{
-    loaded_data::runtime_types::Type,
-    natives::function::NativeResult,
+use move_vm_runtime::natives::functions::{NativeContext, NativeResult};
+use move_vm_runtime::{execution::values::VectorRef, native_charge_gas_early_exit};
+use move_vm_runtime::{
+    execution::{Type, values::Value},
     pop_arg,
-    values::{Value, VectorRef},
 };
 use smallvec::smallvec;
 use std::collections::VecDeque;
 
-use crate::NativesCostTable;
+use crate::{NativesCostTable, get_extension};
 
 const BLS12381_BLOCK_SIZE: usize = 64;
 
@@ -47,9 +46,7 @@ pub fn bls12381_min_sig_verify(
     debug_assert!(args.len() == 3);
 
     // Load the cost parameters from the protocol config
-    let bls12381_bls12381_min_sig_verify_cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let bls12381_bls12381_min_sig_verify_cost_params = get_extension!(context, NativesCostTable)?
         .bls12381_bls12381_min_sig_verify_cost_params
         .clone();
     // Charge the base cost for this oper
@@ -62,9 +59,9 @@ pub fn bls12381_min_sig_verify(
     let public_key_bytes = pop_arg!(args, VectorRef);
     let signature_bytes = pop_arg!(args, VectorRef);
 
-    let msg_ref = msg.as_bytes_ref();
-    let public_key_bytes_ref = public_key_bytes.as_bytes_ref();
-    let signature_bytes_ref = signature_bytes.as_bytes_ref();
+    let msg_ref = msg.as_bytes_ref()?;
+    let public_key_bytes_ref = public_key_bytes.as_bytes_ref()?;
+    let signature_bytes_ref = signature_bytes.as_bytes_ref()?;
 
     // Charge the arg size dependent costs
     native_charge_gas_early_exit!(
@@ -127,9 +124,7 @@ pub fn bls12381_min_pk_verify(
     debug_assert!(args.len() == 3);
 
     // Load the cost parameters from the protocol config
-    let bls12381_bls12381_min_pk_verify_cost_params = &context
-        .extensions()
-        .get::<NativesCostTable>()?
+    let bls12381_bls12381_min_pk_verify_cost_params = get_extension!(context, NativesCostTable)?
         .bls12381_bls12381_min_pk_verify_cost_params
         .clone();
 
@@ -143,9 +138,9 @@ pub fn bls12381_min_pk_verify(
     let public_key_bytes = pop_arg!(args, VectorRef);
     let signature_bytes = pop_arg!(args, VectorRef);
 
-    let msg_ref = msg.as_bytes_ref();
-    let public_key_bytes_ref = public_key_bytes.as_bytes_ref();
-    let signature_bytes_ref = signature_bytes.as_bytes_ref();
+    let msg_ref = msg.as_bytes_ref()?;
+    let public_key_bytes_ref = public_key_bytes.as_bytes_ref()?;
+    let signature_bytes_ref = signature_bytes.as_bytes_ref()?;
 
     // Charge the arg size dependent costs
     native_charge_gas_early_exit!(

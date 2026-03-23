@@ -1,25 +1,27 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use tokio::{
-    sync::Semaphore,
-    task::JoinHandle,
-    time::{interval, MissedTickBehavior},
-};
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use futures::stream::FuturesUnordered;
+use sui_futures::service::Service;
+use tokio::sync::Semaphore;
+use tokio::time::MissedTickBehavior;
+use tokio::time::interval;
+use tracing::debug;
+use tracing::error;
+use tracing::info;
+use tracing::warn;
 
-use crate::{
-    metrics::IndexerMetrics,
-    pipeline::logging::{LoggerWatermark, WatermarkLogger},
-    store::{Connection, Store},
-};
-
-use super::{Handler, PrunerConfig};
+use crate::metrics::IndexerMetrics;
+use crate::pipeline::concurrent::Handler;
+use crate::pipeline::concurrent::PrunerConfig;
+use crate::pipeline::logging::LoggerWatermark;
+use crate::pipeline::logging::WatermarkLogger;
+use crate::store::Connection;
+use crate::store::Store;
 
 #[derive(Default)]
 struct PendingRanges {
@@ -92,19 +94,17 @@ impl PendingRanges {
 /// The task regularly traces its progress, outputting at a higher log level every
 /// [LOUD_WATERMARK_UPDATE_INTERVAL]-many checkpoints.
 ///
-/// The task will shutdown if the `cancel` token is signalled. If the `config` is `None`, the task
-/// will shutdown immediately.
+/// If the `config` is `None`, the task will shutdown immediately.
 pub(super) fn pruner<H: Handler + Send + Sync + 'static>(
     handler: Arc<H>,
     config: Option<PrunerConfig>,
     store: H::Store,
     metrics: Arc<IndexerMetrics>,
-    cancel: CancellationToken,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+) -> Service {
+    Service::new().spawn_aborting(async move {
         let Some(config) = config else {
             info!(pipeline = H::NAME, "Skipping pruner task");
-            return;
+            return Ok(());
         };
 
         info!(
@@ -120,7 +120,7 @@ pub(super) fn pruner<H: Handler + Send + Sync + 'static>(
 
         // The pruner task will periodically output a log message at a higher log level to
         // demonstrate that it is making progress.
-        let mut logger = WatermarkLogger::new("pruner", LoggerWatermark::default());
+        let mut logger = WatermarkLogger::new("pruner");
 
         // Maintains the list of chunks that are ready to be pruned but not yet pruned.
         // This map can contain ranges that were attempted to be pruned in previous iterations,
@@ -128,41 +128,39 @@ pub(super) fn pruner<H: Handler + Send + Sync + 'static>(
         let mut pending_prune_ranges = PendingRanges::default();
 
         loop {
+            poll.tick().await;
+
             // (1) Get the latest pruning bounds from the database.
-            let mut watermark = tokio::select! {
-                _ = cancel.cancelled() => {
-                    info!(pipeline = H::NAME, "Shutdown received");
-                    break;
-                }
+            let mut watermark = {
+                let guard = metrics
+                    .watermark_pruner_read_latency
+                    .with_label_values(&[H::NAME])
+                    .start_timer();
 
-                _ = poll.tick() => {
-                    let guard = metrics
-                        .watermark_pruner_read_latency
-                        .with_label_values(&[H::NAME])
-                        .start_timer();
+                let Ok(mut conn) = store.connect().await else {
+                    warn!(
+                        pipeline = H::NAME,
+                        "Pruner failed to connect, while fetching watermark"
+                    );
+                    continue;
+                };
 
-                    let Ok(mut conn) = store.connect().await else {
-                        warn!(pipeline = H::NAME, "Pruner failed to connect, while fetching watermark");
+                match conn.pruner_watermark(H::NAME, config.delay()).await {
+                    Ok(Some(current)) => {
+                        guard.stop_and_record();
+                        current
+                    }
+
+                    Ok(None) => {
+                        guard.stop_and_record();
+                        info!(pipeline = H::NAME, "No watermark for pipeline, skipping");
                         continue;
-                    };
+                    }
 
-                    match conn.pruner_watermark(H::NAME, config.delay()).await {
-                        Ok(Some(current)) => {
-                            guard.stop_and_record();
-                            current
-                        }
-
-                        Ok(None) => {
-                            guard.stop_and_record();
-                            warn!(pipeline = H::NAME, "No watermark for pipeline, skipping");
-                            continue;
-                        }
-
-                        Err(e) => {
-                            guard.stop_and_record();
-                            warn!(pipeline = H::NAME, "Failed to get watermark: {e}");
-                            continue;
-                        }
+                    Err(e) => {
+                        guard.stop_and_record();
+                        warn!(pipeline = H::NAME, "Failed to get watermark: {e}");
+                        continue;
                     }
                 }
             };
@@ -170,13 +168,7 @@ pub(super) fn pruner<H: Handler + Send + Sync + 'static>(
             // (2) Wait until this information can be acted upon.
             if let Some(wait_for) = watermark.wait_for() {
                 debug!(pipeline = H::NAME, ?wait_for, "Waiting to prune");
-                tokio::select! {
-                    _ = tokio::time::sleep(wait_for) => {}
-                    _ = cancel.cancelled() => {
-                        info!(pipeline = H::NAME, "Shutdown received");
-                        break;
-                    }
-                }
+                tokio::time::sleep(wait_for).await;
             }
 
             // Tracks the current highest `pruner_hi` not yet written to db. This is updated as
@@ -204,21 +196,13 @@ pub(super) fn pruner<H: Handler + Send + Sync + 'static>(
             let mut tasks = FuturesUnordered::new();
             for (from, to_exclusive) in pending_prune_ranges.iter() {
                 let semaphore = semaphore.clone();
-                let cancel = cancel.child_token();
                 let metrics = metrics.clone();
                 let handler = handler.clone();
 
                 let db = store.clone();
 
                 tasks.push(tokio::spawn(async move {
-                    let _permit = tokio::select! {
-                        permit = semaphore.acquire() => {
-                            permit.unwrap()
-                        }
-                        _ = cancel.cancelled() => {
-                            return ((from, to_exclusive), Err(anyhow::anyhow!("Cancelled")));
-                        }
-                    };
+                    let _permit = semaphore.acquire().await.unwrap();
                     let result = prune_task_impl(metrics, db, handler, from, to_exclusive).await;
                     ((from, to_exclusive), result)
                 }));
@@ -291,8 +275,6 @@ pub(super) fn pruner<H: Handler + Send + Sync + 'static>(
                 }
             }
         }
-
-        info!(pipeline = H::NAME, "Stopping pruner");
     })
 }
 
@@ -344,20 +326,21 @@ async fn prune_task_impl<H: Handler + Send + Sync + 'static>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
-    use std::{
-        collections::HashMap,
-        sync::Mutex,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
 
     use async_trait::async_trait;
     use prometheus::Registry;
-    use sui_types::full_checkpoint_content::CheckpointData;
+    use sui_types::full_checkpoint_content::Checkpoint;
     use tokio::time::Duration;
-    use tokio_util::sync::CancellationToken;
 
-    use crate::{metrics::IndexerMetrics, pipeline::Processor, testing::mock_store::*, FieldCount};
+    use crate::FieldCount;
+    use crate::metrics::IndexerMetrics;
+    use crate::mocks::store::*;
+    use crate::pipeline::Processor;
+    use crate::pipeline::concurrent::BatchStatus;
 
     use super::*;
 
@@ -366,12 +349,13 @@ mod tests {
 
     pub struct DataPipeline;
 
+    #[async_trait]
     impl Processor for DataPipeline {
         const NAME: &'static str = "data";
 
         type Value = StoredData;
 
-        fn process(&self, _checkpoint: &Arc<CheckpointData>) -> anyhow::Result<Vec<Self::Value>> {
+        async fn process(&self, _checkpoint: &Arc<Checkpoint>) -> anyhow::Result<Vec<Self::Value>> {
             Ok(vec![])
         }
     }
@@ -379,12 +363,23 @@ mod tests {
     #[async_trait]
     impl Handler for DataPipeline {
         type Store = MockStore;
+        type Batch = Vec<Self::Value>;
+
+        fn batch(
+            &self,
+            batch: &mut Self::Batch,
+            values: &mut std::vec::IntoIter<Self::Value>,
+        ) -> BatchStatus {
+            batch.extend(values);
+            BatchStatus::Pending
+        }
 
         async fn commit<'a>(
-            values: &[Self::Value],
+            &self,
+            batch: &Self::Batch,
             _conn: &mut MockConnection<'a>,
         ) -> anyhow::Result<usize> {
-            Ok(values.len())
+            Ok(batch.len())
         }
 
         async fn prune<'a>(
@@ -393,7 +388,7 @@ mod tests {
             to_exclusive: u64,
             conn: &mut MockConnection<'a>,
         ) -> anyhow::Result<usize> {
-            conn.0.prune_data(from, to_exclusive)
+            conn.0.prune_data(DataPipeline::NAME, from, to_exclusive)
         }
     }
 
@@ -529,7 +524,6 @@ mod tests {
         };
         let registry = Registry::new_custom(Some("test".to_string()), None).unwrap();
         let metrics = IndexerMetrics::new(None, &registry);
-        let cancel = CancellationToken::new();
 
         // Update data
         let test_data = HashMap::from([(1, vec![1, 2, 3]), (2, vec![4, 5, 6]), (3, vec![7, 8, 9])]);
@@ -541,37 +535,25 @@ mod tests {
 
         let watermark = MockWatermark {
             epoch_hi_inclusive: 0,
-            checkpoint_hi_inclusive: 3,
+            checkpoint_hi_inclusive: Some(3),
             tx_hi: 9,
             timestamp_ms_hi_inclusive: timestamp,
             reader_lo: 3,
             pruner_timestamp: timestamp,
             pruner_hi: 0,
         };
-        let store = MockStore {
-            watermarks: Arc::new(Mutex::new(watermark)),
-            data: Arc::new(Mutex::new(test_data.clone())),
-            ..Default::default()
-        };
+        let store = MockStore::new()
+            .with_watermark(DataPipeline::NAME, watermark)
+            .with_data(DataPipeline::NAME, test_data);
 
         // Start the pruner
         let store_clone = store.clone();
-        let cancel_clone = cancel.clone();
-        let pruner_handle = tokio::spawn(async move {
-            pruner(
-                handler,
-                Some(pruner_config),
-                store_clone,
-                metrics,
-                cancel_clone,
-            )
-            .await
-        });
+        let _pruner = pruner(handler, Some(pruner_config), store_clone, metrics);
 
         // Wait a short time within delay_ms
         tokio::time::sleep(Duration::from_millis(200)).await;
         {
-            let data = store.data.lock().unwrap();
+            let data = store.data.get(DataPipeline::NAME).unwrap();
             assert!(
                 data.contains_key(&1),
                 "Checkpoint 1 shouldn't be pruned before delay"
@@ -591,7 +573,7 @@ mod tests {
 
         // Now checkpoint 1 should be pruned
         {
-            let data = store.data.lock().unwrap();
+            let data = store.data.get(DataPipeline::NAME).unwrap();
             assert!(
                 !data.contains_key(&1),
                 "Checkpoint 1 should be pruned after delay"
@@ -601,16 +583,12 @@ mod tests {
             assert!(data.contains_key(&3), "Checkpoint 3 should be preserved");
 
             // Check that the pruner_hi was updated past 1
-            let watermark = store.watermarks.lock().unwrap();
+            let watermark = store.watermark(DataPipeline::NAME).unwrap();
             assert!(
                 watermark.pruner_hi > 1,
                 "Pruner watermark should be updated"
             );
         }
-
-        // Clean up
-        cancel.cancel();
-        let _ = pruner_handle.await;
     }
 
     #[tokio::test]
@@ -625,7 +603,6 @@ mod tests {
         };
         let registry = Registry::new_custom(Some("test".to_string()), None).unwrap();
         let metrics = IndexerMetrics::new(None, &registry);
-        let cancel = CancellationToken::new();
 
         // Update data
         let test_data = HashMap::from([(1, vec![1, 2, 3]), (2, vec![4, 5, 6]), (3, vec![7, 8, 9])]);
@@ -637,32 +614,20 @@ mod tests {
 
         let watermark = MockWatermark {
             epoch_hi_inclusive: 0,
-            checkpoint_hi_inclusive: 3,
+            checkpoint_hi_inclusive: Some(3),
             tx_hi: 9,
             timestamp_ms_hi_inclusive: timestamp,
             reader_lo: 3,
             pruner_timestamp: 0,
             pruner_hi: 0,
         };
-        let store = MockStore {
-            watermarks: Arc::new(Mutex::new(watermark)),
-            data: Arc::new(Mutex::new(test_data.clone())),
-            ..Default::default()
-        };
+        let store = MockStore::new()
+            .with_watermark(DataPipeline::NAME, watermark)
+            .with_data(DataPipeline::NAME, test_data);
 
         // Start the pruner
         let store_clone = store.clone();
-        let cancel_clone = cancel.clone();
-        let pruner_handle = tokio::spawn(async move {
-            pruner(
-                handler,
-                Some(pruner_config),
-                store_clone,
-                metrics,
-                cancel_clone,
-            )
-            .await
-        });
+        let _pruner = pruner(handler, Some(pruner_config), store_clone, metrics);
 
         // Because the `pruner_timestamp` is in the past, even with the delay_ms it should be pruned
         // close to immediately. To be safe, sleep for 1000ms before checking, which is well under
@@ -670,7 +635,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         {
-            let data = store.data.lock().unwrap();
+            let data = store.data.get(DataPipeline::NAME).unwrap();
             assert!(!data.contains_key(&1), "Checkpoint 1 should be pruned");
 
             assert!(!data.contains_key(&2), "Checkpoint 2 should be pruned");
@@ -679,16 +644,12 @@ mod tests {
             assert!(data.contains_key(&3), "Checkpoint 3 should be preserved");
 
             // Check that the pruner_hi was updated past 1
-            let watermark = store.watermarks.lock().unwrap();
+            let watermark = store.watermark(DataPipeline::NAME).unwrap();
             assert!(
                 watermark.pruner_hi > 1,
                 "Pruner watermark should be updated"
             );
         }
-
-        // Clean up
-        cancel.cancel();
-        let _ = pruner_handle.await;
     }
 
     #[tokio::test]
@@ -703,7 +664,6 @@ mod tests {
         };
         let registry = Registry::new_custom(Some("test".to_string()), None).unwrap();
         let metrics = IndexerMetrics::new(None, &registry);
-        let cancel = CancellationToken::new();
 
         // Set up test data for checkpoints 1-4
         let test_data = HashMap::from([
@@ -720,7 +680,7 @@ mod tests {
 
         let watermark = MockWatermark {
             epoch_hi_inclusive: 0,
-            checkpoint_hi_inclusive: 4,
+            checkpoint_hi_inclusive: Some(4),
             tx_hi: 8,
             timestamp_ms_hi_inclusive: timestamp,
             reader_lo: 4,        // Allow pruning up to checkpoint 4 (exclusive)
@@ -729,32 +689,20 @@ mod tests {
         };
 
         // Configure failing behavior: range [1,2) should fail once before succeeding
-        let store = MockStore {
-            watermarks: Arc::new(Mutex::new(watermark)),
-            data: Arc::new(Mutex::new(test_data.clone())),
-            ..Default::default()
-        }
-        .with_prune_failures(1, 2, 1);
+        let store = MockStore::new()
+            .with_watermark(DataPipeline::NAME, watermark)
+            .with_data(DataPipeline::NAME, test_data.clone())
+            .with_prune_failures(1, 2, 1);
 
         // Start the pruner
         let store_clone = store.clone();
-        let cancel_clone = cancel.clone();
-        let pruner_handle = tokio::spawn(async move {
-            pruner(
-                handler,
-                Some(pruner_config),
-                store_clone,
-                metrics,
-                cancel_clone,
-            )
-            .await
-        });
+        let _pruner = pruner(handler, Some(pruner_config), store_clone, metrics);
 
         // Wait for first pruning cycle - ranges [2,3) and [3,4) should succeed, [1,2) should fail
         tokio::time::sleep(Duration::from_millis(500)).await;
         {
-            let data = store.data.lock().unwrap();
-            let watermarks = store.watermarks.lock().unwrap();
+            let data = store.data.get(DataPipeline::NAME).unwrap();
+            let watermarks = store.watermark(DataPipeline::NAME).unwrap();
 
             // Verify watermark doesn't advance past the failed range [1,2)
             assert_eq!(
@@ -770,8 +718,8 @@ mod tests {
         // Wait for second pruning cycle - range [1,2) should succeed on retry
         tokio::time::sleep(Duration::from_millis(3000)).await;
         {
-            let data = store.data.lock().unwrap();
-            let watermarks = store.watermarks.lock().unwrap();
+            let data = store.data.get(DataPipeline::NAME).unwrap();
+            let watermarks = store.watermark(DataPipeline::NAME).unwrap();
 
             // Verify watermark advances after all ranges complete successfully
             assert_eq!(
@@ -783,9 +731,5 @@ mod tests {
             assert!(!data.contains_key(&3), "Checkpoint 3 should be pruned");
             assert!(data.contains_key(&4), "Checkpoint 4 should be preserved");
         }
-
-        // Clean up
-        cancel.cancel();
-        let _ = pruner_handle.await;
     }
 }

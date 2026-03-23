@@ -3,11 +3,12 @@
 
 // IDEA: Post trace analysis -- report when values are dropped.
 
-use crate::interface::{NopTracer, Tracer, Writer};
+use crate::interface::{Tracer, Writer};
+use crate::tracers::nop::NopTracer;
 use crate::value::SerializableMoveValue;
 use move_binary_format::{
-    file_format::{Bytecode, FunctionDefinitionIndex as BinaryFunctionDefinitionIndex},
-    file_format_common::instruction_opcode,
+    file_format::FunctionDefinitionIndex as BinaryFunctionDefinitionIndex,
+    file_format_common::Opcodes,
 };
 use move_core_types::{
     account_address::AccountAddress,
@@ -267,9 +268,12 @@ impl BufferedEventStream {
         }
     }
 
+    pub fn increment_event_count(&mut self) {
+        self.event_count += 1;
+    }
+
     pub fn push(&mut self, event: TraceEvent) {
         self.sender.send(event).unwrap();
-        self.event_count += 1;
     }
 
     pub fn finish(self) -> Vec<u8> {
@@ -285,6 +289,10 @@ impl MoveTrace {
             version: TRACE_VERSION,
             buf: BufferedEventStream::new(),
         }
+    }
+
+    pub fn increment_event_count(&mut self) {
+        self.buf.increment_event_count();
     }
 
     pub fn push_event(&mut self, event: TraceEvent) {
@@ -369,20 +377,23 @@ impl MoveTraceBuilder {
     }
 
     /// Record an `Instruction` event in the trace along with the effects of the instruction.
-    pub fn instruction(
+    pub fn instruction<T: Into<Opcodes>>(
         &mut self,
-        instruction: &Bytecode,
+        instruction: T,
         type_parameters: Vec<TypeTag>,
         effects: Vec<Effect>,
         gas_left: u64,
         pc: u16,
     ) {
+        let opcode: Opcodes = instruction.into();
+
         self.push_event(TraceEvent::Instruction {
             type_parameters,
             pc,
             gas_left,
-            instruction: Box::new(format!("{:?}", instruction_opcode(instruction))),
+            instruction: Box::new(format!("{:?}", opcode)),
         });
+
         for effect in effects {
             self.push_event(TraceEvent::Effect(Box::new(effect)));
         }
@@ -393,11 +404,15 @@ impl MoveTraceBuilder {
         self.push_event(TraceEvent::Effect(Box::new(effect)));
     }
 
-    // All events pushed to the trace are first pushed, and then the tracer is notified of the
-    // event.
+    // All events are first sent to the event API. If the event specifies that the event should be
+    // kept then it is also pushed to the trace to be saved.
     pub fn push_event(&mut self, event: TraceEvent) {
-        self.trace.push_event(event.clone());
-        self.tracer.notify(&event, Writer(&mut self.trace));
+        // Even if the event is not kept, we still increment the event count so that the trace
+        // reflects the number of events that were processed.
+        self.trace.increment_event_count();
+        if self.tracer.notify(&event, Writer(&mut self.trace)) {
+            self.trace.push_event(event);
+        }
     }
 }
 

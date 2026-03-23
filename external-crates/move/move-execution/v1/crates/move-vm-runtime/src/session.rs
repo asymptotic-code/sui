@@ -13,14 +13,13 @@ use move_binary_format::{
 use move_core_types::{
     account_address::AccountAddress,
     annotated_value as A,
-    effects::ChangeSet,
     identifier::IdentStr,
     language_storage::{ModuleId, TypeTag},
-    resolver::MoveResolver,
     runtime_value::MoveTypeLayout,
 };
 use move_vm_types::{
-    data_store::DataStore,
+    data_store::MoveResolver,
+    effects::ChangeSet,
     gas::GasMeter,
     loaded_data::runtime_types::{CachedDatatype, CachedTypeIndex, Type},
 };
@@ -99,16 +98,6 @@ impl<'r, S: MoveResolver> Session<'r, '_, S> {
         args: Vec<impl Borrow<[u8]>>,
         gas_meter: &mut impl GasMeter,
     ) -> VMResult<SerializedReturnValues> {
-        move_vm_profiler::tracing_feature_enabled! {
-            use move_vm_profiler::GasProfiler;
-            if gas_meter.get_profiler_mut().is_none() {
-                gas_meter.set_profiler(GasProfiler::init_default_cfg(
-                    function_name.to_string(),
-                    gas_meter.remaining_gas().into(),
-                ));
-            }
-        }
-
         let bypass_declared_entry_check = true;
         self.runtime.execute_function(
             module,
@@ -283,11 +272,6 @@ impl<'r, S: MoveResolver> Session<'r, '_, S> {
 
     pub fn get_resolver_mut(&mut self) -> &mut S {
         self.data_cache.get_remote_resolver_mut()
-    }
-
-    /// Gets the underlying data store
-    pub fn get_data_store(&mut self) -> &mut dyn DataStore {
-        &mut self.data_cache
     }
 
     /// Gets the underlying native extensions.

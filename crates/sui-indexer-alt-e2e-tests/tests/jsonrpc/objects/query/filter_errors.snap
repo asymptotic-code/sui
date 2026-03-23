@@ -11,18 +11,9 @@ task 1, lines 11-26:
 Response: {
   "jsonrpc": "2.0",
   "id": 0,
-  "result": {
-    "data": [
-      {
-        "data": {
-          "objectId": "0xbff5e96a4a5c0f7348259c7abfdfd999405c02b9e9c0d0d59ec669a53b104c7a",
-          "version": "1",
-          "digest": "Bqw8MjtPSgoFarHYSq7HN77R9utjvxqtSFD32ydKXsiW"
-        }
-      }
-    ],
-    "nextCursor": "IL/16WpKXA9zSCWcer/f2ZlAXAK56cDQ1Z7GaaU7EEx6AAAAAAAAAAA=",
-    "hasNextPage": false
+  "error": {
+    "code": -32602,
+    "message": "Invalid Params: Multiple exclusions unsupported"
   }
 }
 
@@ -33,7 +24,7 @@ Response: {
   "id": 1,
   "error": {
     "code": -32602,
-    "message": "Invalid Params: Object filter nested deeper than maximum of 3"
+    "message": "Invalid Params: Multiple exclusions unsupported"
   }
 }
 
@@ -42,18 +33,9 @@ task 3, lines 47-69:
 Response: {
   "jsonrpc": "2.0",
   "id": 2,
-  "result": {
-    "data": [
-      {
-        "data": {
-          "objectId": "0xbff5e96a4a5c0f7348259c7abfdfd999405c02b9e9c0d0d59ec669a53b104c7a",
-          "version": "1",
-          "digest": "Bqw8MjtPSgoFarHYSq7HN77R9utjvxqtSFD32ydKXsiW"
-        }
-      }
-    ],
-    "nextCursor": "IL/16WpKXA9zSCWcer/f2ZlAXAK56cDQ1Z7GaaU7EEx6AAAAAAAAAAA=",
-    "hasNextPage": false
+  "error": {
+    "code": -32602,
+    "message": "Invalid Params: Multiple exclusions unsupported"
   }
 }
 
@@ -64,6 +46,6 @@ Response: {
   "id": 3,
   "error": {
     "code": -32602,
-    "message": "Invalid Params: Object filter contains more than the maximum 10 type filters"
+    "message": "Invalid Params: Multiple exclusions unsupported"
   }
 }

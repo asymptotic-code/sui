@@ -1,29 +1,42 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
-import React from "react";
-import clsx from "clsx";
-import {
-  useCurrentSidebarCategory,
-  filterDocCardListItems,
-} from "@docusaurus/theme-common";
-import DocCard from "@theme/DocCard";
-function DocCardListForCurrentSidebarCategory({ className }) {
-  const category = useCurrentSidebarCategory();
-  return <DocCardList items={category.items} className={className} />;
-}
-export default function DocCardList(props) {
-  const { items, className } = props;
-  if (!items) {
-    return <DocCardListForCurrentSidebarCategory {...props} />;
+
+
+import React from 'react';
+import DocCardList from '@theme-original/DocCardList';
+import { useCurrentSidebarCategory } from '@docusaurus/theme-common';
+
+export default function DocCardListForCurrentSidebarCategory(props) {
+  const scopeClass = 'docCardListScopeExclude';
+
+  const css = `
+    .${scopeClass} .col:has(a[href="/guides"]),
+    .${scopeClass} .col:has(a[href="/guides/"]),
+    .${scopeClass} .col:has(a[href="/concepts/"]),
+    .${scopeClass} .col:has(a[href="/concepts"]),
+    .${scopeClass} .col:has(a[href="/references/"]),
+    .${scopeClass} .col:has(a[href="/references"]),
+    .${scopeClass} .col:has(a[href="/standards/"]),
+    .${scopeClass} .col:has(a[href="/standards"])
+     {
+      display: none !important;
+    }
+  `;
+
+  try {
+    const category = useCurrentSidebarCategory();
+    return (
+      <div className={scopeClass}>
+        <style dangerouslySetInnerHTML={{ __html: css }} />
+        <DocCardList items={category.items} />
+      </div>
+    );
+  } catch {
+    return (
+      <div className={scopeClass}>
+        <style dangerouslySetInnerHTML={{ __html: css }} />
+        <DocCardList {...props} />
+      </div>
+    );
   }
-  const filteredItems = filterDocCardListItems(items);
-  return (
-    <section className={clsx("row", className)}>
-      {filteredItems.map((item, index) => (
-        <article key={index} className="col col--4 margin-bottom--sm">
-          <DocCard item={item} />
-        </article>
-      ))}
-    </section>
-  );
 }

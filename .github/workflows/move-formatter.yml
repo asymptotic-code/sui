@@ -3,7 +3,7 @@
 # changes.
 #
 # With new releases of prettier-move, update the `VERSION` in the env.
-name: Move Formatter
+name: Move Tooling
 
 on:
   push:
@@ -12,11 +12,23 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 
 env:
-  VERSION: 0.3.0
+  FORMATTER_VERSION: 0.3.5
 
 jobs:
+  tree-sitter:
+    name: Tree Sitter - run tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: external-crates/move/tooling/tree-sitter
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # pin@v6.0.2
+      - name: Install tree-sitter-cli
+        run: cargo install tree-sitter-cli
+      - run: ./run-tests.sh
+
   prettier-move:
-    name: Check Move formatting
+    name: Move Formatter - check formatting
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -30,8 +42,8 @@ jobs:
       run:
         working-directory: ${{ matrix.working-directory }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # pin@v6.0.2
       - name: Use Node.js
-        uses: actions/setup-node@v4
-      - run: npm install --no-warnings @mysten/prettier-plugin-move@${{ env.VERSION }}
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # pin@v6.2.0
+      - run: npm install --no-warnings @mysten/prettier-plugin-move@${{ env.FORMATTER_VERSION }}
       - run: npx prettier-move -c **/*.move

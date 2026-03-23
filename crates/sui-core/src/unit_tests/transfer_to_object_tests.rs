@@ -3,32 +3,32 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use sui_protocol_config::{Chain, PerObjectCongestionControlMode, ProtocolConfig, ProtocolVersion};
 use sui_types::{
     base_types::{FullObjectRef, ObjectID, ObjectRef, SequenceNumber, SuiAddress},
-    crypto::{get_key_pair, AccountKeyPair},
+    crypto::{AccountKeyPair, get_key_pair},
     digests::ObjectDigest,
     effects::{TransactionEffects, TransactionEffectsAPI},
-    error::{SuiError, UserInputError},
-    execution_status::{ExecutionFailureStatus, ExecutionStatus},
+    error::{SuiError, SuiErrorKind, UserInputError},
+    executable_transaction::VerifiedExecutableTransaction,
+    execution_status::{ExecutionErrorKind, ExecutionFailure, ExecutionStatus},
     object::{Object, Owner},
     programmable_transaction_builder::ProgrammableTransactionBuilder,
     transaction::{
-        CallArg, ObjectArg, ProgrammableTransaction, VerifiedCertificate,
+        CallArg, ObjectArg, ProgrammableTransaction, SharedObjectMutability,
         TEST_ONLY_GAS_UNIT_FOR_PUBLISH,
     },
 };
 
 use crate::{
     authority::{
-        authority_test_utils::{certify_transaction, send_consensus},
+        AuthorityState,
+        authority_test_utils::{assign_versions_and_schedule, create_executable_transaction},
         authority_tests::{
             build_programmable_transaction, execute_programmable_transaction,
             execute_programmable_transaction_with_shared,
         },
         move_integration_tests::build_and_publish_test_package_with_upgrade_cap,
         test_authority_builder::TestAuthorityBuilder,
-        AuthorityState,
     },
     move_call,
 };
@@ -80,15 +80,7 @@ impl TestRunner {
         telemetry_subscribers::init_for_testing();
         let (sender, sender_key): (_, AccountKeyPair) = get_key_pair();
 
-        let mut protocol_config =
-            ProtocolConfig::get_for_version(ProtocolVersion::max(), Chain::Unknown);
-        protocol_config.set_per_object_congestion_control_mode_for_testing(
-            PerObjectCongestionControlMode::None,
-        );
-        let authority_state = TestAuthorityBuilder::new()
-            .with_protocol_config(protocol_config)
-            .build()
-            .await;
+        let authority_state = TestAuthorityBuilder::new().build().await;
 
         let rgp = authority_state.reference_gas_price_for_testing().unwrap();
         let mut gas_object_ids = vec![];
@@ -213,11 +205,11 @@ impl TestRunner {
         self.run_with_gas_object(pt, 0).await
     }
 
-    pub async fn lock_and_verify_transaction(
+    pub async fn lock_and_create_executable(
         &mut self,
         pt: ProgrammableTransaction,
         account_id: usize,
-    ) -> VerifiedCertificate {
+    ) -> VerifiedExecutableTransaction {
         let transaction = build_programmable_transaction(
             &self.authority_state,
             &self.gas_object_ids[account_id],
@@ -228,26 +220,19 @@ impl TestRunner {
         )
         .await
         .unwrap();
-        certify_transaction(&self.authority_state, transaction)
-            .await
-            .unwrap()
+        create_executable_transaction(&self.authority_state, transaction).unwrap()
     }
 
-    pub async fn execute_certificate(
+    pub async fn execute_executable(
         &mut self,
-        ct: VerifiedCertificate,
-        shared: bool,
+        executable: VerifiedExecutableTransaction,
     ) -> TransactionEffects {
         let epoch_store = self.authority_state.load_epoch_store_one_call_per_task();
-        if shared {
-            send_consensus(&self.authority_state, &ct).await;
-        }
-        // Call `execute_certificate` instead of `execute_certificate_with_execution_error` to make sure we go through TM
+        assign_versions_and_schedule(&self.authority_state, &executable).await;
         let effects = self
             .authority_state
-            .wait_for_certificate_execution(&ct, &epoch_store)
-            .await
-            .unwrap();
+            .wait_for_transaction_execution_for_testing(&executable, &epoch_store)
+            .await;
 
         if self.aggressive_pruning_enabled {
             self.authority_state
@@ -359,7 +344,7 @@ async fn test_tto_intersection_input_and_receiving_objects() {
         let child_receiving_arg = CallArg::Object(ObjectArg::Receiving(child.0));
 
         // Duplicate object reference between receiving and input object arguments.
-        let SuiError::UserInputError { error } = runner
+        let SuiErrorKind::UserInputError { error } = runner
             .signing_error({
                 let mut builder = ProgrammableTransactionBuilder::new();
                 let parent = builder.obj(ObjectArg::ImmOrOwnedObject(parent.0)).unwrap();
@@ -372,13 +357,13 @@ async fn test_tto_intersection_input_and_receiving_objects() {
                 built.inputs.push(parent_receiving_arg);
                 built
             })
-            .await else {
+            .await.into_inner() else {
                 panic!("expected signing error");
             };
         assert!(matches!(error, UserInputError::DuplicateObjectRefInput));
 
         // Duplicate object reference in receiving object arguments.
-        let SuiError::UserInputError { error } = runner
+        let SuiErrorKind::UserInputError { error } = runner
             .signing_error({
                 let mut builder = ProgrammableTransactionBuilder::new();
                 let parent = builder.obj(ObjectArg::ImmOrOwnedObject(parent.0)).unwrap();
@@ -391,7 +376,7 @@ async fn test_tto_intersection_input_and_receiving_objects() {
                 built.inputs.push(child_receiving_arg);
                 built
             })
-            .await else {
+            .await.into_inner() else {
                 panic!("expected signing error");
             };
         assert!(matches!(error, UserInputError::DuplicateObjectRefInput));
@@ -488,7 +473,7 @@ async fn test_tto_invalid_receiving_arguments() {
         ];
 
         for (i, (mutate, expect)) in mutations.into_iter().enumerate() {
-            let SuiError::UserInputError { error } = runner.signing_error({
+            let SuiErrorKind::UserInputError { error } = runner.signing_error({
                 let mut builder = ProgrammableTransactionBuilder::new();
                 let parent = builder.obj(ObjectArg::ImmOrOwnedObject(parent.0)).unwrap();
                 let child = builder.obj(ObjectArg::Receiving(mutate(child.0))).unwrap();
@@ -498,7 +483,7 @@ async fn test_tto_invalid_receiving_arguments() {
                 };
                 builder.finish()
             })
-            .await else {
+            .await.into_inner() else {
                 panic!("failed on iteration {}", i);
             };
             assert!(
@@ -943,14 +928,14 @@ async fn verify_tto_not_locked(
     let fake_parent = effects
         .created()
         .iter()
-        .find(|(obj_ref, _)| obj_ref.0 != parent.0 .0 && obj_ref.0 != child.0 .0)
+        .find(|(obj_ref, _)| obj_ref.0 != parent.0.0 && obj_ref.0 != child.0.0)
         .cloned()
         .unwrap();
 
-    // Now get a certificate for fake_parent/child1. This will lock input objects.
+    // Now create an executable for fake_parent/child1.
     // NB: the receiving object is _not_ locked.
-    let cert_for_fake_parent = runner
-        .lock_and_verify_transaction(
+    let executable_for_fake_parent = runner
+        .lock_and_create_executable(
             {
                 let mut builder = ProgrammableTransactionBuilder::new();
                 let parent = builder
@@ -968,11 +953,11 @@ async fn verify_tto_not_locked(
         )
         .await;
 
-    // After the other (fake) transaction has been created and signed, sign and execute this
+    // After the other (fake) transaction has been created, create and execute this
     // transaction. This should have no issues because the receiving object is not locked by the
-    // signing of the transaction above.
-    let valid_cert = runner
-        .lock_and_verify_transaction(
+    // creation of the transaction above.
+    let valid_executable = runner
+        .lock_and_create_executable(
             {
                 let mut builder = ProgrammableTransactionBuilder::new();
                 let parent = builder.obj(ObjectArg::ImmOrOwnedObject(parent.0)).unwrap();
@@ -991,16 +976,12 @@ async fn verify_tto_not_locked(
     // The order of the execution of these transactions is flipped depending on the value of
     // flipper. However, the result should be the same in either case.
     let (valid_effects, invalid_effects) = if flipper {
-        let invalid_effects = runner
-            .execute_certificate(cert_for_fake_parent, false)
-            .await;
-        let valid_effects = runner.execute_certificate(valid_cert, false).await;
+        let invalid_effects = runner.execute_executable(executable_for_fake_parent).await;
+        let valid_effects = runner.execute_executable(valid_executable).await;
         (valid_effects, invalid_effects)
     } else {
-        let valid_effects = runner.execute_certificate(valid_cert, false).await;
-        let invalid_effects = runner
-            .execute_certificate(cert_for_fake_parent, false)
-            .await;
+        let valid_effects = runner.execute_executable(valid_executable).await;
+        let invalid_effects = runner.execute_executable(executable_for_fake_parent).await;
         (valid_effects, invalid_effects)
     };
 
@@ -1008,10 +989,10 @@ async fn verify_tto_not_locked(
     assert!(invalid_effects.status().is_err());
     assert!(matches!(
         invalid_effects.status(),
-        ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::MoveAbort(_, _),
+        ExecutionStatus::Failure(ExecutionFailure {
+            error: ExecutionErrorKind::MoveAbort(_, _),
             ..
-        }
+        })
     ));
     (valid_effects, invalid_effects)
 }
@@ -1619,7 +1600,7 @@ async fn test_tto_dependencies_receive_and_type_mismatch() {
         // Type mismatch is an abort code of 2 from `receive_impl`
         let is_type_mismatch_error = matches!(
             effects.status().clone().unwrap_err().0,
-            ExecutionFailureStatus::MoveAbort(x, 2) if x.function_name == Some("receive_impl".to_string())
+            ExecutionErrorKind::MoveAbort(x, 2) if x.function_name == Some("receive_impl".to_string())
         );
         assert!(is_type_mismatch_error);
         assert!(effects.created().is_empty());
@@ -1679,15 +1660,15 @@ async fn receive_and_dof_interleave() {
 
         let init_digest = effects.transaction_digest();
 
-        let cert = runner
-            .lock_and_verify_transaction(
+        let executable = runner
+            .lock_and_create_executable(
                 {
                     let mut builder = ProgrammableTransactionBuilder::new();
                     let parent = builder
                         .obj(ObjectArg::SharedObject {
                             id: shared.0 .0,
                             initial_shared_version,
-                            mutable: true,
+                            mutability: SharedObjectMutability::Mutable,
                         })
                         .unwrap();
                     let child = builder.obj(ObjectArg::Receiving(owned.0)).unwrap();
@@ -1709,7 +1690,7 @@ async fn receive_and_dof_interleave() {
                         .obj(ObjectArg::SharedObject {
                             id: shared.0 .0,
                             initial_shared_version,
-                            mutable: true,
+                            mutability: SharedObjectMutability::Mutable,
                         })
                         .unwrap();
                     let child = builder.obj(ObjectArg::ImmOrOwnedObject(owned.0)).unwrap();
@@ -1725,7 +1706,7 @@ async fn receive_and_dof_interleave() {
 
         assert!(dof_effects.status().is_ok());
 
-        let recv_effects = runner.execute_certificate(cert, true).await;
+        let recv_effects = runner.execute_executable(executable).await;
         assert!(recv_effects.status().is_ok());
         // The recv_effects should not contain the dependency on the initial transaction since we
         // didn't actually receive the object -- it was loaded via the dynamic field instead.

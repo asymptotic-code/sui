@@ -4,7 +4,7 @@ version = "0.0.0"
 authors = ["Mysten Labs <build@mystenlabs.com>"]
 license = "Apache-2.0"
 publish = false
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
@@ -24,3 +24,4 @@ fastcrypto.workspace = true
 test-fuzz.workspace = true
 sui-move-build.workspace = true
 sui-framework.workspace = true
+tokio.workspace = true

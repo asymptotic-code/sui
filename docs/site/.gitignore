@@ -11,7 +11,7 @@ open-spec
 # Generated files
 .docusaurus
 .cache-loader
-../content/documentation.json
+.generated
 
 # Misc
 .DS_Store
@@ -26,3 +26,21 @@ yarn-error.log*
 package-lock.json
 .vercel
 .env*.local
+
+# Generated awesome-sui files
+static/awesome-sui/
+src/static/awesome-sui/
+static/awesome-sui-gaming/
+src/static/awesome-sui-gaming/
+static/awesome-sui/
+
+scripts/.cache/
+
+## Subtrees
+../docs/subtree/
+
+## locally cloned display preview - should only exist during build
+static/display-preview/
+
+## shared components pulled in from ml-shared-components repo
+src/shared

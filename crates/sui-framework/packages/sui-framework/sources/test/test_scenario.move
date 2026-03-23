@@ -98,9 +98,9 @@ public struct TransactionEffects has drop {
     /// The objects deleted this transaction
     deleted: vector<ID>,
     /// The objects transferred to an account this transaction
-    transferred_to_account: VecMap<ID /* owner */, address>,
+    transferred_to_account: VecMap<ID, /* owner */ address>,
     /// The objects transferred to an object this transaction
-    transferred_to_object: VecMap<ID /* owner */, ID>,
+    transferred_to_object: VecMap<ID, /* owner */ ID>,
     /// The objects shared this transaction
     shared: vector<ID>,
     /// The objects frozen this transaction
@@ -238,6 +238,22 @@ public fun begin_with_context(ctx_builder: TxContextBuilder): Scenario {
     }
 }
 
+/// Creates and shares system objects, allowing `Random`, `Clock`, `DenyList`
+/// and other "native" objects, so they are available in the inventory.
+///
+/// NOTE: make sure to update this call when adding new system objects.
+public fun create_system_objects(scenario: &mut Scenario) {
+    let sender = scenario.ctx().sender();
+
+    // Force publishing as system - 0x0.
+    scenario.next_tx(@0x0);
+    sui::clock::create_for_testing(scenario.ctx()).share_for_testing();
+    sui::random::create_for_testing(scenario.ctx());
+    sui::deny_list::create_for_testing(scenario.ctx());
+    sui::display_registry::create_for_testing(scenario.ctx());
+    scenario.next_tx(sender);
+}
+
 /// Advance the scenario to a new transaction where `sender` is the transaction sender
 /// All objects transferred will be moved into the inventories of the account or the global
 /// inventory. In other words, in order to access an object with one of the various "take"
@@ -334,12 +350,10 @@ public fun later_epoch(
 /// Advance the scenario to a future `epoch`. Will abort if the `epoch` is in the past.
 public fun skip_to_epoch(scenario: &mut Scenario, epoch: u64) {
     assert!(epoch >= scenario.ctx.epoch());
-    (epoch - scenario.ctx.epoch()).do!(
-        |_| {
-            scenario.ctx.increment_epoch_number();
-            end_transaction()
-        },
-    )
+    (epoch - scenario.ctx.epoch()).do!(|_| {
+        scenario.ctx.increment_epoch_number();
+        end_transaction()
+    })
 }
 
 /// Ends the test scenario
@@ -582,6 +596,51 @@ public fun return_receiving_ticket<T: key>(ticket: sui::transfer::Receiving<T>) 
     let id = sui::transfer::receiving_id(&ticket);
     deallocate_receiving_ticket_for_object(id);
 }
+
+// == macros ==
+
+/// Take a shared object from the global inventory and call the function `$f` on it.
+///
+/// ```move
+/// use std::unit_test::assert_eq;
+/// use sui::test_scenario;
+///
+/// #[test]
+/// fun with_shared() {
+///     let mut test = test_scenario::begin(@0);
+///     test.create_system_objects();
+///
+///     // Take the `Clock` object from the inventory.
+///     test.with_shared!<Clock>(|clock, test| {
+///         assert_eq!(clock.timestamp_ms(), 0);
+///     });
+///
+///     test.end();
+/// }
+/// ```
+public macro fun with_shared<$T: key>($scenario: &mut Scenario, $f: |&mut $T, &mut Scenario| -> _) {
+    let s = $scenario;
+    let mut obj = s.take_shared<$T>();
+    $f(&mut obj, s);
+    return_shared(obj);
+}
+
+/// Take a shared object from the global inventory with the given `id` and call the function `$f` on it.
+/// Works similarly to `with_shared` but takes an extra `id` parameter.
+///
+/// See `with_shared` for more details.
+public macro fun with_shared_by_id<$T: key>(
+    $scenario: &mut Scenario,
+    $id: ID,
+    $f: |&mut $T, &mut Scenario| -> _,
+) {
+    let s = $scenario;
+    let mut obj = s.take_shared_by_id<$T>($id);
+    $f(&mut obj, s);
+    return_shared(obj);
+}
+
+// == natives ===
 
 /// Returns true if the object with `ID` id was an shared object in the global inventory
 native fun was_taken_shared(id: ID): bool;

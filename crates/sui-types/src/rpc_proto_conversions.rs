@@ -4,44 +4,55 @@
 //! Module for conversions from sui-core types to rpc protos
 
 use crate::crypto::SuiSignature;
+
+fn ms_to_timestamp(ms: u64) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: (ms / 1000) as _,
+        nanos: ((ms % 1000) * 1_000_000) as _,
+    }
+}
 use crate::message_envelope::Message as _;
+use fastcrypto::traits::ToFromBytes;
 use sui_rpc::field::FieldMaskTree;
 use sui_rpc::merge::Merge;
-use sui_rpc::proto::sui::rpc::v2beta2::*;
+use sui_rpc::proto::TryFromProtoError;
+use sui_rpc::proto::sui::rpc::v2::*;
 
 //
 // CheckpointSummary
 //
 
-impl From<crate::full_checkpoint_content::CheckpointData> for Checkpoint {
-    fn from(checkpoint_data: crate::full_checkpoint_content::CheckpointData) -> Self {
-        Self::merge_from(checkpoint_data, &FieldMaskTree::new_wildcard())
-    }
-}
+impl Merge<&crate::full_checkpoint_content::Checkpoint> for Checkpoint {
+    fn merge(&mut self, source: &crate::full_checkpoint_content::Checkpoint, mask: &FieldMaskTree) {
+        let sequence_number = source.summary.sequence_number;
+        let timestamp_ms = source.summary.timestamp_ms;
 
-impl Merge<crate::full_checkpoint_content::CheckpointData> for Checkpoint {
-    fn merge(
-        &mut self,
-        source: crate::full_checkpoint_content::CheckpointData,
-        mask: &FieldMaskTree,
-    ) {
-        let sequence_number = source.checkpoint_summary.sequence_number;
-        let timestamp_ms = source.checkpoint_summary.timestamp_ms;
-
-        let summary = source.checkpoint_summary.data();
-        let signature = source.checkpoint_summary.auth_sig();
+        let summary = source.summary.data();
+        let signature = source.summary.auth_sig();
 
         self.merge(summary, mask);
         self.merge(signature.clone(), mask);
 
         if mask.contains(Checkpoint::CONTENTS_FIELD.name) {
-            self.merge(&source.checkpoint_contents, mask);
+            self.merge(&source.contents, mask);
+        }
+
+        if let Some(submask) = mask
+            .subtree(Checkpoint::OBJECTS_FIELD)
+            .and_then(|submask| submask.subtree(ObjectSet::OBJECTS_FIELD))
+        {
+            let set = source
+                .object_set
+                .iter()
+                .map(|o| sui_rpc::proto::sui::rpc::v2::Object::merge_from(o, &submask))
+                .collect();
+            self.objects = Some(ObjectSet::default().with_objects(set));
         }
 
         if let Some(submask) = mask.subtree(Checkpoint::TRANSACTIONS_FIELD.name) {
             self.transactions = source
                 .transactions
-                .into_iter()
+                .iter()
                 .map(|t| {
                     let mut transaction = ExecutedTransaction::merge_from(t, &submask);
                     transaction.checkpoint = submask
@@ -57,60 +68,156 @@ impl Merge<crate::full_checkpoint_content::CheckpointData> for Checkpoint {
     }
 }
 
-impl Merge<crate::full_checkpoint_content::CheckpointTransaction> for ExecutedTransaction {
+impl Merge<&crate::full_checkpoint_content::ExecutedTransaction> for ExecutedTransaction {
     fn merge(
         &mut self,
-        source: crate::full_checkpoint_content::CheckpointTransaction,
+        source: &crate::full_checkpoint_content::ExecutedTransaction,
         mask: &FieldMaskTree,
     ) {
         if mask.contains(ExecutedTransaction::DIGEST_FIELD) {
             self.digest = Some(source.transaction.digest().to_string());
         }
 
-        let (transaction_data, signatures) = {
-            let sender_signed = source.transaction.into_data().into_inner();
-            (
-                sender_signed.intent_message.value,
-                sender_signed.tx_signatures,
-            )
-        };
-
         if let Some(submask) = mask.subtree(ExecutedTransaction::TRANSACTION_FIELD) {
-            self.transaction = Some(Transaction::merge_from(transaction_data, &submask));
+            self.transaction = Some(Transaction::merge_from(&source.transaction, &submask));
         }
 
         if let Some(submask) = mask.subtree(ExecutedTransaction::SIGNATURES_FIELD) {
-            self.signatures = signatures
-                .into_iter()
+            self.signatures = source
+                .signatures
+                .iter()
                 .map(|s| UserSignature::merge_from(s, &submask))
                 .collect();
         }
 
         if let Some(submask) = mask.subtree(ExecutedTransaction::EFFECTS_FIELD) {
-            self.effects = Some(TransactionEffects::merge_from(&source.effects, &submask));
+            let mut effects = TransactionEffects::merge_from(&source.effects, &submask);
+            if submask.contains(TransactionEffects::UNCHANGED_LOADED_RUNTIME_OBJECTS_FIELD) {
+                effects.set_unchanged_loaded_runtime_objects(
+                    source
+                        .unchanged_loaded_runtime_objects
+                        .iter()
+                        .map(Into::into)
+                        .collect(),
+                );
+            }
+            self.effects = Some(effects);
         }
 
         if let Some(submask) = mask.subtree(ExecutedTransaction::EVENTS_FIELD) {
             self.events = source
                 .events
+                .as_ref()
                 .map(|events| TransactionEvents::merge_from(events, &submask));
         }
+    }
+}
 
-        if let Some(submask) = mask.subtree(ExecutedTransaction::INPUT_OBJECTS_FIELD) {
-            self.input_objects = source
-                .input_objects
-                .into_iter()
-                .map(|o| Object::merge_from(o, &submask))
-                .collect();
-        }
+impl TryFrom<&Checkpoint> for crate::full_checkpoint_content::Checkpoint {
+    type Error = TryFromProtoError;
 
-        if let Some(submask) = mask.subtree(ExecutedTransaction::OUTPUT_OBJECTS_FIELD) {
-            self.output_objects = source
-                .output_objects
-                .into_iter()
-                .map(|o| Object::merge_from(o, &submask))
-                .collect();
-        }
+    fn try_from(checkpoint: &Checkpoint) -> Result<Self, Self::Error> {
+        let summary = checkpoint
+            .summary()
+            .bcs()
+            .deserialize()
+            .map_err(|e| TryFromProtoError::invalid("summary.bcs", e))?;
+
+        let signature =
+            crate::crypto::AuthorityStrongQuorumSignInfo::try_from(checkpoint.signature())?;
+
+        let summary = crate::messages_checkpoint::CertifiedCheckpointSummary::new_from_data_and_sig(
+            summary, signature,
+        );
+
+        let contents: crate::messages_checkpoint::CheckpointContents = checkpoint
+            .contents()
+            .bcs()
+            .deserialize()
+            .map_err(|e| TryFromProtoError::invalid("contents.bcs", e))?;
+
+        let user_signatures: Vec<_> = contents
+            .clone()
+            .into_iter_with_signatures()
+            .map(|(_, user_signatures)| user_signatures)
+            .collect();
+
+        let transactions = checkpoint
+            .transactions()
+            .iter()
+            .zip(user_signatures)
+            .map(|(tx, user_signatures)| {
+                let mut executed_tx: crate::full_checkpoint_content::ExecutedTransaction =
+                    tx.try_into()?;
+                executed_tx.signatures = user_signatures;
+                Ok(executed_tx)
+            })
+            .collect::<Result<_, TryFromProtoError>>()?;
+
+        let object_set = checkpoint.objects().try_into()?;
+
+        Ok(Self {
+            summary,
+            contents,
+            transactions,
+            object_set,
+        })
+    }
+}
+
+impl TryFrom<&ExecutedTransaction> for crate::full_checkpoint_content::ExecutedTransaction {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &ExecutedTransaction) -> Result<Self, Self::Error> {
+        Ok(Self {
+            transaction: value
+                .transaction()
+                .bcs()
+                .deserialize()
+                .map_err(|e| TryFromProtoError::invalid("transaction.bcs", e))?,
+            signatures: value
+                .signatures()
+                .iter()
+                .map(|sig| {
+                    crate::signature::GenericSignature::from_bytes(sig.bcs().value())
+                        .map_err(|e| TryFromProtoError::invalid("signature.bcs", e))
+                })
+                .collect::<Result<_, _>>()?,
+            effects: value
+                .effects()
+                .bcs()
+                .deserialize()
+                .map_err(|e| TryFromProtoError::invalid("effects.bcs", e))?,
+            events: value
+                .events_opt()
+                .map(|events| {
+                    events
+                        .bcs()
+                        .deserialize()
+                        .map_err(|e| TryFromProtoError::invalid("effects.bcs", e))
+                })
+                .transpose()?,
+            unchanged_loaded_runtime_objects: value
+                .effects()
+                .unchanged_loaded_runtime_objects()
+                .iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+impl TryFrom<&ObjectReference> for crate::storage::ObjectKey {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &ObjectReference) -> Result<Self, Self::Error> {
+        Ok(Self(
+            value
+                .object_id()
+                .parse()
+                .map_err(|e| TryFromProtoError::invalid("object_id", e))?,
+            value.version().into(),
+        ))
     }
 }
 
@@ -208,12 +315,12 @@ impl From<crate::gas::GasCostSummary> for GasCostSummary {
             non_refundable_storage_fee,
         }: crate::gas::GasCostSummary,
     ) -> Self {
-        Self {
-            computation_cost: Some(computation_cost),
-            storage_cost: Some(storage_cost),
-            storage_rebate: Some(storage_rebate),
-            non_refundable_storage_fee: Some(non_refundable_storage_fee),
-        }
+        let mut message = Self::default();
+        message.computation_cost = Some(computation_cost);
+        message.storage_cost = Some(storage_cost);
+        message.storage_rebate = Some(storage_rebate);
+        message.non_refundable_storage_fee = Some(non_refundable_storage_fee);
+        message
     }
 }
 
@@ -231,6 +338,10 @@ impl From<crate::messages_checkpoint::CheckpointCommitment> for CheckpointCommit
             crate::messages_checkpoint::CheckpointCommitment::ECMHLiveObjectSetDigest(digest) => {
                 message.digest = Some(digest.digest.to_string());
                 CheckpointCommitmentKind::EcmhLiveObjectSet
+            }
+            crate::messages_checkpoint::CheckpointCommitment::CheckpointArtifactsDigest(digest) => {
+                message.digest = Some(digest.to_string());
+                CheckpointCommitmentKind::CheckpointArtifacts
             }
         };
 
@@ -251,17 +362,21 @@ impl From<crate::messages_checkpoint::EndOfEpochData> for EndOfEpochData {
             epoch_commitments,
         }: crate::messages_checkpoint::EndOfEpochData,
     ) -> Self {
-        Self {
-            next_epoch_committee: next_epoch_committee
-                .into_iter()
-                .map(|(name, weight)| ValidatorCommitteeMember {
-                    public_key: Some(name.0.to_vec().into()),
-                    weight: Some(weight),
-                })
-                .collect(),
-            next_epoch_protocol_version: Some(next_epoch_protocol_version.as_u64()),
-            epoch_commitments: epoch_commitments.into_iter().map(Into::into).collect(),
-        }
+        let mut message = Self::default();
+
+        message.next_epoch_committee = next_epoch_committee
+            .into_iter()
+            .map(|(name, weight)| {
+                let mut member = ValidatorCommitteeMember::default();
+                member.public_key = Some(name.0.to_vec().into());
+                member.weight = Some(weight);
+                member
+            })
+            .collect();
+        message.next_epoch_protocol_version = Some(next_epoch_protocol_version.as_u64());
+        message.epoch_commitments = epoch_commitments.into_iter().map(Into::into).collect();
+
+        message
     }
 }
 
@@ -292,16 +407,32 @@ impl Merge<crate::messages_checkpoint::CheckpointContents> for CheckpointContent
         }
 
         if mask.contains(Self::VERSION_FIELD) {
-            self.version = Some(1);
+            self.set_version(match &source {
+                crate::messages_checkpoint::CheckpointContents::V1(_) => 1,
+                crate::messages_checkpoint::CheckpointContents::V2(_) => 2,
+            });
         }
 
         if mask.contains(Self::TRANSACTIONS_FIELD) {
             self.transactions = source
-                .into_iter_with_signatures()
-                .map(|(digests, sigs)| CheckpointedTransactionInfo {
-                    transaction: Some(digests.transaction.to_string()),
-                    effects: Some(digests.effects.to_string()),
-                    signatures: sigs.into_iter().map(Into::into).collect(),
+                .inner()
+                .iter()
+                .map(|(digests, sigs)| {
+                    let mut info = CheckpointedTransactionInfo::default();
+                    info.transaction = Some(digests.transaction.to_string());
+                    info.effects = Some(digests.effects.to_string());
+                    let (signatures, versions) = sigs
+                        .map(|(s, v)| {
+                            (s.into(), {
+                                let mut message = AddressAliasesVersion::default();
+                                message.version = v.map(Into::into);
+                                message
+                            })
+                        })
+                        .unzip();
+                    info.signatures = signatures;
+                    info.address_aliases_versions = versions;
+                    info
                 })
                 .collect();
         }
@@ -370,12 +501,12 @@ impl Merge<crate::messages_checkpoint::CheckpointContents> for Checkpoint {
 
 impl From<crate::event::Event> for Event {
     fn from(value: crate::event::Event) -> Self {
-        Self::merge_from(value, &FieldMaskTree::new_wildcard())
+        Self::merge_from(&value, &FieldMaskTree::new_wildcard())
     }
 }
 
-impl Merge<crate::event::Event> for Event {
-    fn merge(&mut self, source: crate::event::Event, mask: &FieldMaskTree) {
+impl Merge<&crate::event::Event> for Event {
+    fn merge(&mut self, source: &crate::event::Event, mask: &FieldMaskTree) {
         if mask.contains(Self::PACKAGE_ID_FIELD) {
             self.package_id = Some(source.package_id.to_canonical_string(true));
         }
@@ -393,10 +524,9 @@ impl Merge<crate::event::Event> for Event {
         }
 
         if mask.contains(Self::CONTENTS_FIELD) {
-            self.contents = Some(Bcs {
-                name: Some(source.type_.to_canonical_string(true)),
-                value: Some(source.contents.into()),
-            });
+            let mut bcs = Bcs::from(source.contents.clone());
+            bcs.name = Some(source.type_.to_canonical_string(true));
+            self.contents = Some(bcs);
         }
     }
 }
@@ -407,12 +537,12 @@ impl Merge<crate::event::Event> for Event {
 
 impl From<crate::effects::TransactionEvents> for TransactionEvents {
     fn from(value: crate::effects::TransactionEvents) -> Self {
-        Self::merge_from(value, &FieldMaskTree::new_wildcard())
+        Self::merge_from(&value, &FieldMaskTree::new_wildcard())
     }
 }
 
-impl Merge<crate::effects::TransactionEvents> for TransactionEvents {
-    fn merge(&mut self, source: crate::effects::TransactionEvents, mask: &FieldMaskTree) {
+impl Merge<&crate::effects::TransactionEvents> for TransactionEvents {
+    fn merge(&mut self, source: &crate::effects::TransactionEvents, mask: &FieldMaskTree) {
         if mask.contains(Self::BCS_FIELD) {
             let mut bcs = Bcs::serialize(&source).unwrap();
             bcs.name = Some("TransactionEvents".to_owned());
@@ -426,7 +556,7 @@ impl Merge<crate::effects::TransactionEvents> for TransactionEvents {
         if let Some(events_mask) = mask.subtree(Self::EVENTS_FIELD) {
             self.events = source
                 .data
-                .into_iter()
+                .iter()
                 .map(|event| Event::merge_from(event, &events_mask))
                 .collect();
         }
@@ -475,35 +605,38 @@ impl From<crate::sui_system_state::sui_system_state_inner_v1::SuiSystemStateInne
         let validator_report_records = validator_report_records
             .contents
             .into_iter()
-            .map(|entry| ValidatorReportRecord {
-                reported: Some(entry.key.to_string()),
-                reporters: entry
+            .map(|entry| {
+                let mut record = ValidatorReportRecord::default();
+                record.reported = Some(entry.key.to_string());
+                record.reporters = entry
                     .value
                     .contents
                     .iter()
                     .map(ToString::to_string)
-                    .collect(),
+                    .collect();
+                record
             })
             .collect();
 
-        Self {
-            version: Some(system_state_version),
-            epoch: Some(epoch),
-            protocol_version: Some(protocol_version),
-            validators: Some(validators.into()),
-            storage_fund: Some(storage_fund.into()),
-            parameters: Some(parameters.into()),
-            reference_gas_price: Some(reference_gas_price),
-            validator_report_records,
-            stake_subsidy: Some(stake_subsidy.into()),
-            safe_mode: Some(safe_mode),
-            safe_mode_storage_rewards: Some(safe_mode_storage_rewards.value()),
-            safe_mode_computation_rewards: Some(safe_mode_computation_rewards.value()),
-            safe_mode_storage_rebates: Some(safe_mode_storage_rebates),
-            safe_mode_non_refundable_storage_fee: Some(safe_mode_non_refundable_storage_fee),
-            epoch_start_timestamp_ms: Some(epoch_start_timestamp_ms),
-            extra_fields: Some(extra_fields.into()),
-        }
+        let mut message = Self::default();
+
+        message.version = Some(system_state_version);
+        message.epoch = Some(epoch);
+        message.protocol_version = Some(protocol_version);
+        message.validators = Some(validators.into());
+        message.storage_fund = Some(storage_fund.into());
+        message.parameters = Some(parameters.into());
+        message.reference_gas_price = Some(reference_gas_price);
+        message.validator_report_records = validator_report_records;
+        message.stake_subsidy = Some(stake_subsidy.into());
+        message.safe_mode = Some(safe_mode);
+        message.safe_mode_storage_rewards = Some(safe_mode_storage_rewards.value());
+        message.safe_mode_computation_rewards = Some(safe_mode_computation_rewards.value());
+        message.safe_mode_storage_rebates = Some(safe_mode_storage_rebates);
+        message.safe_mode_non_refundable_storage_fee = Some(safe_mode_non_refundable_storage_fee);
+        message.epoch_start_timestamp_ms = Some(epoch_start_timestamp_ms);
+        message.extra_fields = Some(extra_fields.into());
+        message
     }
 }
 
@@ -533,53 +666,56 @@ impl From<crate::sui_system_state::sui_system_state_inner_v2::SuiSystemStateInne
         let validator_report_records = validator_report_records
             .contents
             .into_iter()
-            .map(|entry| ValidatorReportRecord {
-                reported: Some(entry.key.to_string()),
-                reporters: entry
+            .map(|entry| {
+                let mut record = ValidatorReportRecord::default();
+                record.reported = Some(entry.key.to_string());
+                record.reporters = entry
                     .value
                     .contents
                     .iter()
                     .map(ToString::to_string)
-                    .collect(),
+                    .collect();
+                record
             })
             .collect();
 
-        Self {
-            version: Some(system_state_version),
-            epoch: Some(epoch),
-            protocol_version: Some(protocol_version),
-            validators: Some(validators.into()),
-            storage_fund: Some(storage_fund.into()),
-            parameters: Some(parameters.into()),
-            reference_gas_price: Some(reference_gas_price),
-            validator_report_records,
-            stake_subsidy: Some(stake_subsidy.into()),
-            safe_mode: Some(safe_mode),
-            safe_mode_storage_rewards: Some(safe_mode_storage_rewards.value()),
-            safe_mode_computation_rewards: Some(safe_mode_computation_rewards.value()),
-            safe_mode_storage_rebates: Some(safe_mode_storage_rebates),
-            safe_mode_non_refundable_storage_fee: Some(safe_mode_non_refundable_storage_fee),
-            epoch_start_timestamp_ms: Some(epoch_start_timestamp_ms),
-            extra_fields: Some(extra_fields.into()),
-        }
+        let mut message = Self::default();
+
+        message.version = Some(system_state_version);
+        message.epoch = Some(epoch);
+        message.protocol_version = Some(protocol_version);
+        message.validators = Some(validators.into());
+        message.storage_fund = Some(storage_fund.into());
+        message.parameters = Some(parameters.into());
+        message.reference_gas_price = Some(reference_gas_price);
+        message.validator_report_records = validator_report_records;
+        message.stake_subsidy = Some(stake_subsidy.into());
+        message.safe_mode = Some(safe_mode);
+        message.safe_mode_storage_rewards = Some(safe_mode_storage_rewards.value());
+        message.safe_mode_computation_rewards = Some(safe_mode_computation_rewards.value());
+        message.safe_mode_storage_rebates = Some(safe_mode_storage_rebates);
+        message.safe_mode_non_refundable_storage_fee = Some(safe_mode_non_refundable_storage_fee);
+        message.epoch_start_timestamp_ms = Some(epoch_start_timestamp_ms);
+        message.extra_fields = Some(extra_fields.into());
+        message
     }
 }
 
 impl From<crate::collection_types::Bag> for MoveTable {
     fn from(crate::collection_types::Bag { id, size }: crate::collection_types::Bag) -> Self {
-        Self {
-            id: Some(id.id.bytes.to_canonical_string(true)),
-            size: Some(size),
-        }
+        let mut message = Self::default();
+        message.id = Some(id.id.bytes.to_canonical_string(true));
+        message.size = Some(size);
+        message
     }
 }
 
 impl From<crate::collection_types::Table> for MoveTable {
     fn from(crate::collection_types::Table { id, size }: crate::collection_types::Table) -> Self {
-        Self {
-            id: Some(id.to_canonical_string(true)),
-            size: Some(size),
-        }
+        let mut message = Self::default();
+        message.id = Some(id.to_canonical_string(true));
+        message.size = Some(size);
+        message
     }
 }
 
@@ -600,14 +736,14 @@ impl From<crate::sui_system_state::sui_system_state_inner_v1::StakeSubsidyV1> fo
             extra_fields,
         }: crate::sui_system_state::sui_system_state_inner_v1::StakeSubsidyV1,
     ) -> Self {
-        Self {
-            balance: Some(balance.value()),
-            distribution_counter: Some(distribution_counter),
-            current_distribution_amount: Some(current_distribution_amount),
-            stake_subsidy_period_length: Some(stake_subsidy_period_length),
-            stake_subsidy_decrease_rate: Some(stake_subsidy_decrease_rate.into()),
-            extra_fields: Some(extra_fields.into()),
-        }
+        let mut message = Self::default();
+        message.balance = Some(balance.value());
+        message.distribution_counter = Some(distribution_counter);
+        message.current_distribution_amount = Some(current_distribution_amount);
+        message.stake_subsidy_period_length = Some(stake_subsidy_period_length);
+        message.stake_subsidy_decrease_rate = Some(stake_subsidy_decrease_rate.into());
+        message.extra_fields = Some(extra_fields.into());
+        message
     }
 }
 
@@ -626,17 +762,17 @@ impl From<crate::sui_system_state::sui_system_state_inner_v1::SystemParametersV1
             extra_fields,
         }: crate::sui_system_state::sui_system_state_inner_v1::SystemParametersV1,
     ) -> Self {
-        Self {
-            epoch_duration_ms: Some(epoch_duration_ms),
-            stake_subsidy_start_epoch: Some(stake_subsidy_start_epoch),
-            min_validator_count: None,
-            max_validator_count: Some(max_validator_count),
-            min_validator_joining_stake: Some(min_validator_joining_stake),
-            validator_low_stake_threshold: Some(validator_low_stake_threshold),
-            validator_very_low_stake_threshold: Some(validator_very_low_stake_threshold),
-            validator_low_stake_grace_period: Some(validator_low_stake_grace_period),
-            extra_fields: Some(extra_fields.into()),
-        }
+        let mut message = Self::default();
+        message.epoch_duration_ms = Some(epoch_duration_ms);
+        message.stake_subsidy_start_epoch = Some(stake_subsidy_start_epoch);
+        message.min_validator_count = None;
+        message.max_validator_count = Some(max_validator_count);
+        message.min_validator_joining_stake = Some(min_validator_joining_stake);
+        message.validator_low_stake_threshold = Some(validator_low_stake_threshold);
+        message.validator_very_low_stake_threshold = Some(validator_very_low_stake_threshold);
+        message.validator_low_stake_grace_period = Some(validator_low_stake_grace_period);
+        message.extra_fields = Some(extra_fields.into());
+        message
     }
 }
 
@@ -656,17 +792,17 @@ impl From<crate::sui_system_state::sui_system_state_inner_v2::SystemParametersV2
             extra_fields,
         }: crate::sui_system_state::sui_system_state_inner_v2::SystemParametersV2,
     ) -> Self {
-        Self {
-            epoch_duration_ms: Some(epoch_duration_ms),
-            stake_subsidy_start_epoch: Some(stake_subsidy_start_epoch),
-            min_validator_count: Some(min_validator_count),
-            max_validator_count: Some(max_validator_count),
-            min_validator_joining_stake: Some(min_validator_joining_stake),
-            validator_low_stake_threshold: Some(validator_low_stake_threshold),
-            validator_very_low_stake_threshold: Some(validator_very_low_stake_threshold),
-            validator_low_stake_grace_period: Some(validator_low_stake_grace_period),
-            extra_fields: Some(extra_fields.into()),
-        }
+        let mut message = Self::default();
+        message.epoch_duration_ms = Some(epoch_duration_ms);
+        message.stake_subsidy_start_epoch = Some(stake_subsidy_start_epoch);
+        message.min_validator_count = Some(min_validator_count);
+        message.max_validator_count = Some(max_validator_count);
+        message.min_validator_joining_stake = Some(min_validator_joining_stake);
+        message.validator_low_stake_threshold = Some(validator_low_stake_threshold);
+        message.validator_very_low_stake_threshold = Some(validator_very_low_stake_threshold);
+        message.validator_low_stake_grace_period = Some(validator_low_stake_grace_period);
+        message.extra_fields = Some(extra_fields.into());
+        message
     }
 }
 
@@ -677,10 +813,10 @@ impl From<crate::sui_system_state::sui_system_state_inner_v1::StorageFundV1> for
             non_refundable_balance,
         }: crate::sui_system_state::sui_system_state_inner_v1::StorageFundV1,
     ) -> Self {
-        Self {
-            total_object_storage_rebates: Some(total_object_storage_rebates.value()),
-            non_refundable_balance: Some(non_refundable_balance.value()),
-        }
+        let mut message = Self::default();
+        message.total_object_storage_rebates = Some(total_object_storage_rebates.value());
+        message.non_refundable_balance = Some(non_refundable_balance.value());
+        message
     }
 }
 
@@ -703,17 +839,18 @@ impl From<crate::sui_system_state::sui_system_state_inner_v1::ValidatorSetV1> fo
             .into_iter()
             .map(|entry| (entry.key.to_string(), entry.value))
             .collect();
-        Self {
-            total_stake: Some(total_stake),
-            active_validators: active_validators.into_iter().map(Into::into).collect(),
-            pending_active_validators: Some(pending_active_validators.into()),
-            pending_removals,
-            staking_pool_mappings: Some(staking_pool_mappings.into()),
-            inactive_validators: Some(inactive_validators.into()),
-            validator_candidates: Some(validator_candidates.into()),
-            at_risk_validators,
-            extra_fields: Some(extra_fields.into()),
-        }
+
+        let mut message = Self::default();
+        message.total_stake = Some(total_stake);
+        message.active_validators = active_validators.into_iter().map(Into::into).collect();
+        message.pending_active_validators = Some(pending_active_validators.into());
+        message.pending_removals = pending_removals;
+        message.staking_pool_mappings = Some(staking_pool_mappings.into());
+        message.inactive_validators = Some(inactive_validators.into());
+        message.validator_candidates = Some(validator_candidates.into());
+        message.at_risk_validators = at_risk_validators;
+        message.extra_fields = Some(extra_fields.into());
+        message
     }
 }
 
@@ -733,19 +870,19 @@ impl From<crate::sui_system_state::sui_system_state_inner_v1::StakingPoolV1> for
             extra_fields,
         }: crate::sui_system_state::sui_system_state_inner_v1::StakingPoolV1,
     ) -> Self {
-        Self {
-            id: Some(id.to_canonical_string(true)),
-            activation_epoch,
-            deactivation_epoch,
-            sui_balance: Some(sui_balance),
-            rewards_pool: Some(rewards_pool.value()),
-            pool_token_balance: Some(pool_token_balance),
-            exchange_rates: Some(exchange_rates.into()),
-            pending_stake: Some(pending_stake),
-            pending_total_sui_withdraw: Some(pending_total_sui_withdraw),
-            pending_pool_token_withdraw: Some(pending_pool_token_withdraw),
-            extra_fields: Some(extra_fields.into()),
-        }
+        let mut message = Self::default();
+        message.id = Some(id.to_canonical_string(true));
+        message.activation_epoch = activation_epoch;
+        message.deactivation_epoch = deactivation_epoch;
+        message.sui_balance = Some(sui_balance);
+        message.rewards_pool = Some(rewards_pool.value());
+        message.pool_token_balance = Some(pool_token_balance);
+        message.exchange_rates = Some(exchange_rates.into());
+        message.pending_stake = Some(pending_stake);
+        message.pending_total_sui_withdraw = Some(pending_total_sui_withdraw);
+        message.pending_pool_token_withdraw = Some(pending_pool_token_withdraw);
+        message.extra_fields = Some(extra_fields.into());
+        message
     }
 }
 
@@ -789,39 +926,208 @@ impl From<crate::sui_system_state::sui_system_state_inner_v1::ValidatorV1> for V
             ..
         }: crate::sui_system_state::sui_system_state_inner_v1::ValidatorV1,
     ) -> Self {
-        Self {
-            name: Some(name),
-            address: Some(sui_address.to_string()),
-            description: Some(description),
-            image_url: Some(image_url),
-            project_url: Some(project_url),
-            protocol_public_key: Some(protocol_pubkey_bytes.into()),
-            proof_of_possession: Some(proof_of_possession_bytes.into()),
-            network_public_key: Some(network_pubkey_bytes.into()),
-            worker_public_key: Some(worker_pubkey_bytes.into()),
-            network_address: Some(net_address),
-            p2p_address: Some(p2p_address),
-            primary_address: Some(primary_address),
-            worker_address: Some(worker_address),
-            next_epoch_protocol_public_key: next_epoch_protocol_pubkey_bytes.map(Into::into),
-            next_epoch_proof_of_possession: next_epoch_proof_of_possession.map(Into::into),
-            next_epoch_network_public_key: next_epoch_network_pubkey_bytes.map(Into::into),
-            next_epoch_worker_public_key: next_epoch_worker_pubkey_bytes.map(Into::into),
-            next_epoch_network_address: next_epoch_net_address,
-            next_epoch_p2p_address,
-            next_epoch_primary_address,
-            next_epoch_worker_address,
-            metadata_extra_fields: Some(metadata_extra_fields.into()),
-            voting_power: Some(voting_power),
-            operation_cap_id: Some(operation_cap_id.bytes.to_canonical_string(true)),
-            gas_price: Some(gas_price),
-            staking_pool: Some(staking_pool.into()),
-            commission_rate: Some(commission_rate),
-            next_epoch_stake: Some(next_epoch_stake),
-            next_epoch_gas_price: Some(next_epoch_gas_price),
-            next_epoch_commission_rate: Some(next_epoch_commission_rate),
-            extra_fields: Some(extra_fields.into()),
-        }
+        let mut message = Self::default();
+        message.name = Some(name);
+        message.address = Some(sui_address.to_string());
+        message.description = Some(description);
+        message.image_url = Some(image_url);
+        message.project_url = Some(project_url);
+        message.protocol_public_key = Some(protocol_pubkey_bytes.into());
+        message.proof_of_possession = Some(proof_of_possession_bytes.into());
+        message.network_public_key = Some(network_pubkey_bytes.into());
+        message.worker_public_key = Some(worker_pubkey_bytes.into());
+        message.network_address = Some(net_address);
+        message.p2p_address = Some(p2p_address);
+        message.primary_address = Some(primary_address);
+        message.worker_address = Some(worker_address);
+        message.next_epoch_protocol_public_key = next_epoch_protocol_pubkey_bytes.map(Into::into);
+        message.next_epoch_proof_of_possession = next_epoch_proof_of_possession.map(Into::into);
+        message.next_epoch_network_public_key = next_epoch_network_pubkey_bytes.map(Into::into);
+        message.next_epoch_worker_public_key = next_epoch_worker_pubkey_bytes.map(Into::into);
+        message.next_epoch_network_address = next_epoch_net_address;
+        message.next_epoch_p2p_address = next_epoch_p2p_address;
+        message.next_epoch_primary_address = next_epoch_primary_address;
+        message.next_epoch_worker_address = next_epoch_worker_address;
+        message.metadata_extra_fields = Some(metadata_extra_fields.into());
+        message.voting_power = Some(voting_power);
+        message.operation_cap_id = Some(operation_cap_id.bytes.to_canonical_string(true));
+        message.gas_price = Some(gas_price);
+        message.staking_pool = Some(staking_pool.into());
+        message.commission_rate = Some(commission_rate);
+        message.next_epoch_stake = Some(next_epoch_stake);
+        message.next_epoch_gas_price = Some(next_epoch_gas_price);
+        message.next_epoch_commission_rate = Some(next_epoch_commission_rate);
+        message.extra_fields = Some(extra_fields.into());
+        message
+    }
+}
+
+impl TryFrom<&SystemState>
+    for crate::sui_system_state::sui_system_state_summary::SuiSystemStateSummary
+{
+    type Error = TryFromProtoError;
+
+    fn try_from(s: &SystemState) -> Result<Self, Self::Error> {
+        Ok(Self {
+            epoch: s.epoch(),
+            protocol_version: s.protocol_version(),
+            system_state_version: s.version(),
+            storage_fund_total_object_storage_rebates: s
+                .storage_fund()
+                .total_object_storage_rebates(),
+            storage_fund_non_refundable_balance: s.storage_fund().non_refundable_balance(),
+            reference_gas_price: s.reference_gas_price(),
+            safe_mode: s.safe_mode(),
+            safe_mode_storage_rewards: s.safe_mode_storage_rewards(),
+            safe_mode_computation_rewards: s.safe_mode_computation_rewards(),
+            safe_mode_storage_rebates: s.safe_mode_storage_rebates(),
+            safe_mode_non_refundable_storage_fee: s.safe_mode_non_refundable_storage_fee(),
+            epoch_start_timestamp_ms: s.epoch_start_timestamp_ms(),
+            epoch_duration_ms: s.parameters().epoch_duration_ms(),
+            stake_subsidy_start_epoch: s.parameters().stake_subsidy_start_epoch(),
+            max_validator_count: s.parameters().max_validator_count(),
+            min_validator_joining_stake: s.parameters().min_validator_joining_stake(),
+            validator_low_stake_threshold: s.parameters().validator_low_stake_threshold(),
+            validator_very_low_stake_threshold: s.parameters().validator_very_low_stake_threshold(),
+            validator_low_stake_grace_period: s.parameters().validator_low_stake_grace_period(),
+            stake_subsidy_balance: s.stake_subsidy().balance(),
+            stake_subsidy_distribution_counter: s.stake_subsidy().distribution_counter(),
+            stake_subsidy_current_distribution_amount: s
+                .stake_subsidy()
+                .current_distribution_amount(),
+            stake_subsidy_period_length: s.stake_subsidy().stake_subsidy_period_length(),
+            stake_subsidy_decrease_rate: s.stake_subsidy().stake_subsidy_decrease_rate() as u16,
+            total_stake: s.validators().total_stake(),
+            active_validators: s
+                .validators()
+                .active_validators()
+                .iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            pending_active_validators_id: s
+                .validators()
+                .pending_active_validators()
+                .id()
+                .parse()
+                .map_err(|e| {
+                TryFromProtoError::invalid("pending_active_validators_id", e)
+            })?,
+            pending_active_validators_size: s.validators().pending_active_validators().size(),
+            pending_removals: s.validators().pending_removals().to_vec(),
+            staking_pool_mappings_id: s
+                .validators()
+                .staking_pool_mappings()
+                .id()
+                .parse()
+                .map_err(|e| TryFromProtoError::invalid("staking_pool_mappings_id", e))?,
+            staking_pool_mappings_size: s.validators().staking_pool_mappings().size(),
+            inactive_pools_id: s
+                .validators()
+                .inactive_validators()
+                .id()
+                .parse()
+                .map_err(|e| TryFromProtoError::invalid("inactive_pools_id", e))?,
+            inactive_pools_size: s.validators().inactive_validators().size(),
+            validator_candidates_id: s
+                .validators()
+                .validator_candidates()
+                .id()
+                .parse()
+                .map_err(|e| TryFromProtoError::invalid("validator_candidates", e))?,
+            validator_candidates_size: s.validators().validator_candidates().size(),
+            at_risk_validators: s
+                .validators()
+                .at_risk_validators()
+                .iter()
+                .map(|(address, epoch)| {
+                    address
+                        .parse()
+                        .map(|address| (address, *epoch))
+                        .map_err(|e| TryFromProtoError::invalid("at_risk_validators", e))
+                })
+                .collect::<Result<_, _>>()?,
+            validator_report_records: s
+                .validator_report_records()
+                .iter()
+                .map(|record| {
+                    let reported = record.reported().parse()?;
+                    let reporters = record
+                        .reporters()
+                        .iter()
+                        .map(|address| address.parse())
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok((reported, reporters))
+                })
+                .collect::<Result<_, anyhow::Error>>()
+                .map_err(|e| TryFromProtoError::invalid("validator_report_records", e))?,
+        })
+    }
+}
+
+impl TryFrom<&Validator>
+    for crate::sui_system_state::sui_system_state_summary::SuiValidatorSummary
+{
+    type Error = TryFromProtoError;
+
+    fn try_from(v: &Validator) -> Result<Self, Self::Error> {
+        Ok(Self {
+            sui_address: v
+                .address()
+                .parse()
+                .map_err(|e| TryFromProtoError::invalid("address", e))?,
+            protocol_pubkey_bytes: v.protocol_public_key().into(),
+            network_pubkey_bytes: v.network_public_key().into(),
+            worker_pubkey_bytes: v.worker_public_key().into(),
+            proof_of_possession_bytes: v.proof_of_possession().into(),
+            name: v.name().into(),
+            description: v.description().into(),
+            image_url: v.image_url().into(),
+            project_url: v.project_url().into(),
+            net_address: v.network_address().into(),
+            p2p_address: v.p2p_address().into(),
+            primary_address: v.primary_address().into(),
+            worker_address: v.worker_address().into(),
+            next_epoch_protocol_pubkey_bytes: v
+                .next_epoch_protocol_public_key_opt()
+                .map(Into::into),
+            next_epoch_proof_of_possession: v.next_epoch_proof_of_possession_opt().map(Into::into),
+            next_epoch_network_pubkey_bytes: v.next_epoch_network_public_key_opt().map(Into::into),
+            next_epoch_worker_pubkey_bytes: v.next_epoch_worker_public_key_opt().map(Into::into),
+            next_epoch_net_address: v.next_epoch_network_address_opt().map(Into::into),
+            next_epoch_p2p_address: v.next_epoch_p2p_address_opt().map(Into::into),
+            next_epoch_primary_address: v.next_epoch_primary_address_opt().map(Into::into),
+            next_epoch_worker_address: v.next_epoch_worker_address_opt().map(Into::into),
+            voting_power: v.voting_power(),
+            operation_cap_id: v
+                .operation_cap_id()
+                .parse()
+                .map_err(|e| TryFromProtoError::invalid("operation_cap_id", e))?,
+            gas_price: v.gas_price(),
+            commission_rate: v.commission_rate(),
+            next_epoch_stake: v.next_epoch_stake(),
+            next_epoch_gas_price: v.next_epoch_gas_price(),
+            next_epoch_commission_rate: v.next_epoch_commission_rate(),
+            staking_pool_id: v
+                .staking_pool()
+                .id()
+                .parse()
+                .map_err(|e| TryFromProtoError::invalid("staking_pool_id", e))?,
+            staking_pool_activation_epoch: v.staking_pool().activation_epoch_opt(),
+            staking_pool_deactivation_epoch: v.staking_pool().deactivation_epoch_opt(),
+            staking_pool_sui_balance: v.staking_pool().sui_balance(),
+            rewards_pool: v.staking_pool().rewards_pool(),
+            pool_token_balance: v.staking_pool().pool_token_balance(),
+            pending_stake: v.staking_pool().pending_stake(),
+            pending_total_sui_withdraw: v.staking_pool().pending_total_sui_withdraw(),
+            pending_pool_token_withdraw: v.staking_pool().pending_pool_token_withdraw(),
+            exchange_rates_id: v
+                .staking_pool()
+                .exchange_rates()
+                .id()
+                .parse()
+                .map_err(|e| TryFromProtoError::invalid("exchange_rates_id", e))?,
+            exchange_rates_size: v.staking_pool().exchange_rates().size(),
+        })
     }
 }
 
@@ -831,12 +1137,14 @@ impl From<crate::sui_system_state::sui_system_state_inner_v1::ValidatorV1> for V
 
 impl From<crate::execution_status::ExecutionStatus> for ExecutionStatus {
     fn from(value: crate::execution_status::ExecutionStatus) -> Self {
+        let mut message = Self::default();
         match value {
-            crate::execution_status::ExecutionStatus::Success => Self {
-                success: Some(true),
-                error: None,
-            },
-            crate::execution_status::ExecutionStatus::Failure { error, command } => {
+            crate::execution_status::ExecutionStatus::Success => {
+                message.success = Some(true);
+            }
+            crate::execution_status::ExecutionStatus::Failure(
+                crate::execution_status::ExecutionFailure { error, command },
+            ) => {
                 let description = if let Some(command) = command {
                     format!("{error:?} in command {command}")
                 } else {
@@ -845,12 +1153,13 @@ impl From<crate::execution_status::ExecutionStatus> for ExecutionStatus {
                 let mut error_message = ExecutionError::from(error);
                 error_message.command = command.map(|i| i as u64);
                 error_message.description = Some(description);
-                Self {
-                    success: Some(false),
-                    error: Some(error_message),
-                }
+
+                message.success = Some(false);
+                message.error = Some(error_message);
             }
         }
+
+        message
     }
 }
 
@@ -858,9 +1167,23 @@ impl From<crate::execution_status::ExecutionStatus> for ExecutionStatus {
 // ExecutionError
 //
 
-impl From<crate::execution_status::ExecutionFailureStatus> for ExecutionError {
-    fn from(value: crate::execution_status::ExecutionFailureStatus) -> Self {
-        use crate::execution_status::ExecutionFailureStatus as E;
+fn size_error(size: u64, max_size: u64) -> SizeError {
+    let mut message = SizeError::default();
+    message.size = Some(size);
+    message.max_size = Some(max_size);
+    message
+}
+
+fn index_error(index: u32, secondary_idx: Option<u32>) -> IndexError {
+    let mut message = IndexError::default();
+    message.index = Some(index);
+    message.subresult = secondary_idx;
+    message
+}
+
+impl From<crate::execution_status::ExecutionErrorKind> for ExecutionError {
+    fn from(value: crate::execution_status::ExecutionErrorKind) -> Self {
+        use crate::execution_status::ExecutionErrorKind as E;
         use execution_error::ErrorDetails;
         use execution_error::ExecutionErrorKind;
 
@@ -875,20 +1198,20 @@ impl From<crate::execution_status::ExecutionFailureStatus> for ExecutionError {
                 object_size,
                 max_object_size,
             } => {
-                message.error_details = Some(ErrorDetails::SizeError(SizeError {
-                    size: Some(object_size),
-                    max_size: Some(max_object_size),
-                }));
+                message.error_details = Some(ErrorDetails::SizeError(size_error(
+                    object_size,
+                    max_object_size,
+                )));
                 ExecutionErrorKind::ObjectTooBig
             }
             E::MovePackageTooBig {
                 object_size,
                 max_object_size,
             } => {
-                message.error_details = Some(ErrorDetails::SizeError(SizeError {
-                    size: Some(object_size),
-                    max_size: Some(max_object_size),
-                }));
+                message.error_details = Some(ErrorDetails::SizeError(size_error(
+                    object_size,
+                    max_object_size,
+                )));
                 ExecutionErrorKind::PackageTooBig
             }
             E::CircularObjectOwnership { object } => {
@@ -902,19 +1225,17 @@ impl From<crate::execution_status::ExecutionFailureStatus> for ExecutionError {
             E::SuiMoveVerificationError => ExecutionErrorKind::SuiMoveVerificationError,
             E::MovePrimitiveRuntimeError(location) => {
                 message.error_details = location.0.map(|l| {
-                    ErrorDetails::Abort(MoveAbort {
-                        location: Some(l.into()),
-                        ..Default::default()
-                    })
+                    let mut abort = MoveAbort::default();
+                    abort.location = Some(l.into());
+                    ErrorDetails::Abort(abort)
                 });
                 ExecutionErrorKind::MovePrimitiveRuntimeError
             }
             E::MoveAbort(location, code) => {
-                message.error_details = Some(ErrorDetails::Abort(MoveAbort {
-                    abort_code: Some(code),
-                    location: Some(location.into()),
-                    clever_error: None,
-                }));
+                let mut abort = MoveAbort::default();
+                abort.abort_code = Some(code);
+                abort.location = Some(location.into());
+                message.error_details = Some(ErrorDetails::Abort(abort));
                 ExecutionErrorKind::MoveAbort
             }
             E::VMVerificationOrDeserializationError => {
@@ -933,10 +1254,10 @@ impl From<crate::execution_status::ExecutionFailureStatus> for ExecutionError {
                 ExecutionErrorKind::CommandArgumentError
             }
             E::TypeArgumentError { argument_idx, kind } => {
-                let type_argument_error = TypeArgumentError {
-                    type_argument: Some(argument_idx.into()),
-                    kind: Some(type_argument_error::TypeArgumentErrorKind::from(kind).into()),
-                };
+                let mut type_argument_error = TypeArgumentError::default();
+                type_argument_error.type_argument = Some(argument_idx.into());
+                type_argument_error.kind =
+                    Some(type_argument_error::TypeArgumentErrorKind::from(kind).into());
                 message.error_details = Some(ErrorDetails::TypeArgumentError(type_argument_error));
                 ExecutionErrorKind::TypeArgumentError
             }
@@ -944,17 +1265,15 @@ impl From<crate::execution_status::ExecutionFailureStatus> for ExecutionError {
                 result_idx,
                 secondary_idx,
             } => {
-                message.error_details = Some(ErrorDetails::IndexError(IndexError {
-                    index: Some(result_idx.into()),
-                    subresult: Some(secondary_idx.into()),
-                }));
+                message.error_details = Some(ErrorDetails::IndexError(index_error(
+                    result_idx.into(),
+                    Some(secondary_idx.into()),
+                )));
                 ExecutionErrorKind::UnusedValueWithoutDrop
             }
             E::InvalidPublicFunctionReturnType { idx } => {
-                message.error_details = Some(ErrorDetails::IndexError(IndexError {
-                    index: Some(idx.into()),
-                    subresult: None,
-                }));
+                message.error_details =
+                    Some(ErrorDetails::IndexError(index_error(idx.into(), None)));
                 ExecutionErrorKind::InvalidPublicFunctionReturnType
             }
             E::InvalidTransferObject => ExecutionErrorKind::InvalidTransferObject,
@@ -962,10 +1281,8 @@ impl From<crate::execution_status::ExecutionFailureStatus> for ExecutionError {
                 current_size,
                 max_size,
             } => {
-                message.error_details = Some(ErrorDetails::SizeError(SizeError {
-                    size: Some(current_size),
-                    max_size: Some(max_size),
-                }));
+                message.error_details =
+                    Some(ErrorDetails::SizeError(size_error(current_size, max_size)));
                 ExecutionErrorKind::EffectsTooLarge
             }
             E::PublishUpgradeMissingDependency => {
@@ -983,41 +1300,44 @@ impl From<crate::execution_status::ExecutionFailureStatus> for ExecutionError {
                 current_size,
                 max_size,
             } => {
-                message.error_details = Some(ErrorDetails::SizeError(SizeError {
-                    size: Some(current_size),
-                    max_size: Some(max_size),
-                }));
+                message.error_details =
+                    Some(ErrorDetails::SizeError(size_error(current_size, max_size)));
 
                 ExecutionErrorKind::WrittenObjectsTooLarge
             }
             E::CertificateDenied => ExecutionErrorKind::CertificateDenied,
             E::SuiMoveVerificationTimedout => ExecutionErrorKind::SuiMoveVerificationTimedout,
             E::SharedObjectOperationNotAllowed => {
-                ExecutionErrorKind::SharedObjectOperationNotAllowed
+                ExecutionErrorKind::ConsensusObjectOperationNotAllowed
             }
             E::InputObjectDeleted => ExecutionErrorKind::InputObjectDeleted,
             E::ExecutionCancelledDueToSharedObjectCongestion { congested_objects } => {
-                message.error_details = Some(ErrorDetails::CongestedObjects(CongestedObjects {
-                    objects: congested_objects
+                message.error_details = Some(ErrorDetails::CongestedObjects({
+                    let mut message = CongestedObjects::default();
+                    message.objects = congested_objects
                         .0
                         .iter()
                         .map(|o| o.to_canonical_string(true))
-                        .collect(),
+                        .collect();
+                    message
                 }));
 
-                ExecutionErrorKind::ExecutionCanceledDueToSharedObjectCongestion
+                ExecutionErrorKind::ExecutionCanceledDueToConsensusObjectCongestion
             }
             E::AddressDeniedForCoin { address, coin_type } => {
-                message.error_details = Some(ErrorDetails::CoinDenyListError(CoinDenyListError {
-                    address: Some(address.to_string()),
-                    coin_type: Some(coin_type),
+                message.error_details = Some(ErrorDetails::CoinDenyListError({
+                    let mut message = CoinDenyListError::default();
+                    message.address = Some(address.to_string());
+                    message.coin_type = Some(coin_type);
+                    message
                 }));
                 ExecutionErrorKind::AddressDeniedForCoin
             }
             E::CoinTypeGlobalPause { coin_type } => {
-                message.error_details = Some(ErrorDetails::CoinDenyListError(CoinDenyListError {
-                    address: None,
-                    coin_type: Some(coin_type),
+                message.error_details = Some(ErrorDetails::CoinDenyListError({
+                    let mut message = CoinDenyListError::default();
+                    message.coin_type = Some(coin_type);
+                    message
                 }));
                 ExecutionErrorKind::CoinTypeGlobalPause
             }
@@ -1028,10 +1348,10 @@ impl From<crate::execution_status::ExecutionFailureStatus> for ExecutionError {
                 value_size,
                 max_scaled_size,
             } => {
-                message.error_details = Some(ErrorDetails::SizeError(SizeError {
-                    size: Some(value_size),
-                    max_size: Some(max_scaled_size),
-                }));
+                message.error_details = Some(ErrorDetails::SizeError(size_error(
+                    value_size,
+                    max_scaled_size,
+                )));
 
                 ExecutionErrorKind::MoveVectorElemTooBig
             }
@@ -1039,15 +1359,17 @@ impl From<crate::execution_status::ExecutionFailureStatus> for ExecutionError {
                 value_size,
                 max_scaled_size,
             } => {
-                message.error_details = Some(ErrorDetails::SizeError(SizeError {
-                    size: Some(value_size),
-                    max_size: Some(max_scaled_size),
-                }));
+                message.error_details = Some(ErrorDetails::SizeError(size_error(
+                    value_size,
+                    max_scaled_size,
+                )));
                 ExecutionErrorKind::MoveRawValueTooBig
             }
             E::InvalidLinkage => ExecutionErrorKind::InvalidLinkage,
-            E::InsufficientBalanceForWithdraw => {
-                todo!("Add InsufficientBalanceForWithdraw to rpc sdk")
+            E::InsufficientFundsForWithdraw => ExecutionErrorKind::InsufficientFundsForWithdraw,
+            E::NonExclusiveWriteInputObjectModified { id } => {
+                message.set_object_id(id.to_canonical_string(true));
+                ExecutionErrorKind::NonExclusiveWriteInputObjectModified
             }
         };
 
@@ -1075,27 +1397,19 @@ impl From<crate::execution_status::CommandArgumentError> for CommandArgumentErro
                 CommandArgumentErrorKind::InvalidArgumentToPrivateEntryFunction
             }
             E::IndexOutOfBounds { idx } => {
-                message.index_error = Some(IndexError {
-                    index: Some(idx.into()),
-                    subresult: None,
-                });
+                message.index_error = Some(index_error(idx.into(), None));
                 CommandArgumentErrorKind::IndexOutOfBounds
             }
             E::SecondaryIndexOutOfBounds {
                 result_idx,
                 secondary_idx,
             } => {
-                message.index_error = Some(IndexError {
-                    index: Some(result_idx.into()),
-                    subresult: Some(secondary_idx.into()),
-                });
+                message.index_error =
+                    Some(index_error(result_idx.into(), Some(secondary_idx.into())));
                 CommandArgumentErrorKind::SecondaryIndexOutOfBounds
             }
             E::InvalidResultArity { result_idx } => {
-                message.index_error = Some(IndexError {
-                    index: Some(result_idx.into()),
-                    subresult: None,
-                });
+                message.index_error = Some(index_error(result_idx.into(), None));
                 CommandArgumentErrorKind::InvalidResultArity
             }
             E::InvalidGasCoinUsage => CommandArgumentErrorKind::InvalidGasCoinUsage,
@@ -1103,17 +1417,20 @@ impl From<crate::execution_status::CommandArgumentError> for CommandArgumentErro
             E::InvalidObjectByValue => CommandArgumentErrorKind::InvalidObjectByValue,
             E::InvalidObjectByMutRef => CommandArgumentErrorKind::InvalidObjectByMutRef,
             E::SharedObjectOperationNotAllowed => {
-                CommandArgumentErrorKind::SharedObjectOperationNotAllowed
+                CommandArgumentErrorKind::ConsensusObjectOperationNotAllowed
             }
             E::InvalidArgumentArity => CommandArgumentErrorKind::InvalidArgumentArity,
 
-            //TODO
-            E::InvalidTransferObject
-            | E::InvalidMakeMoveVecNonObjectArgument
-            | E::ArgumentWithoutValue
-            | E::CannotMoveBorrowedValue
-            | E::CannotWriteToExtendedReference
-            | E::InvalidReferenceArgument => CommandArgumentErrorKind::Unknown,
+            E::InvalidTransferObject => CommandArgumentErrorKind::InvalidTransferObject,
+            E::InvalidMakeMoveVecNonObjectArgument => {
+                CommandArgumentErrorKind::InvalidMakeMoveVecNonObjectArgument
+            }
+            E::ArgumentWithoutValue => CommandArgumentErrorKind::ArgumentWithoutValue,
+            E::CannotMoveBorrowedValue => CommandArgumentErrorKind::CannotMoveBorrowedValue,
+            E::CannotWriteToExtendedReference => {
+                CommandArgumentErrorKind::CannotWriteToExtendedReference
+            }
+            E::InvalidReferenceArgument => CommandArgumentErrorKind::InvalidReferenceArgument,
         };
 
         message.set_kind(kind);
@@ -1190,13 +1507,13 @@ impl From<crate::execution_status::PackageUpgradeError> for PackageUpgradeError 
 
 impl From<crate::execution_status::MoveLocation> for MoveLocation {
     fn from(value: crate::execution_status::MoveLocation) -> Self {
-        Self {
-            package: Some(value.module.address().to_canonical_string(true)),
-            module: Some(value.module.name().to_string()),
-            function: Some(value.function.into()),
-            instruction: Some(value.instruction.into()),
-            function_name: value.function_name.map(|name| name.to_string()),
-        }
+        let mut message = Self::default();
+        message.package = Some(value.module.address().to_canonical_string(true));
+        message.module = Some(value.module.name().to_string());
+        message.function = Some(value.function.into());
+        message.instruction = Some(value.instruction.into());
+        message.function_name = value.function_name.map(|name| name.to_string());
+        message
     }
 }
 
@@ -1208,11 +1525,29 @@ impl<const T: bool> From<crate::crypto::AuthorityQuorumSignInfo<T>>
     for ValidatorAggregatedSignature
 {
     fn from(value: crate::crypto::AuthorityQuorumSignInfo<T>) -> Self {
-        Self {
-            epoch: Some(value.epoch),
-            signature: Some(value.signature.as_ref().to_vec().into()),
-            bitmap: value.signers_map.iter().collect(),
-        }
+        let mut bitmap = Vec::new();
+        value.signers_map.serialize_into(&mut bitmap).unwrap();
+
+        Self::default()
+            .with_epoch(value.epoch)
+            .with_signature(value.signature.as_ref().to_vec())
+            .with_bitmap(bitmap)
+    }
+}
+
+impl<const T: bool> TryFrom<&ValidatorAggregatedSignature>
+    for crate::crypto::AuthorityQuorumSignInfo<T>
+{
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &ValidatorAggregatedSignature) -> Result<Self, Self::Error> {
+        Ok(Self {
+            epoch: value.epoch(),
+            signature: crate::crypto::AggregateAuthoritySignature::from_bytes(value.signature())
+                .map_err(|e| TryFromProtoError::invalid("signature", e))?,
+            signers_map: crate::sui_serde::deserialize_sui_bitmap(value.bitmap())
+                .map_err(|e| TryFromProtoError::invalid("bitmap", e))?,
+        })
     }
 }
 
@@ -1222,17 +1557,37 @@ impl<const T: bool> From<crate::crypto::AuthorityQuorumSignInfo<T>>
 
 impl From<crate::committee::Committee> for ValidatorCommittee {
     fn from(value: crate::committee::Committee) -> Self {
-        Self {
-            epoch: Some(value.epoch),
-            members: value
-                .voting_rights
-                .into_iter()
-                .map(|(name, weight)| ValidatorCommitteeMember {
-                    public_key: Some(name.0.to_vec().into()),
-                    weight: Some(weight),
-                })
-                .collect(),
-        }
+        let mut message = Self::default();
+        message.epoch = Some(value.epoch);
+        message.members = value
+            .voting_rights
+            .into_iter()
+            .map(|(name, weight)| {
+                let mut member = ValidatorCommitteeMember::default();
+                member.public_key = Some(name.0.to_vec().into());
+                member.weight = Some(weight);
+                member
+            })
+            .collect();
+        message
+    }
+}
+
+impl TryFrom<&ValidatorCommittee> for crate::committee::Committee {
+    type Error = TryFromProtoError;
+
+    fn try_from(s: &ValidatorCommittee) -> Result<Self, Self::Error> {
+        let members = s
+            .members()
+            .iter()
+            .map(|member| {
+                let public_key =
+                    crate::crypto::AuthorityPublicKeyBytes::from_bytes(member.public_key())
+                        .map_err(|e| TryFromProtoError::invalid("public_key", e))?;
+                Ok((public_key, member.weight()))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self::new(s.epoch(), members))
     }
 }
 
@@ -1240,19 +1595,20 @@ impl From<crate::committee::Committee> for ValidatorCommittee {
 // ZkLoginAuthenticator
 //
 
-impl From<crate::zk_login_authenticator::ZkLoginAuthenticator> for ZkLoginAuthenticator {
-    fn from(value: crate::zk_login_authenticator::ZkLoginAuthenticator) -> Self {
-        let inputs = ZkLoginInputs {
-            proof_points: None,       // TODO expose in fastcrypto
-            iss_base64_details: None, // TODO expose in fastcrypto
-            header_base64: None,      // TODO expose in fastcrypto
-            address_seed: Some(value.inputs.get_address_seed().to_string()),
-        };
-        Self {
-            inputs: Some(inputs),
-            max_epoch: Some(value.get_max_epoch()),
-            signature: Some(value.user_signature.into()),
-        }
+impl From<&crate::zk_login_authenticator::ZkLoginAuthenticator> for ZkLoginAuthenticator {
+    fn from(value: &crate::zk_login_authenticator::ZkLoginAuthenticator) -> Self {
+        //TODO implement this without going through the sdk type
+        let mut inputs = ZkLoginInputs::default();
+        inputs.address_seed = Some(value.inputs.get_address_seed().to_string());
+        let mut message = Self::default();
+        message.inputs = Some(inputs);
+        message.max_epoch = Some(value.get_max_epoch());
+        message.signature = Some(value.user_signature.clone().into());
+
+        sui_sdk_types::ZkLoginAuthenticator::try_from(value.clone())
+            .map(Into::into)
+            .ok()
+            .unwrap_or(message)
     }
 }
 
@@ -1261,11 +1617,12 @@ impl From<crate::zk_login_authenticator::ZkLoginAuthenticator> for ZkLoginAuthen
 //
 
 impl From<&crate::crypto::ZkLoginPublicIdentifier> for ZkLoginPublicIdentifier {
-    fn from(_value: &crate::crypto::ZkLoginPublicIdentifier) -> Self {
-        Self {
-            iss: None,          // TODO expose
-            address_seed: None, // TODO expose
-        }
+    fn from(value: &crate::crypto::ZkLoginPublicIdentifier) -> Self {
+        //TODO implement this without going through the sdk type
+        sui_sdk_types::ZkLoginPublicIdentifier::try_from(value.to_owned())
+            .map(|id| (&id).into())
+            .ok()
+            .unwrap_or_default()
     }
 }
 
@@ -1295,15 +1652,21 @@ impl From<crate::crypto::SignatureScheme> for SignatureScheme {
 
 impl From<crate::crypto::Signature> for SimpleSignature {
     fn from(value: crate::crypto::Signature) -> Self {
+        Self::from(&value)
+    }
+}
+
+impl From<&crate::crypto::Signature> for SimpleSignature {
+    fn from(value: &crate::crypto::Signature) -> Self {
         let scheme: SignatureScheme = value.scheme().into();
         let signature = value.signature_bytes();
         let public_key = value.public_key_bytes();
 
-        Self {
-            scheme: Some(scheme.into()),
-            signature: Some(signature.to_vec().into()),
-            public_key: Some(public_key.to_vec().into()),
-        }
+        let mut message = Self::default();
+        message.scheme = Some(scheme.into());
+        message.signature = Some(signature.to_vec().into());
+        message.public_key = Some(public_key.to_vec().into());
+        message
     }
 }
 
@@ -1311,13 +1674,13 @@ impl From<crate::crypto::Signature> for SimpleSignature {
 // PasskeyAuthenticator
 //
 
-impl From<crate::passkey_authenticator::PasskeyAuthenticator> for PasskeyAuthenticator {
-    fn from(value: crate::passkey_authenticator::PasskeyAuthenticator) -> Self {
-        Self {
-            authenticator_data: Some(value.authenticator_data().to_vec().into()),
-            client_data_json: Some(value.client_data_json().to_owned()),
-            signature: Some(value.signature().into()),
-        }
+impl From<&crate::passkey_authenticator::PasskeyAuthenticator> for PasskeyAuthenticator {
+    fn from(value: &crate::passkey_authenticator::PasskeyAuthenticator) -> Self {
+        let mut message = Self::default();
+        message.authenticator_data = Some(value.authenticator_data().to_vec().into());
+        message.client_data_json = Some(value.client_data_json().to_owned());
+        message.signature = Some(value.signature().into());
+        message
     }
 }
 
@@ -1352,33 +1715,37 @@ impl From<&crate::crypto::PublicKey> for MultisigMemberPublicKey {
 
 impl From<&crate::multisig::MultiSigPublicKey> for MultisigCommittee {
     fn from(value: &crate::multisig::MultiSigPublicKey) -> Self {
-        Self {
-            members: value
-                .pubkeys()
-                .iter()
-                .map(|(pk, weight)| MultisigMember {
-                    public_key: Some(pk.into()),
-                    weight: Some((*weight).into()),
-                })
-                .collect(),
-            threshold: Some((*value.threshold()).into()),
-        }
+        let mut message = Self::default();
+        message.members = value
+            .pubkeys()
+            .iter()
+            .map(|(pk, weight)| {
+                let mut member = MultisigMember::default();
+                member.public_key = Some(pk.into());
+                member.weight = Some((*weight).into());
+                member
+            })
+            .collect();
+        message.threshold = Some((*value.threshold()).into());
+        message
     }
 }
 
 impl From<&crate::multisig_legacy::MultiSigPublicKeyLegacy> for MultisigCommittee {
     fn from(value: &crate::multisig_legacy::MultiSigPublicKeyLegacy) -> Self {
-        Self {
-            members: value
-                .pubkeys()
-                .iter()
-                .map(|(pk, weight)| MultisigMember {
-                    public_key: Some(pk.into()),
-                    weight: Some((*weight).into()),
-                })
-                .collect(),
-            threshold: Some((*value.threshold()).into()),
-        }
+        let mut message = Self::default();
+        message.members = value
+            .pubkeys()
+            .iter()
+            .map(|(pk, weight)| {
+                let mut member = MultisigMember::default();
+                member.public_key = Some(pk.into());
+                member.weight = Some((*weight).into());
+                member
+            })
+            .collect();
+        message.threshold = Some((*value.threshold()).into());
+        message
     }
 }
 
@@ -1424,23 +1791,26 @@ impl From<&crate::crypto::CompressedSignature> for MultisigMemberSignature {
 
 impl From<&crate::multisig_legacy::MultiSigLegacy> for MultisigAggregatedSignature {
     fn from(value: &crate::multisig_legacy::MultiSigLegacy) -> Self {
-        Self {
-            signatures: value.get_sigs().iter().map(Into::into).collect(),
-            bitmap: None,
-            legacy_bitmap: value.get_bitmap().iter().collect(),
-            committee: Some(value.get_pk().into()),
-        }
+        let mut legacy_bitmap = Vec::new();
+        value
+            .get_bitmap()
+            .serialize_into(&mut legacy_bitmap)
+            .unwrap();
+
+        Self::default()
+            .with_signatures(value.get_sigs().iter().map(Into::into).collect())
+            .with_legacy_bitmap(legacy_bitmap)
+            .with_committee(value.get_pk())
     }
 }
 
 impl From<&crate::multisig::MultiSig> for MultisigAggregatedSignature {
     fn from(value: &crate::multisig::MultiSig) -> Self {
-        Self {
-            signatures: value.get_sigs().iter().map(Into::into).collect(),
-            bitmap: Some(value.get_bitmap().into()),
-            legacy_bitmap: Default::default(),
-            committee: Some(value.get_pk().into()),
-        }
+        let mut message = Self::default();
+        message.signatures = value.get_sigs().iter().map(Into::into).collect();
+        message.bitmap = Some(value.get_bitmap().into());
+        message.committee = Some(value.get_pk().into());
+        message
     }
 }
 
@@ -1448,31 +1818,30 @@ impl From<&crate::multisig::MultiSig> for MultisigAggregatedSignature {
 // UserSignature
 //
 
-impl From<crate::signature::GenericSignature> for UserSignature {
-    fn from(value: crate::signature::GenericSignature) -> Self {
+impl From<&crate::signature::GenericSignature> for UserSignature {
+    fn from(value: &crate::signature::GenericSignature) -> Self {
         Self::merge_from(value, &FieldMaskTree::new_wildcard())
     }
 }
 
-impl Merge<crate::signature::GenericSignature> for UserSignature {
-    fn merge(&mut self, source: crate::signature::GenericSignature, mask: &FieldMaskTree) {
+impl Merge<&crate::signature::GenericSignature> for UserSignature {
+    fn merge(&mut self, source: &crate::signature::GenericSignature, mask: &FieldMaskTree) {
         use user_signature::Signature;
 
         if mask.contains(Self::BCS_FIELD) {
-            self.bcs = Some(Bcs {
-                name: Some("UserSignatureBytes".to_owned()),
-                value: Some(source.as_ref().to_vec().into()),
-            });
+            let mut bcs = Bcs::from(source.as_ref().to_vec());
+            bcs.name = Some("UserSignatureBytes".to_owned());
+            self.bcs = Some(bcs);
         }
 
         let scheme = match source {
-            crate::signature::GenericSignature::MultiSig(ref multi_sig) => {
+            crate::signature::GenericSignature::MultiSig(multi_sig) => {
                 if mask.contains(Self::MULTISIG_FIELD) {
                     self.signature = Some(Signature::Multisig(multi_sig.into()));
                 }
                 SignatureScheme::Multisig
             }
-            crate::signature::GenericSignature::MultiSigLegacy(ref multi_sig_legacy) => {
+            crate::signature::GenericSignature::MultiSigLegacy(multi_sig_legacy) => {
                 if mask.contains(Self::MULTISIG_FIELD) {
                     self.signature = Some(Signature::Multisig(multi_sig_legacy.into()));
                 }
@@ -1511,11 +1880,32 @@ impl Merge<crate::signature::GenericSignature> for UserSignature {
 
 impl From<crate::balance_change::BalanceChange> for BalanceChange {
     fn from(value: crate::balance_change::BalanceChange) -> Self {
-        Self {
-            address: Some(value.address.to_string()),
-            coin_type: Some(value.coin_type.to_canonical_string(true)),
-            amount: Some(value.amount.to_string()),
-        }
+        let mut message = Self::default();
+        message.address = Some(value.address.to_string());
+        message.coin_type = Some(value.coin_type.to_canonical_string(true));
+        message.amount = Some(value.amount.to_string());
+        message
+    }
+}
+
+impl TryFrom<&BalanceChange> for crate::balance_change::BalanceChange {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &BalanceChange) -> Result<Self, Self::Error> {
+        Ok(Self {
+            address: value
+                .address()
+                .parse()
+                .map_err(|e| TryFromProtoError::invalid(BalanceChange::ADDRESS_FIELD, e))?,
+            coin_type: value
+                .coin_type()
+                .parse()
+                .map_err(|e| TryFromProtoError::invalid(BalanceChange::COIN_TYPE_FIELD, e))?,
+            amount: value
+                .amount()
+                .parse()
+                .map_err(|e| TryFromProtoError::invalid(BalanceChange::AMOUNT_FIELD, e))?,
+        })
     }
 }
 
@@ -1527,12 +1917,12 @@ pub const PACKAGE_TYPE: &str = "package";
 
 impl From<crate::object::Object> for Object {
     fn from(value: crate::object::Object) -> Self {
-        Self::merge_from(value, &FieldMaskTree::new_wildcard())
+        Self::merge_from(&value, &FieldMaskTree::new_wildcard())
     }
 }
 
-impl Merge<crate::object::Object> for Object {
-    fn merge(&mut self, source: crate::object::Object, mask: &FieldMaskTree) {
+impl Merge<&crate::object::Object> for Object {
+    fn merge(&mut self, source: &crate::object::Object, mask: &FieldMaskTree) {
         if mask.contains(Self::BCS_FIELD.name) {
             let mut bcs = Bcs::serialize(&source).unwrap();
             bcs.name = Some("Object".to_owned());
@@ -1585,10 +1975,9 @@ impl Merge<&crate::object::MoveObject> for Object {
         }
 
         if mask.contains(Self::CONTENTS_FIELD.name) {
-            self.contents = Some(Bcs {
-                name: Some(source.type_().to_canonical_string(true)),
-                value: Some(source.contents().to_vec().into()),
-            });
+            let mut bcs = Bcs::from(source.contents().to_vec());
+            bcs.name = Some(source.type_().to_canonical_string(true));
+            self.contents = Some(bcs);
         }
     }
 }
@@ -1603,44 +1992,44 @@ impl Merge<&crate::move_package::MovePackage> for Object {
         }
 
         if mask.contains(Self::PACKAGE_FIELD.name) {
-            self.package = Some(Package {
-                modules: source
-                    .serialized_module_map()
-                    .iter()
-                    .map(|(name, contents)| Module {
-                        name: Some(name.to_string()),
-                        contents: Some(contents.clone().into()),
-                        ..Default::default()
-                    })
-                    .collect(),
-                type_origins: source
-                    .type_origin_table()
-                    .clone()
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-                linkage: source
-                    .linkage_table()
-                    .iter()
-                    .map(
-                        |(
-                            original_id,
-                            crate::move_package::UpgradeInfo {
-                                upgraded_id,
-                                upgraded_version,
-                            },
-                        )| {
-                            Linkage {
-                                original_id: Some(original_id.to_canonical_string(true)),
-                                upgraded_id: Some(upgraded_id.to_canonical_string(true)),
-                                upgraded_version: Some(upgraded_version.value()),
-                            }
+            let mut package = Package::default();
+            package.modules = source
+                .serialized_module_map()
+                .iter()
+                .map(|(name, contents)| {
+                    let mut module = Module::default();
+                    module.name = Some(name.to_string());
+                    module.contents = Some(contents.clone().into());
+                    module
+                })
+                .collect();
+            package.type_origins = source
+                .type_origin_table()
+                .clone()
+                .into_iter()
+                .map(Into::into)
+                .collect();
+            package.linkage = source
+                .linkage_table()
+                .iter()
+                .map(
+                    |(
+                        original_id,
+                        crate::move_package::UpgradeInfo {
+                            upgraded_id,
+                            upgraded_version,
                         },
-                    )
-                    .collect(),
+                    )| {
+                        let mut linkage = Linkage::default();
+                        linkage.original_id = Some(original_id.to_canonical_string(true));
+                        linkage.upgraded_id = Some(upgraded_id.to_canonical_string(true));
+                        linkage.upgraded_version = Some(upgraded_version.value());
+                        linkage
+                    },
+                )
+                .collect();
 
-                ..Default::default()
-            })
+            self.package = Some(package);
         }
     }
 }
@@ -1660,11 +2049,11 @@ impl Merge<&crate::object::Data> for Object {
 
 impl From<crate::move_package::TypeOrigin> for TypeOrigin {
     fn from(value: crate::move_package::TypeOrigin) -> Self {
-        Self {
-            module_name: Some(value.module_name.to_string()),
-            datatype_name: Some(value.datatype_name.to_string()),
-            package_id: Some(value.package.to_canonical_string(true)),
-        }
+        let mut message = Self::default();
+        message.module_name = Some(value.module_name.to_string());
+        message.datatype_name = Some(value.datatype_name.to_string());
+        message.package_id = Some(value.package.to_canonical_string(true));
+        message
     }
 }
 
@@ -1675,10 +2064,8 @@ impl From<crate::move_package::TypeOrigin> for TypeOrigin {
 impl From<crate::transaction::GenesisObject> for Object {
     fn from(value: crate::transaction::GenesisObject) -> Self {
         let crate::transaction::GenesisObject::RawObject { data, owner } = value;
-        let mut message = Self {
-            owner: Some(owner.into()),
-            ..Default::default()
-        };
+        let mut message = Self::default();
+        message.owner = Some(owner.into());
 
         message.merge(&data, &FieldMaskTree::new_wildcard());
 
@@ -1690,12 +2077,56 @@ impl From<crate::transaction::GenesisObject> for Object {
 // ObjectReference
 //
 
-fn object_ref_to_proto(value: crate::base_types::ObjectRef) -> ObjectReference {
-    let (object_id, version, digest) = value;
-    ObjectReference {
-        object_id: Some(object_id.to_canonical_string(true)),
-        version: Some(version.value()),
-        digest: Some(digest.to_string()),
+pub trait ObjectRefExt {
+    fn to_proto(self) -> ObjectReference;
+}
+
+pub trait ObjectReferenceExt {
+    fn try_to_object_ref(&self) -> Result<crate::base_types::ObjectRef, anyhow::Error>;
+}
+
+impl ObjectRefExt for crate::base_types::ObjectRef {
+    fn to_proto(self) -> ObjectReference {
+        let (object_id, version, digest) = self;
+        let mut message = ObjectReference::default();
+        message.object_id = Some(object_id.to_canonical_string(true));
+        message.version = Some(version.value());
+        message.digest = Some(digest.to_string());
+        message
+    }
+}
+
+impl ObjectReferenceExt for ObjectReference {
+    fn try_to_object_ref(&self) -> Result<crate::base_types::ObjectRef, anyhow::Error> {
+        use anyhow::Context;
+
+        let object_id = self
+            .object_id_opt()
+            .ok_or_else(|| anyhow::anyhow!("missing object_id"))?;
+        let object_id = crate::base_types::ObjectID::from_hex_literal(object_id)
+            .with_context(|| format!("Failed to parse object_id: {}", object_id))?;
+
+        let version = self
+            .version_opt()
+            .ok_or_else(|| anyhow::anyhow!("missing version"))?;
+        let version = crate::base_types::SequenceNumber::from(version);
+
+        let digest = self
+            .digest_opt()
+            .ok_or_else(|| anyhow::anyhow!("missing digest"))?;
+        let digest = digest
+            .parse::<crate::digests::ObjectDigest>()
+            .with_context(|| format!("Failed to parse digest: {}", digest))?;
+
+        Ok((object_id, version, digest))
+    }
+}
+
+impl From<&crate::storage::ObjectKey> for ObjectReference {
+    fn from(value: &crate::storage::ObjectKey) -> Self {
+        Self::default()
+            .with_object_id(value.0.to_canonical_string(true))
+            .with_version(value.1.value())
     }
 }
 
@@ -1747,12 +2178,12 @@ impl From<crate::object::Owner> for Owner {
 
 impl From<crate::transaction::TransactionData> for Transaction {
     fn from(value: crate::transaction::TransactionData) -> Self {
-        Self::merge_from(value, &FieldMaskTree::new_wildcard())
+        Self::merge_from(&value, &FieldMaskTree::new_wildcard())
     }
 }
 
-impl Merge<crate::transaction::TransactionData> for Transaction {
-    fn merge(&mut self, source: crate::transaction::TransactionData, mask: &FieldMaskTree) {
+impl Merge<&crate::transaction::TransactionData> for Transaction {
+    fn merge(&mut self, source: &crate::transaction::TransactionData, mask: &FieldMaskTree) {
         if mask.contains(Self::BCS_FIELD.name) {
             let mut bcs = Bcs::serialize(&source).unwrap();
             bcs.name = Some("TransactionData".to_owned());
@@ -1770,7 +2201,7 @@ impl Merge<crate::transaction::TransactionData> for Transaction {
         let crate::transaction::TransactionData::V1(source) = source;
 
         if mask.contains(Self::KIND_FIELD.name) {
-            self.kind = Some(source.kind.into());
+            self.kind = Some(source.kind.clone().into());
         }
 
         if mask.contains(Self::SENDER_FIELD.name) {
@@ -1778,7 +2209,7 @@ impl Merge<crate::transaction::TransactionData> for Transaction {
         }
 
         if mask.contains(Self::GAS_PAYMENT_FIELD.name) {
-            self.gas_payment = Some(source.gas_data.into());
+            self.gas_payment = Some((&source.gas_data).into());
         }
 
         if mask.contains(Self::EXPIRATION_FIELD.name) {
@@ -1791,14 +2222,18 @@ impl Merge<crate::transaction::TransactionData> for Transaction {
 // GasPayment
 //
 
-impl From<crate::transaction::GasData> for GasPayment {
-    fn from(value: crate::transaction::GasData) -> Self {
-        Self {
-            objects: value.payment.into_iter().map(object_ref_to_proto).collect(),
-            owner: Some(value.owner.to_string()),
-            price: Some(value.price),
-            budget: Some(value.budget),
-        }
+impl From<&crate::transaction::GasData> for GasPayment {
+    fn from(value: &crate::transaction::GasData) -> Self {
+        let mut message = Self::default();
+        message.objects = value
+            .payment
+            .iter()
+            .map(|obj_ref| obj_ref.to_proto())
+            .collect();
+        message.owner = Some(value.owner.to_string());
+        message.price = Some(value.price);
+        message.budget = Some(value.budget);
+        message
     }
 }
 
@@ -1819,6 +2254,23 @@ impl From<crate::transaction::TransactionExpiration> for TransactionExpiration {
                 message.epoch = Some(epoch);
                 TransactionExpirationKind::Epoch
             }
+            E::ValidDuring {
+                min_epoch,
+                max_epoch,
+                min_timestamp,
+                max_timestamp,
+                chain,
+                nonce,
+            } => {
+                message.epoch = max_epoch;
+                message.min_epoch = min_epoch;
+                message.min_timestamp = min_timestamp.map(ms_to_timestamp);
+                message.max_timestamp = max_timestamp.map(ms_to_timestamp);
+                message.set_chain(sui_sdk_types::Digest::new(*chain.as_bytes()));
+                message.set_nonce(nonce);
+
+                TransactionExpirationKind::ValidDuring
+            }
         };
 
         message.set_kind(kind);
@@ -1833,9 +2285,11 @@ impl TryFrom<&TransactionExpiration> for crate::transaction::TransactionExpirati
         use transaction_expiration::TransactionExpirationKind;
 
         Ok(match value.kind() {
-            TransactionExpirationKind::Unknown => return Err("unknown TransactionExpirationKind"),
             TransactionExpirationKind::None => Self::None,
             TransactionExpirationKind::Epoch => Self::Epoch(value.epoch()),
+            TransactionExpirationKind::Unknown | _ => {
+                return Err("unknown TransactionExpirationKind");
+            }
         })
     }
 }
@@ -1849,33 +2303,44 @@ impl From<crate::transaction::TransactionKind> for TransactionKind {
         use crate::transaction::TransactionKind as K;
         use transaction_kind::Kind;
 
-        let kind = match value {
-            K::ProgrammableTransaction(ptb) => Kind::ProgrammableTransaction(ptb.into()),
-            K::ProgrammableSystemTransaction(ptb) => {
-                Kind::ProgrammableSystemTransaction(ptb.into())
-            }
-            K::ChangeEpoch(change_epoch) => Kind::ChangeEpoch(change_epoch.into()),
-            K::Genesis(genesis) => Kind::Genesis(genesis.into()),
-            K::ConsensusCommitPrologue(prologue) => {
-                Kind::ConsensusCommitPrologueV1(prologue.into())
-            }
-            K::AuthenticatorStateUpdate(update) => Kind::AuthenticatorStateUpdate(update.into()),
-            K::EndOfEpochTransaction(transactions) => Kind::EndOfEpoch(EndOfEpochTransaction {
-                transactions: transactions.into_iter().map(Into::into).collect(),
-            }),
-            K::RandomnessStateUpdate(update) => Kind::RandomnessStateUpdate(update.into()),
-            K::ConsensusCommitPrologueV2(prologue) => {
-                Kind::ConsensusCommitPrologueV2(prologue.into())
-            }
-            K::ConsensusCommitPrologueV3(prologue) => {
-                Kind::ConsensusCommitPrologueV3(prologue.into())
-            }
-            K::ConsensusCommitPrologueV4(prologue) => {
-                Kind::ConsensusCommitPrologueV4(prologue.into())
-            }
-        };
+        let message = Self::default();
 
-        Self { kind: Some(kind) }
+        match value {
+            K::ProgrammableTransaction(ptb) => message
+                .with_programmable_transaction(ptb)
+                .with_kind(Kind::ProgrammableTransaction),
+            K::ChangeEpoch(change_epoch) => message
+                .with_change_epoch(change_epoch)
+                .with_kind(Kind::ChangeEpoch),
+            K::Genesis(genesis) => message.with_genesis(genesis).with_kind(Kind::Genesis),
+            K::ConsensusCommitPrologue(prologue) => message
+                .with_consensus_commit_prologue(prologue)
+                .with_kind(Kind::ConsensusCommitPrologueV1),
+            K::AuthenticatorStateUpdate(update) => message
+                .with_authenticator_state_update(update)
+                .with_kind(Kind::AuthenticatorStateUpdate),
+            K::EndOfEpochTransaction(transactions) => message
+                .with_end_of_epoch({
+                    EndOfEpochTransaction::default()
+                        .with_transactions(transactions.into_iter().map(Into::into).collect())
+                })
+                .with_kind(Kind::EndOfEpoch),
+            K::RandomnessStateUpdate(update) => message
+                .with_randomness_state_update(update)
+                .with_kind(Kind::RandomnessStateUpdate),
+            K::ConsensusCommitPrologueV2(prologue) => message
+                .with_consensus_commit_prologue(prologue)
+                .with_kind(Kind::ConsensusCommitPrologueV2),
+            K::ConsensusCommitPrologueV3(prologue) => message
+                .with_consensus_commit_prologue(prologue)
+                .with_kind(Kind::ConsensusCommitPrologueV3),
+            K::ConsensusCommitPrologueV4(prologue) => message
+                .with_consensus_commit_prologue(prologue)
+                .with_kind(Kind::ConsensusCommitPrologueV4),
+            K::ProgrammableSystemTransaction(ptb) => message
+                .with_programmable_transaction(ptb)
+                .with_kind(Kind::ProgrammableSystemTransaction),
+        }
     }
 }
 
@@ -1885,51 +2350,42 @@ impl From<crate::transaction::TransactionKind> for TransactionKind {
 
 impl From<crate::messages_consensus::ConsensusCommitPrologue> for ConsensusCommitPrologue {
     fn from(value: crate::messages_consensus::ConsensusCommitPrologue) -> Self {
-        Self {
-            epoch: Some(value.epoch),
-            round: Some(value.round),
-            commit_timestamp: Some(sui_rpc::proto::timestamp_ms_to_proto(
-                value.commit_timestamp_ms,
-            )),
-            consensus_commit_digest: None,
-            sub_dag_index: None,
-            consensus_determined_version_assignments: None,
-            additional_state_digest: None,
-        }
+        let mut message = Self::default();
+        message.epoch = Some(value.epoch);
+        message.round = Some(value.round);
+        message.commit_timestamp = Some(sui_rpc::proto::timestamp_ms_to_proto(
+            value.commit_timestamp_ms,
+        ));
+        message
     }
 }
 
 impl From<crate::messages_consensus::ConsensusCommitPrologueV2> for ConsensusCommitPrologue {
     fn from(value: crate::messages_consensus::ConsensusCommitPrologueV2) -> Self {
-        Self {
-            epoch: Some(value.epoch),
-            round: Some(value.round),
-            commit_timestamp: Some(sui_rpc::proto::timestamp_ms_to_proto(
-                value.commit_timestamp_ms,
-            )),
-            consensus_commit_digest: Some(value.consensus_commit_digest.to_string()),
-            sub_dag_index: None,
-            consensus_determined_version_assignments: None,
-            additional_state_digest: None,
-        }
+        let mut message = Self::default();
+        message.epoch = Some(value.epoch);
+        message.round = Some(value.round);
+        message.commit_timestamp = Some(sui_rpc::proto::timestamp_ms_to_proto(
+            value.commit_timestamp_ms,
+        ));
+        message.consensus_commit_digest = Some(value.consensus_commit_digest.to_string());
+        message
     }
 }
 
 impl From<crate::messages_consensus::ConsensusCommitPrologueV3> for ConsensusCommitPrologue {
     fn from(value: crate::messages_consensus::ConsensusCommitPrologueV3) -> Self {
-        Self {
-            epoch: Some(value.epoch),
-            round: Some(value.round),
-            commit_timestamp: Some(sui_rpc::proto::timestamp_ms_to_proto(
-                value.commit_timestamp_ms,
-            )),
-            consensus_commit_digest: Some(value.consensus_commit_digest.to_string()),
-            sub_dag_index: value.sub_dag_index,
-            consensus_determined_version_assignments: Some(
-                value.consensus_determined_version_assignments.into(),
-            ),
-            additional_state_digest: None,
-        }
+        let mut message = Self::default();
+        message.epoch = Some(value.epoch);
+        message.round = Some(value.round);
+        message.commit_timestamp = Some(sui_rpc::proto::timestamp_ms_to_proto(
+            value.commit_timestamp_ms,
+        ));
+        message.consensus_commit_digest = Some(value.consensus_commit_digest.to_string());
+        message.sub_dag_index = value.sub_dag_index;
+        message.consensus_determined_version_assignments =
+            Some(value.consensus_determined_version_assignments.into());
+        message
     }
 }
 
@@ -1945,17 +2401,16 @@ impl From<crate::messages_consensus::ConsensusCommitPrologueV4> for ConsensusCom
             additional_state_digest,
         }: crate::messages_consensus::ConsensusCommitPrologueV4,
     ) -> Self {
-        Self {
-            epoch: Some(epoch),
-            round: Some(round),
-            commit_timestamp: Some(sui_rpc::proto::timestamp_ms_to_proto(commit_timestamp_ms)),
-            consensus_commit_digest: Some(consensus_commit_digest.to_string()),
-            sub_dag_index,
-            consensus_determined_version_assignments: Some(
-                consensus_determined_version_assignments.into(),
-            ),
-            additional_state_digest: Some(additional_state_digest.to_string()),
-        }
+        let mut message = Self::default();
+        message.epoch = Some(epoch);
+        message.round = Some(round);
+        message.commit_timestamp = Some(sui_rpc::proto::timestamp_ms_to_proto(commit_timestamp_ms));
+        message.consensus_commit_digest = Some(consensus_commit_digest.to_string());
+        message.sub_dag_index = sub_dag_index;
+        message.consensus_determined_version_assignments =
+            Some(consensus_determined_version_assignments.into());
+        message.additional_state_digest = Some(additional_state_digest.to_string());
+        message
     }
 }
 
@@ -1975,16 +2430,19 @@ impl From<crate::messages_consensus::ConsensusDeterminedVersionAssignments>
             A::CancelledTransactions(canceled_transactions) => {
                 message.canceled_transactions = canceled_transactions
                     .into_iter()
-                    .map(|(tx_digest, assignments)| CanceledTransaction {
-                        digest: Some(tx_digest.to_string()),
-                        version_assignments: assignments
+                    .map(|(tx_digest, assignments)| {
+                        let mut message = CanceledTransaction::default();
+                        message.digest = Some(tx_digest.to_string());
+                        message.version_assignments = assignments
                             .into_iter()
-                            .map(|(id, version)| VersionAssignment {
-                                object_id: Some(id.to_canonical_string(true)),
-                                start_version: None,
-                                version: Some(version.value()),
+                            .map(|(id, version)| {
+                                let mut message = VersionAssignment::default();
+                                message.object_id = Some(id.to_canonical_string(true));
+                                message.version = Some(version.value());
+                                message
                             })
-                            .collect(),
+                            .collect();
+                        message
                     })
                     .collect();
                 1
@@ -1992,16 +2450,20 @@ impl From<crate::messages_consensus::ConsensusDeterminedVersionAssignments>
             A::CancelledTransactionsV2(canceled_transactions) => {
                 message.canceled_transactions = canceled_transactions
                     .into_iter()
-                    .map(|(tx_digest, assignments)| CanceledTransaction {
-                        digest: Some(tx_digest.to_string()),
-                        version_assignments: assignments
+                    .map(|(tx_digest, assignments)| {
+                        let mut message = CanceledTransaction::default();
+                        message.digest = Some(tx_digest.to_string());
+                        message.version_assignments = assignments
                             .into_iter()
-                            .map(|((id, start_version), version)| VersionAssignment {
-                                object_id: Some(id.to_canonical_string(true)),
-                                start_version: Some(start_version.value()),
-                                version: Some(version.value()),
+                            .map(|((id, start_version), version)| {
+                                let mut message = VersionAssignment::default();
+                                message.object_id = Some(id.to_canonical_string(true));
+                                message.start_version = Some(start_version.value());
+                                message.version = Some(version.value());
+                                message
                             })
-                            .collect(),
+                            .collect();
+                        message
                     })
                     .collect();
                 2
@@ -2019,9 +2481,9 @@ impl From<crate::messages_consensus::ConsensusDeterminedVersionAssignments>
 
 impl From<crate::transaction::GenesisTransaction> for GenesisTransaction {
     fn from(value: crate::transaction::GenesisTransaction) -> Self {
-        Self {
-            objects: value.objects.into_iter().map(Into::into).collect(),
-        }
+        let mut message = Self::default();
+        message.objects = value.objects.into_iter().map(Into::into).collect();
+        message
     }
 }
 
@@ -2031,14 +2493,13 @@ impl From<crate::transaction::GenesisTransaction> for GenesisTransaction {
 
 impl From<crate::transaction::RandomnessStateUpdate> for RandomnessStateUpdate {
     fn from(value: crate::transaction::RandomnessStateUpdate) -> Self {
-        Self {
-            epoch: Some(value.epoch),
-            randomness_round: Some(value.randomness_round.0),
-            random_bytes: Some(value.random_bytes.into()),
-            randomness_object_initial_shared_version: Some(
-                value.randomness_obj_initial_shared_version.value(),
-            ),
-        }
+        let mut message = Self::default();
+        message.epoch = Some(value.epoch);
+        message.randomness_round = Some(value.randomness_round.0);
+        message.random_bytes = Some(value.random_bytes.into());
+        message.randomness_object_initial_shared_version =
+            Some(value.randomness_obj_initial_shared_version.value());
+        message
     }
 }
 
@@ -2048,14 +2509,13 @@ impl From<crate::transaction::RandomnessStateUpdate> for RandomnessStateUpdate {
 
 impl From<crate::transaction::AuthenticatorStateUpdate> for AuthenticatorStateUpdate {
     fn from(value: crate::transaction::AuthenticatorStateUpdate) -> Self {
-        Self {
-            epoch: Some(value.epoch),
-            round: Some(value.round),
-            new_active_jwks: value.new_active_jwks.into_iter().map(Into::into).collect(),
-            authenticator_object_initial_shared_version: Some(
-                value.authenticator_obj_initial_shared_version.value(),
-            ),
-        }
+        let mut message = Self::default();
+        message.epoch = Some(value.epoch);
+        message.round = Some(value.round);
+        message.new_active_jwks = value.new_active_jwks.into_iter().map(Into::into).collect();
+        message.authenticator_object_initial_shared_version =
+            Some(value.authenticator_obj_initial_shared_version.value());
+        message
     }
 }
 
@@ -2065,19 +2525,21 @@ impl From<crate::transaction::AuthenticatorStateUpdate> for AuthenticatorStateUp
 
 impl From<crate::authenticator_state::ActiveJwk> for ActiveJwk {
     fn from(value: crate::authenticator_state::ActiveJwk) -> Self {
-        Self {
-            id: Some(JwkId {
-                iss: Some(value.jwk_id.iss),
-                kid: Some(value.jwk_id.kid),
-            }),
-            jwk: Some(Jwk {
-                kty: Some(value.jwk.kty),
-                e: Some(value.jwk.e),
-                n: Some(value.jwk.n),
-                alg: Some(value.jwk.alg),
-            }),
-            epoch: Some(value.epoch),
-        }
+        let mut jwk_id = JwkId::default();
+        jwk_id.iss = Some(value.jwk_id.iss);
+        jwk_id.kid = Some(value.jwk_id.kid);
+
+        let mut jwk = Jwk::default();
+        jwk.kty = Some(value.jwk.kty);
+        jwk.e = Some(value.jwk.e);
+        jwk.n = Some(value.jwk.n);
+        jwk.alg = Some(value.jwk.alg);
+
+        let mut message = Self::default();
+        message.id = Some(jwk_id);
+        message.jwk = Some(jwk);
+        message.epoch = Some(value.epoch);
+        message
     }
 }
 
@@ -2087,29 +2549,31 @@ impl From<crate::authenticator_state::ActiveJwk> for ActiveJwk {
 
 impl From<crate::transaction::ChangeEpoch> for ChangeEpoch {
     fn from(value: crate::transaction::ChangeEpoch) -> Self {
-        Self {
-            epoch: Some(value.epoch),
-            protocol_version: Some(value.protocol_version.as_u64()),
-            storage_charge: Some(value.storage_charge),
-            computation_charge: Some(value.computation_charge),
-            storage_rebate: Some(value.storage_rebate),
-            non_refundable_storage_fee: Some(value.non_refundable_storage_fee),
-            epoch_start_timestamp: Some(sui_rpc::proto::timestamp_ms_to_proto(
-                value.epoch_start_timestamp_ms,
-            )),
-            system_packages: value
-                .system_packages
-                .into_iter()
-                .map(|(version, modules, dependencies)| SystemPackage {
-                    version: Some(version.value()),
-                    modules: modules.into_iter().map(Into::into).collect(),
-                    dependencies: dependencies
-                        .iter()
-                        .map(|d| d.to_canonical_string(true))
-                        .collect(),
-                })
-                .collect(),
-        }
+        let mut message = Self::default();
+        message.epoch = Some(value.epoch);
+        message.protocol_version = Some(value.protocol_version.as_u64());
+        message.storage_charge = Some(value.storage_charge);
+        message.computation_charge = Some(value.computation_charge);
+        message.storage_rebate = Some(value.storage_rebate);
+        message.non_refundable_storage_fee = Some(value.non_refundable_storage_fee);
+        message.epoch_start_timestamp = Some(sui_rpc::proto::timestamp_ms_to_proto(
+            value.epoch_start_timestamp_ms,
+        ));
+        message.system_packages = value
+            .system_packages
+            .into_iter()
+            .map(|(version, modules, dependencies)| {
+                let mut message = SystemPackage::default();
+                message.version = Some(version.value());
+                message.modules = modules.into_iter().map(Into::into).collect();
+                message.dependencies = dependencies
+                    .iter()
+                    .map(|d| d.to_canonical_string(true))
+                    .collect();
+                message
+            })
+            .collect();
+        message
     }
 }
 
@@ -2122,24 +2586,35 @@ impl From<crate::transaction::EndOfEpochTransactionKind> for EndOfEpochTransacti
         use crate::transaction::EndOfEpochTransactionKind as K;
         use end_of_epoch_transaction_kind::Kind;
 
-        let kind = match value {
-            K::ChangeEpoch(change_epoch) => Kind::ChangeEpoch(change_epoch.into()),
-            K::AuthenticatorStateCreate => Kind::AuthenticatorStateCreate(()),
-            K::AuthenticatorStateExpire(expire) => Kind::AuthenticatorStateExpire(expire.into()),
-            K::RandomnessStateCreate => Kind::RandomnessStateCreate(()),
-            K::DenyListStateCreate => Kind::DenyListStateCreate(()),
-            K::BridgeStateCreate(chain_id) => Kind::BridgeStateCreate(chain_id.to_string()),
-            K::BridgeCommitteeInit(bridge_object_version) => {
-                Kind::BridgeCommitteeInit(bridge_object_version.value())
-            }
-            K::StoreExecutionTimeObservations(observations) => {
-                Kind::ExecutionTimeObservations(observations.into())
-            }
-            K::AccumulatorRootCreate => Kind::AccumulatorRootCreate(()),
-            // K::CoinRegistryCreate => Kind::CoinRegistryCreate(()),
-        };
+        let message = Self::default();
 
-        Self { kind: Some(kind) }
+        match value {
+            K::ChangeEpoch(change_epoch) => message
+                .with_change_epoch(change_epoch)
+                .with_kind(Kind::ChangeEpoch),
+            K::AuthenticatorStateCreate => message.with_kind(Kind::AuthenticatorStateCreate),
+            K::AuthenticatorStateExpire(expire) => message
+                .with_authenticator_state_expire(expire)
+                .with_kind(Kind::AuthenticatorStateExpire),
+            K::RandomnessStateCreate => message.with_kind(Kind::RandomnessStateCreate),
+            K::DenyListStateCreate => message.with_kind(Kind::DenyListStateCreate),
+            K::BridgeStateCreate(chain_id) => message
+                .with_bridge_chain_id(chain_id.to_string())
+                .with_kind(Kind::BridgeStateCreate),
+            K::BridgeCommitteeInit(bridge_object_version) => message
+                .with_bridge_object_version(bridge_object_version.into())
+                .with_kind(Kind::BridgeCommitteeInit),
+            K::StoreExecutionTimeObservations(observations) => message
+                .with_execution_time_observations(observations)
+                .with_kind(Kind::StoreExecutionTimeObservations),
+            K::AccumulatorRootCreate => message.with_kind(Kind::AccumulatorRootCreate),
+            K::CoinRegistryCreate => message.with_kind(Kind::CoinRegistryCreate),
+            K::DisplayRegistryCreate => message.with_kind(Kind::DisplayRegistryCreate),
+            K::AddressAliasStateCreate => message.with_kind(Kind::AddressAliasStateCreate),
+            K::WriteAccumulatorStorageCost(storage_cost) => message
+                .with_kind(Kind::WriteAccumulatorStorageCost)
+                .with_storage_cost(storage_cost.storage_cost),
+        }
     }
 }
 
@@ -2149,12 +2624,11 @@ impl From<crate::transaction::EndOfEpochTransactionKind> for EndOfEpochTransacti
 
 impl From<crate::transaction::AuthenticatorStateExpire> for AuthenticatorStateExpire {
     fn from(value: crate::transaction::AuthenticatorStateExpire) -> Self {
-        Self {
-            min_epoch: Some(value.min_epoch),
-            authenticator_object_initial_shared_version: Some(
-                value.authenticator_obj_initial_shared_version.value(),
-            ),
-        }
+        let mut message = Self::default();
+        message.min_epoch = Some(value.min_epoch);
+        message.authenticator_object_initial_shared_version =
+            Some(value.authenticator_obj_initial_shared_version.value());
+        message
     }
 }
 
@@ -2162,10 +2636,11 @@ impl From<crate::transaction::AuthenticatorStateExpire> for AuthenticatorStateEx
 
 impl From<crate::transaction::StoredExecutionTimeObservations> for ExecutionTimeObservations {
     fn from(value: crate::transaction::StoredExecutionTimeObservations) -> Self {
+        let mut message = Self::default();
         match value {
-            crate::transaction::StoredExecutionTimeObservations::V1(vec) => Self {
-                version: Some(1),
-                observations: vec
+            crate::transaction::StoredExecutionTimeObservations::V1(vec) => {
+                message.version = Some(1);
+                message.observations = vec
                     .into_iter()
                     .map(|(key, observation)| {
                         use crate::execution::ExecutionTimeObservationKey as K;
@@ -2180,15 +2655,16 @@ impl From<crate::transaction::StoredExecutionTimeObservations> for ExecutionTime
                                 function,
                                 type_arguments,
                             } => {
-                                message.move_entry_point = Some(MoveCall {
-                                    package: Some(package.to_canonical_string(true)),
-                                    module: Some(module),
-                                    function: Some(function),
-                                    type_arguments: type_arguments
+                                message.move_entry_point = Some({
+                                    let mut message = MoveCall::default();
+                                    message.package = Some(package.to_canonical_string(true));
+                                    message.module = Some(module);
+                                    message.function = Some(function);
+                                    message.type_arguments = type_arguments
                                         .into_iter()
                                         .map(|ty| ty.to_canonical_string(true))
-                                        .collect(),
-                                    arguments: Vec::new(),
+                                        .collect();
+                                    message
                                 });
                                 ExecutionTimeObservationKind::MoveEntryPoint
                             }
@@ -2202,21 +2678,25 @@ impl From<crate::transaction::StoredExecutionTimeObservations> for ExecutionTime
 
                         message.validator_observations = observation
                             .into_iter()
-                            .map(|(name, duration)| ValidatorExecutionTimeObservation {
-                                validator: Some(name.0.to_vec().into()),
-                                duration: Some(prost_types::Duration {
+                            .map(|(name, duration)| {
+                                let mut message = ValidatorExecutionTimeObservation::default();
+                                message.validator = Some(name.0.to_vec().into());
+                                message.duration = Some(prost_types::Duration {
                                     seconds: duration.as_secs() as i64,
                                     nanos: duration.subsec_nanos() as i32,
-                                }),
+                                });
+                                message
                             })
                             .collect();
 
                         message.set_kind(kind);
                         message
                     })
-                    .collect(),
-            },
+                    .collect();
+            }
         }
+
+        message
     }
 }
 
@@ -2226,10 +2706,10 @@ impl From<crate::transaction::StoredExecutionTimeObservations> for ExecutionTime
 
 impl From<crate::transaction::ProgrammableTransaction> for ProgrammableTransaction {
     fn from(value: crate::transaction::ProgrammableTransaction) -> Self {
-        Self {
-            inputs: value.inputs.into_iter().map(Into::into).collect(),
-            commands: value.commands.into_iter().map(Into::into).collect(),
-        }
+        let mut message = Self::default();
+        message.inputs = value.inputs.into_iter().map(Into::into).collect();
+        message.commands = value.commands.into_iter().map(Into::into).collect();
+        message
     }
 }
 
@@ -2242,6 +2722,7 @@ impl From<crate::transaction::CallArg> for Input {
         use crate::transaction::CallArg as I;
         use crate::transaction::ObjectArg as O;
         use input::InputKind;
+        use input::Mutability;
 
         let mut message = Self::default();
 
@@ -2260,11 +2741,20 @@ impl From<crate::transaction::CallArg> for Input {
                 O::SharedObject {
                     id,
                     initial_shared_version,
-                    mutable,
+                    mutability,
                 } => {
                     message.object_id = Some(id.to_canonical_string(true));
                     message.version = Some(initial_shared_version.value());
-                    message.mutable = Some(mutable);
+                    message.mutable = Some(mutability.is_exclusive());
+                    message.set_mutability(match mutability {
+                        crate::transaction::SharedObjectMutability::Immutable => {
+                            Mutability::Immutable
+                        }
+                        crate::transaction::SharedObjectMutability::Mutable => Mutability::Mutable,
+                        crate::transaction::SharedObjectMutability::NonExclusiveWrite => {
+                            Mutability::NonExclusiveWrite
+                        }
+                    });
                     InputKind::Shared
                 }
                 O::Receiving((id, version, digest)) => {
@@ -2274,11 +2764,33 @@ impl From<crate::transaction::CallArg> for Input {
                     InputKind::Receiving
                 }
             },
-            //TODO
-            I::BalanceWithdraw(_) => InputKind::Unknown,
+            I::FundsWithdrawal(withdrawal) => {
+                message.set_funds_withdrawal(withdrawal);
+                InputKind::FundsWithdrawal
+            }
         };
 
         message.set_kind(kind);
+        message
+    }
+}
+
+impl From<crate::transaction::FundsWithdrawalArg> for FundsWithdrawal {
+    fn from(value: crate::transaction::FundsWithdrawalArg) -> Self {
+        use funds_withdrawal::Source;
+
+        let mut message = Self::default();
+
+        message.amount = match value.reservation {
+            crate::transaction::Reservation::MaxAmountU64(amount) => Some(amount),
+        };
+        let crate::transaction::WithdrawalTypeArg::Balance(coin_type) = value.type_arg;
+        message.coin_type = Some(coin_type.to_canonical_string(true));
+        message.set_source(match value.withdraw_from {
+            crate::transaction::WithdrawFrom::Sender => Source::Sender,
+            crate::transaction::WithdrawFrom::Sponsor => Source::Sponsor,
+        });
+
         message
     }
 }
@@ -2327,43 +2839,55 @@ impl From<crate::transaction::Command> for Command {
 
         let command = match value {
             C::MoveCall(move_call) => Command::MoveCall((*move_call).into()),
-            C::TransferObjects(objects, address) => Command::TransferObjects(TransferObjects {
-                objects: objects.into_iter().map(Into::into).collect(),
-                address: Some(address.into()),
+            C::TransferObjects(objects, address) => Command::TransferObjects({
+                let mut message = TransferObjects::default();
+                message.objects = objects.into_iter().map(Into::into).collect();
+                message.address = Some(address.into());
+                message
             }),
-            C::SplitCoins(coin, amounts) => Command::SplitCoins(SplitCoins {
-                coin: Some(coin.into()),
-                amounts: amounts.into_iter().map(Into::into).collect(),
+            C::SplitCoins(coin, amounts) => Command::SplitCoins({
+                let mut message = SplitCoins::default();
+                message.coin = Some(coin.into());
+                message.amounts = amounts.into_iter().map(Into::into).collect();
+                message
             }),
-            C::MergeCoins(coin, coins_to_merge) => Command::MergeCoins(MergeCoins {
-                coin: Some(coin.into()),
-                coins_to_merge: coins_to_merge.into_iter().map(Into::into).collect(),
+            C::MergeCoins(coin, coins_to_merge) => Command::MergeCoins({
+                let mut message = MergeCoins::default();
+                message.coin = Some(coin.into());
+                message.coins_to_merge = coins_to_merge.into_iter().map(Into::into).collect();
+                message
             }),
-            C::Publish(modules, dependencies) => Command::Publish(Publish {
-                modules: modules.into_iter().map(Into::into).collect(),
-                dependencies: dependencies
+            C::Publish(modules, dependencies) => Command::Publish({
+                let mut message = Publish::default();
+                message.modules = modules.into_iter().map(Into::into).collect();
+                message.dependencies = dependencies
                     .iter()
                     .map(|d| d.to_canonical_string(true))
-                    .collect(),
+                    .collect();
+                message
             }),
-            C::MakeMoveVec(element_type, elements) => Command::MakeMoveVector(MakeMoveVector {
-                element_type: element_type.map(|t| t.to_canonical_string(true)),
-                elements: elements.into_iter().map(Into::into).collect(),
+            C::MakeMoveVec(element_type, elements) => Command::MakeMoveVector({
+                let mut message = MakeMoveVector::default();
+                message.element_type = element_type.map(|t| t.to_canonical_string(true));
+                message.elements = elements.into_iter().map(Into::into).collect();
+                message
             }),
-            C::Upgrade(modules, dependencies, package, ticket) => Command::Upgrade(Upgrade {
-                modules: modules.into_iter().map(Into::into).collect(),
-                dependencies: dependencies
+            C::Upgrade(modules, dependencies, package, ticket) => Command::Upgrade({
+                let mut message = Upgrade::default();
+                message.modules = modules.into_iter().map(Into::into).collect();
+                message.dependencies = dependencies
                     .iter()
                     .map(|d| d.to_canonical_string(true))
-                    .collect(),
-                package: Some(package.to_canonical_string(true)),
-                ticket: Some(ticket.into()),
+                    .collect();
+                message.package = Some(package.to_canonical_string(true));
+                message.ticket = Some(ticket.into());
+                message
             }),
         };
 
-        Self {
-            command: Some(command),
-        }
+        let mut message = Self::default();
+        message.command = Some(command);
+        message
     }
 }
 
@@ -2373,17 +2897,17 @@ impl From<crate::transaction::Command> for Command {
 
 impl From<crate::transaction::ProgrammableMoveCall> for MoveCall {
     fn from(value: crate::transaction::ProgrammableMoveCall) -> Self {
-        Self {
-            package: Some(value.package.to_canonical_string(true)),
-            module: Some(value.module.to_string()),
-            function: Some(value.function.to_string()),
-            type_arguments: value
-                .type_arguments
-                .iter()
-                .map(|t| t.to_canonical_string(true))
-                .collect(),
-            arguments: value.arguments.into_iter().map(Into::into).collect(),
-        }
+        let mut message = Self::default();
+        message.package = Some(value.package.to_canonical_string(true));
+        message.module = Some(value.module.to_string());
+        message.function = Some(value.function.to_string());
+        message.type_arguments = value
+            .type_arguments
+            .iter()
+            .map(|t| t.to_canonical_string(true))
+            .collect();
+        message.arguments = value.arguments.into_iter().map(Into::into).collect();
+        message
     }
 }
 
@@ -2457,116 +2981,83 @@ impl Merge<&crate::effects::TransactionEffectsV1> for TransactionEffects {
         }
 
         if mask.contains(Self::CHANGED_OBJECTS_FIELD.name)
-            || mask.contains(Self::UNCHANGED_SHARED_OBJECTS_FIELD.name)
+            || mask.contains(Self::UNCHANGED_CONSENSUS_OBJECTS_FIELD.name)
             || mask.contains(Self::GAS_OBJECT_FIELD.name)
         {
             let mut changed_objects = Vec::new();
-            let mut unchanged_shared_objects = Vec::new();
+            let mut unchanged_consensus_objects = Vec::new();
 
             for ((id, version, digest), owner) in value.created() {
-                let change = ChangedObject {
-                    object_id: Some(id.to_canonical_string(true)),
-                    input_state: Some(changed_object::InputObjectState::DoesNotExist.into()),
-                    input_version: None,
-                    input_digest: None,
-                    input_owner: None,
-                    output_state: Some(changed_object::OutputObjectState::ObjectWrite.into()),
-                    output_version: Some(version.value()),
-                    output_digest: Some(digest.to_string()),
-                    output_owner: Some(owner.clone().into()),
-                    id_operation: Some(changed_object::IdOperation::Created.into()),
-                    object_type: None,
-                };
+                let mut change = ChangedObject::default();
+                change.object_id = Some(id.to_canonical_string(true));
+                change.input_state = Some(changed_object::InputObjectState::DoesNotExist.into());
+                change.output_state = Some(changed_object::OutputObjectState::ObjectWrite.into());
+                change.output_version = Some(version.value());
+                change.output_digest = Some(digest.to_string());
+                change.output_owner = Some(owner.clone().into());
+                change.id_operation = Some(changed_object::IdOperation::Created.into());
 
                 changed_objects.push(change);
             }
 
             for ((id, version, digest), owner) in value.mutated() {
-                let change = ChangedObject {
-                    object_id: Some(id.to_canonical_string(true)),
-                    input_state: Some(changed_object::InputObjectState::Exists.into()),
-                    input_version: None,
-                    input_digest: None,
-                    input_owner: None,
-                    output_state: Some(changed_object::OutputObjectState::ObjectWrite.into()),
-                    output_version: Some(version.value()),
-                    output_digest: Some(digest.to_string()),
-                    output_owner: Some(owner.clone().into()),
-                    id_operation: Some(changed_object::IdOperation::None.into()),
-                    object_type: None,
-                };
+                let mut change = ChangedObject::default();
+                change.object_id = Some(id.to_canonical_string(true));
+                change.input_state = Some(changed_object::InputObjectState::Exists.into());
+                change.output_state = Some(changed_object::OutputObjectState::ObjectWrite.into());
+                change.output_version = Some(version.value());
+                change.output_digest = Some(digest.to_string());
+                change.output_owner = Some(owner.clone().into());
+                change.id_operation = Some(changed_object::IdOperation::None.into());
 
                 changed_objects.push(change);
             }
 
             for ((id, version, digest), owner) in value.unwrapped() {
-                let change = ChangedObject {
-                    object_id: Some(id.to_canonical_string(true)),
-                    input_state: Some(changed_object::InputObjectState::DoesNotExist.into()),
-                    input_version: None,
-                    input_digest: None,
-                    input_owner: None,
-                    output_state: Some(changed_object::OutputObjectState::ObjectWrite.into()),
-                    output_version: Some(version.value()),
-                    output_digest: Some(digest.to_string()),
-                    output_owner: Some(owner.clone().into()),
-                    id_operation: Some(changed_object::IdOperation::None.into()),
-                    object_type: None,
-                };
+                let mut change = ChangedObject::default();
+                change.object_id = Some(id.to_canonical_string(true));
+                change.input_state = Some(changed_object::InputObjectState::DoesNotExist.into());
+                change.output_state = Some(changed_object::OutputObjectState::ObjectWrite.into());
+                change.output_version = Some(version.value());
+                change.output_digest = Some(digest.to_string());
+                change.output_owner = Some(owner.clone().into());
+                change.id_operation = Some(changed_object::IdOperation::None.into());
 
                 changed_objects.push(change);
             }
 
             for (id, version, digest) in value.deleted() {
-                let change = ChangedObject {
-                    object_id: Some(id.to_canonical_string(true)),
-                    input_state: Some(changed_object::InputObjectState::Exists.into()),
-                    input_version: None,
-                    input_digest: None,
-                    input_owner: None,
-                    output_state: Some(changed_object::OutputObjectState::DoesNotExist.into()),
-                    output_version: Some(version.value()),
-                    output_digest: Some(digest.to_string()),
-                    output_owner: None,
-                    id_operation: Some(changed_object::IdOperation::Deleted.into()),
-                    object_type: None,
-                };
+                let mut change = ChangedObject::default();
+                change.object_id = Some(id.to_canonical_string(true));
+                change.input_state = Some(changed_object::InputObjectState::Exists.into());
+                change.output_state = Some(changed_object::OutputObjectState::DoesNotExist.into());
+                change.output_version = Some(version.value());
+                change.output_digest = Some(digest.to_string());
+                change.id_operation = Some(changed_object::IdOperation::Deleted.into());
 
                 changed_objects.push(change);
             }
 
             for (id, version, digest) in value.unwrapped_then_deleted() {
-                let change = ChangedObject {
-                    object_id: Some(id.to_canonical_string(true)),
-                    input_state: Some(changed_object::InputObjectState::DoesNotExist.into()),
-                    input_version: None,
-                    input_digest: None,
-                    input_owner: None,
-                    output_state: Some(changed_object::OutputObjectState::DoesNotExist.into()),
-                    output_version: Some(version.value()),
-                    output_digest: Some(digest.to_string()),
-                    output_owner: None,
-                    id_operation: Some(changed_object::IdOperation::Deleted.into()),
-                    object_type: None,
-                };
+                let mut change = ChangedObject::default();
+                change.object_id = Some(id.to_canonical_string(true));
+                change.input_state = Some(changed_object::InputObjectState::DoesNotExist.into());
+                change.output_state = Some(changed_object::OutputObjectState::DoesNotExist.into());
+                change.output_version = Some(version.value());
+                change.output_digest = Some(digest.to_string());
+                change.id_operation = Some(changed_object::IdOperation::Deleted.into());
 
                 changed_objects.push(change);
             }
 
             for (id, version, digest) in value.wrapped() {
-                let change = ChangedObject {
-                    object_id: Some(id.to_canonical_string(true)),
-                    input_state: Some(changed_object::InputObjectState::Exists.into()),
-                    input_version: None,
-                    input_digest: None,
-                    input_owner: None,
-                    output_state: Some(changed_object::OutputObjectState::DoesNotExist.into()),
-                    output_version: Some(version.value()),
-                    output_digest: Some(digest.to_string()),
-                    output_owner: None,
-                    id_operation: Some(changed_object::IdOperation::Deleted.into()),
-                    object_type: None,
-                };
+                let mut change = ChangedObject::default();
+                change.object_id = Some(id.to_canonical_string(true));
+                change.input_state = Some(changed_object::InputObjectState::Exists.into());
+                change.output_state = Some(changed_object::OutputObjectState::DoesNotExist.into());
+                change.output_version = Some(version.value());
+                change.output_digest = Some(digest.to_string());
+                change.id_operation = Some(changed_object::IdOperation::Deleted.into());
 
                 changed_objects.push(change);
             }
@@ -2594,22 +3085,21 @@ impl Merge<&crate::effects::TransactionEffectsV1> for TransactionEffects {
                     changed_object.input_version = Some(version);
                     changed_object.input_digest = Some(digest);
                 } else {
-                    let unchanged_shared_object = UnchangedSharedObject {
-                        kind: Some(
-                            unchanged_shared_object::UnchangedSharedObjectKind::ReadOnlyRoot.into(),
-                        ),
-                        object_id: Some(object_id),
-                        version: Some(version),
-                        digest: Some(digest),
-                        object_type: None,
-                    };
+                    let mut unchanged_consensus_object = UnchangedConsensusObject::default();
+                    unchanged_consensus_object.kind = Some(
+                        unchanged_consensus_object::UnchangedConsensusObjectKind::ReadOnlyRoot
+                            .into(),
+                    );
+                    unchanged_consensus_object.object_id = Some(object_id);
+                    unchanged_consensus_object.version = Some(version);
+                    unchanged_consensus_object.digest = Some(digest);
 
-                    unchanged_shared_objects.push(unchanged_shared_object);
+                    unchanged_consensus_objects.push(unchanged_consensus_object);
                 }
             }
 
             if mask.contains(Self::GAS_OBJECT_FIELD.name) {
-                let gas_object_id = value.gas_object().0 .0.to_canonical_string(true);
+                let gas_object_id = value.gas_object().0.0.to_canonical_string(true);
                 self.gas_object = changed_objects
                     .iter()
                     .find(|object| object.object_id() == gas_object_id)
@@ -2620,8 +3110,8 @@ impl Merge<&crate::effects::TransactionEffectsV1> for TransactionEffects {
                 self.changed_objects = changed_objects;
             }
 
-            if mask.contains(Self::UNCHANGED_SHARED_OBJECTS_FIELD.name) {
-                self.unchanged_shared_objects = unchanged_shared_objects;
+            if mask.contains(Self::UNCHANGED_CONSENSUS_OBJECTS_FIELD.name) {
+                self.unchanged_consensus_objects = unchanged_consensus_objects;
             }
         }
     }
@@ -2644,7 +3134,7 @@ impl Merge<&crate::effects::TransactionEffectsV2> for TransactionEffects {
             dependencies,
             lamport_version,
             changed_objects,
-            unchanged_shared_objects,
+            unchanged_consensus_objects,
             aux_data_digest,
         }: &crate::effects::TransactionEffectsV2,
         mask: &FieldMaskTree,
@@ -2714,12 +3204,12 @@ impl Merge<&crate::effects::TransactionEffectsV2> for TransactionEffects {
             }
         }
 
-        if mask.contains(Self::UNCHANGED_SHARED_OBJECTS_FIELD.name) {
-            self.unchanged_shared_objects = unchanged_shared_objects
+        if mask.contains(Self::UNCHANGED_CONSENSUS_OBJECTS_FIELD.name) {
+            self.unchanged_consensus_objects = unchanged_consensus_objects
                 .clone()
                 .into_iter()
                 .map(|(id, unchanged)| {
-                    let mut message = UnchangedSharedObject::from(unchanged);
+                    let mut message = UnchangedConsensusObject::from(unchanged);
                     message.object_id = Some(id.to_canonical_string(true));
                     message
                 })
@@ -2770,12 +3260,37 @@ impl From<crate::effects::EffectsObjectChange> for ChangedObject {
                 message.output_digest = Some(digest.to_string());
                 OutputObjectState::PackageWrite
             }
-            //TODO
-            ObjectOut::AccumulatorWriteV1(_) => OutputObjectState::Unknown,
+            ObjectOut::AccumulatorWriteV1(accumulator_write) => {
+                message.set_accumulator_write(accumulator_write);
+                OutputObjectState::AccumulatorWrite
+            }
         };
         message.set_output_state(output_state);
 
         message.set_id_operation(value.id_operation.into());
+        message
+    }
+}
+
+impl From<crate::effects::AccumulatorWriteV1> for AccumulatorWrite {
+    fn from(value: crate::effects::AccumulatorWriteV1) -> Self {
+        use accumulator_write::AccumulatorOperation;
+
+        let mut message = Self::default();
+
+        message.set_address(value.address.address.to_string());
+        message.set_accumulator_type(value.address.ty.to_canonical_string(true));
+        message.set_operation(match value.operation {
+            crate::effects::AccumulatorOperation::Merge => AccumulatorOperation::Merge,
+            crate::effects::AccumulatorOperation::Split => AccumulatorOperation::Split,
+        });
+        match value.value {
+            crate::effects::AccumulatorValue::Integer(value) => message.set_value(value),
+            //TODO unsupported value types
+            crate::effects::AccumulatorValue::IntegerTuple(_, _)
+            | crate::effects::AccumulatorValue::EventDigest(_) => {}
+        }
+
         message
     }
 }
@@ -2797,13 +3312,13 @@ impl From<crate::effects::IDOperation> for changed_object::IdOperation {
 }
 
 //
-// UnchangedSharedObject
+// UnchangedConsensusObject
 //
 
-impl From<crate::effects::UnchangedSharedKind> for UnchangedSharedObject {
-    fn from(value: crate::effects::UnchangedSharedKind) -> Self {
-        use crate::effects::UnchangedSharedKind as K;
-        use unchanged_shared_object::UnchangedSharedObjectKind;
+impl From<crate::effects::UnchangedConsensusKind> for UnchangedConsensusObject {
+    fn from(value: crate::effects::UnchangedConsensusKind) -> Self {
+        use crate::effects::UnchangedConsensusKind as K;
+        use unchanged_consensus_object::UnchangedConsensusObjectKind;
 
         let mut message = Self::default();
 
@@ -2811,21 +3326,21 @@ impl From<crate::effects::UnchangedSharedKind> for UnchangedSharedObject {
             K::ReadOnlyRoot((version, digest)) => {
                 message.version = Some(version.value());
                 message.digest = Some(digest.to_string());
-                UnchangedSharedObjectKind::ReadOnlyRoot
+                UnchangedConsensusObjectKind::ReadOnlyRoot
             }
             K::MutateConsensusStreamEnded(version) => {
                 message.version = Some(version.value());
-                UnchangedSharedObjectKind::MutateDeleted
+                UnchangedConsensusObjectKind::MutateConsensusStreamEnded
             }
             K::ReadConsensusStreamEnded(version) => {
                 message.version = Some(version.value());
-                UnchangedSharedObjectKind::ReadDeleted
+                UnchangedConsensusObjectKind::ReadConsensusStreamEnded
             }
             K::Cancelled(version) => {
                 message.version = Some(version.value());
-                UnchangedSharedObjectKind::Canceled
+                UnchangedConsensusObjectKind::Canceled
             }
-            K::PerEpochConfig => UnchangedSharedObjectKind::PerEpochConfig,
+            K::PerEpochConfig => UnchangedConsensusObjectKind::PerEpochConfig,
             // PerEpochConfigWithSequenceNumber { version } => {
             //     message.version = Some(version);
             //     UnchangedSharedObjectKind::PerEpochConfig
@@ -2848,6 +3363,156 @@ impl From<simulate_transaction_request::TransactionChecks>
         match value {
             simulate_transaction_request::TransactionChecks::Enabled => Self::Enabled,
             simulate_transaction_request::TransactionChecks::Disabled => Self::Disabled,
+            // Default to enabled
+            _ => Self::Enabled,
         }
+    }
+}
+
+//
+// Coin-related conversions
+//
+
+impl From<crate::coin_registry::MetadataCapState> for coin_metadata::MetadataCapState {
+    fn from(value: crate::coin_registry::MetadataCapState) -> Self {
+        match value {
+            crate::coin_registry::MetadataCapState::Claimed(_) => {
+                coin_metadata::MetadataCapState::Claimed
+            }
+            crate::coin_registry::MetadataCapState::Unclaimed => {
+                coin_metadata::MetadataCapState::Unclaimed
+            }
+            crate::coin_registry::MetadataCapState::Deleted => {
+                coin_metadata::MetadataCapState::Deleted
+            }
+        }
+    }
+}
+
+impl From<&crate::coin_registry::Currency> for CoinMetadata {
+    fn from(value: &crate::coin_registry::Currency) -> Self {
+        let mut metadata = CoinMetadata::default();
+        metadata.id = Some(sui_sdk_types::Address::from(value.id.into_bytes()).to_string());
+        metadata.decimals = Some(value.decimals.into());
+        metadata.name = Some(value.name.clone());
+        metadata.symbol = Some(value.symbol.clone());
+        metadata.description = Some(value.description.clone());
+        metadata.icon_url = Some(value.icon_url.clone());
+
+        match &value.metadata_cap_id {
+            crate::coin_registry::MetadataCapState::Claimed(id) => {
+                metadata.metadata_cap_state = Some(coin_metadata::MetadataCapState::Claimed as i32);
+                metadata.metadata_cap_id = Some(sui_sdk_types::Address::from(*id).to_string());
+            }
+            crate::coin_registry::MetadataCapState::Unclaimed => {
+                metadata.metadata_cap_state =
+                    Some(coin_metadata::MetadataCapState::Unclaimed as i32);
+            }
+            crate::coin_registry::MetadataCapState::Deleted => {
+                metadata.metadata_cap_state = Some(coin_metadata::MetadataCapState::Deleted as i32);
+            }
+        }
+
+        metadata
+    }
+}
+
+impl From<crate::coin::CoinMetadata> for CoinMetadata {
+    fn from(value: crate::coin::CoinMetadata) -> Self {
+        let mut metadata = CoinMetadata::default();
+        metadata.id = Some(sui_sdk_types::Address::from(value.id.id.bytes).to_string());
+        metadata.decimals = Some(value.decimals.into());
+        metadata.name = Some(value.name);
+        metadata.symbol = Some(value.symbol);
+        metadata.description = Some(value.description);
+        metadata.icon_url = value.icon_url;
+        metadata
+    }
+}
+
+impl From<crate::coin_registry::SupplyState> for coin_treasury::SupplyState {
+    fn from(value: crate::coin_registry::SupplyState) -> Self {
+        match value {
+            crate::coin_registry::SupplyState::Fixed(_) => coin_treasury::SupplyState::Fixed,
+            crate::coin_registry::SupplyState::BurnOnly(_) => coin_treasury::SupplyState::BurnOnly,
+            crate::coin_registry::SupplyState::Unknown => coin_treasury::SupplyState::Unknown,
+        }
+    }
+}
+
+impl From<crate::coin::TreasuryCap> for CoinTreasury {
+    fn from(value: crate::coin::TreasuryCap) -> Self {
+        let mut treasury = CoinTreasury::default();
+        treasury.id = Some(sui_sdk_types::Address::from(value.id.id.bytes).to_string());
+        treasury.total_supply = Some(value.total_supply.value);
+        treasury
+    }
+}
+
+impl From<&crate::coin_registry::RegulatedState> for RegulatedCoinMetadata {
+    fn from(value: &crate::coin_registry::RegulatedState) -> Self {
+        let mut regulated = RegulatedCoinMetadata::default();
+
+        match value {
+            crate::coin_registry::RegulatedState::Regulated {
+                cap,
+                allow_global_pause,
+                variant,
+            } => {
+                regulated.deny_cap_object = Some(sui_sdk_types::Address::from(*cap).to_string());
+                regulated.allow_global_pause = *allow_global_pause;
+                regulated.variant = Some(*variant as u32);
+                regulated.coin_regulated_state =
+                    Some(regulated_coin_metadata::CoinRegulatedState::Regulated as i32);
+            }
+            crate::coin_registry::RegulatedState::Unregulated => {
+                regulated.coin_regulated_state =
+                    Some(regulated_coin_metadata::CoinRegulatedState::Unregulated as i32);
+            }
+            crate::coin_registry::RegulatedState::Unknown => {
+                regulated.coin_regulated_state =
+                    Some(regulated_coin_metadata::CoinRegulatedState::Unknown as i32);
+            }
+        }
+
+        regulated
+    }
+}
+
+impl From<crate::coin_registry::RegulatedState> for RegulatedCoinMetadata {
+    fn from(value: crate::coin_registry::RegulatedState) -> Self {
+        (&value).into()
+    }
+}
+
+impl From<crate::coin::RegulatedCoinMetadata> for RegulatedCoinMetadata {
+    fn from(value: crate::coin::RegulatedCoinMetadata) -> Self {
+        let mut message = RegulatedCoinMetadata::default();
+        message.id = Some(sui_sdk_types::Address::from(value.id.id.bytes).to_string());
+        message.coin_metadata_object =
+            Some(sui_sdk_types::Address::from(value.coin_metadata_object.bytes).to_string());
+        message.deny_cap_object =
+            Some(sui_sdk_types::Address::from(value.deny_cap_object.bytes).to_string());
+        message.coin_regulated_state =
+            Some(regulated_coin_metadata::CoinRegulatedState::Regulated as i32);
+        message
+    }
+}
+
+impl TryFrom<&ObjectSet> for crate::full_checkpoint_content::ObjectSet {
+    type Error = TryFromProtoError;
+
+    fn try_from(value: &ObjectSet) -> Result<Self, Self::Error> {
+        let mut objects = Self::default();
+
+        for o in value.objects() {
+            objects.insert(
+                o.bcs()
+                    .deserialize()
+                    .map_err(|e| TryFromProtoError::invalid("object.bcs", e))?,
+            );
+        }
+
+        Ok(objects)
     }
 }

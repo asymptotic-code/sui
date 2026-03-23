@@ -16,7 +16,7 @@ use sui_test_transaction_builder::make_staking_transaction;
 use sui_types::base_types::{ObjectID, ObjectRef};
 use sui_types::gas_coin::GAS;
 use sui_types::object::Owner;
-use sui_types::quorum_driver_types::ExecuteTransactionRequestType;
+use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 use tracing::info;
 
 pub struct CoinIndexTest;
@@ -222,12 +222,14 @@ impl TestCaseImpl for CoinIndexTest {
                 coin_object_count: old_coin_object_count,
                 total_balance,
                 locked_balance: HashMap::new(),
+                funds_in_address_balance: 0,
             },
             Balance {
                 coin_type: coin_type_str.clone(),
                 coin_object_count: 1,
                 total_balance: 10000,
                 locked_balance: HashMap::new(),
+                funds_in_address_balance: 0,
             },
         ];
         // Comes with asc order.
@@ -614,10 +616,12 @@ impl TestCaseImpl for CoinIndexTest {
             managed_coins_12_39.data.last().unwrap().coin_object_id,
             last_managed_coin
         );
-        assert!(!managed_coins_12_39
-            .data
-            .iter()
-            .any(|coin| coin.coin_object_id == removed_coin_id));
+        assert!(
+            !managed_coins_12_39
+                .data
+                .iter()
+                .any(|coin| coin.coin_object_id == removed_coin_id)
+        );
         assert!(!managed_coins_12_39.has_next_page);
 
         // =========================== Test Get Coins Ends ===========================
@@ -629,7 +633,7 @@ impl TestCaseImpl for CoinIndexTest {
 async fn publish_managed_coin_package(
     ctx: &mut TestContext,
 ) -> Result<(ObjectRef, ObjectRef, ObjectRef), anyhow::Error> {
-    let compiled_package = compile_managed_coin_package();
+    let compiled_package = compile_managed_coin_package().await;
     let all_module_bytes =
         compiled_package.get_package_base64(/* with_unpublished_deps */ false);
     let dependencies = compiled_package.get_dependency_storage_package_ids();

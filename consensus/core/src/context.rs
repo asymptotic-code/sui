@@ -10,8 +10,8 @@ use sui_protocol_config::ProtocolConfig;
 use tempfile::TempDir;
 use tokio::time::Instant;
 
-use crate::metrics::test_metrics;
 use crate::metrics::Metrics;
+use crate::metrics::test_metrics;
 
 /// Context contains per-epoch configuration and metrics shared by all components
 /// of this authority.
@@ -111,6 +111,11 @@ impl Context {
     pub fn with_protocol_config(mut self, protocol_config: ProtocolConfig) -> Self {
         self.protocol_config = protocol_config;
         self
+    }
+
+    /// Returns true if this node is a validator (i.e., part of the committee).
+    pub fn is_validator(&self) -> bool {
+        self.committee.is_valid_index(self.own_index)
     }
 }
 

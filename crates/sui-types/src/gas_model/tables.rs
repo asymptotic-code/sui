@@ -1,19 +1,15 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
-
+use super::gas_predicates::charge_input_as_memory;
+use crate::gas_model::units_types::{CostTable, Gas, GasCost};
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 
 use move_core_types::gas_algebra::{AbstractMemorySize, InternalGas};
 
 use move_core_types::vm_status::StatusCode;
-use move_vm_profiler::GasProfiler;
 use once_cell::sync::Lazy;
-
-use crate::gas_model::units_types::{CostTable, Gas, GasCost};
-
-use super::gas_predicates::charge_input_as_memory;
+use std::collections::BTreeMap;
 
 /// VM flat fee
 pub const VM_FLAT_FEE: Gas = Gas::new(8_000);
@@ -34,8 +30,6 @@ pub const VEC_SIZE: AbstractMemorySize = AbstractMemorySize::new(8);
 pub const MIN_EXISTS_DATA_SIZE: AbstractMemorySize = AbstractMemorySize::new(100);
 
 pub static ZERO_COST_SCHEDULE: Lazy<CostTable> = Lazy::new(zero_cost_schedule);
-
-pub static INITIAL_COST_SCHEDULE: Lazy<CostTable> = Lazy::new(initial_cost_schedule_v1);
 
 /// The Move VM implementation of state for gas metering.
 ///
@@ -70,7 +64,6 @@ pub struct GasStatus {
     instructions_next_tier_start: Option<u64>,
     instructions_current_tier_mult: u64,
 
-    pub profiler: Option<GasProfiler>,
     pub num_native_calls: u64,
 }
 
@@ -107,7 +100,6 @@ impl GasStatus {
             stack_height_next_tier_start,
             stack_size_next_tier_start,
             instructions_next_tier_start,
-            profiler: None,
             num_native_calls: 0,
         }
     }
@@ -118,7 +110,7 @@ impl GasStatus {
     /// code that does not have to charge the user.
     pub fn new_unmetered() -> Self {
         Self {
-            gas_model_version: 4,
+            gas_model_version: 11,
             gas_left: InternalGas::new(0),
             gas_price: 1,
             initial_budget: InternalGas::new(0),
@@ -135,7 +127,6 @@ impl GasStatus {
             stack_height_next_tier_start: None,
             stack_size_next_tier_start: None,
             instructions_next_tier_start: None,
-            profiler: None,
             num_native_calls: 0,
         }
     }
@@ -164,13 +155,13 @@ impl GasStatus {
             }
         }
 
-        if let Some(stack_height_tier_next) = self.stack_height_next_tier_start {
-            if self.stack_height_current > stack_height_tier_next {
-                let (next_mul, next_tier) =
-                    self.cost_table.stack_height_tier(self.stack_height_current);
-                self.stack_height_current_tier_mult = next_mul;
-                self.stack_height_next_tier_start = next_tier;
-            }
+        if let Some(stack_height_tier_next) = self.stack_height_next_tier_start
+            && self.stack_height_current > stack_height_tier_next
+        {
+            let (next_mul, next_tier) =
+                self.cost_table.stack_height_tier(self.stack_height_current);
+            self.stack_height_current_tier_mult = next_mul;
+            self.stack_height_next_tier_start = next_tier;
         }
 
         Ok(())
@@ -188,13 +179,13 @@ impl GasStatus {
             }
         }
 
-        if let Some(instr_tier_next) = self.instructions_next_tier_start {
-            if self.instructions_executed > instr_tier_next {
-                let (instr_cost, next_tier) =
-                    self.cost_table.instruction_tier(self.instructions_executed);
-                self.instructions_current_tier_mult = instr_cost;
-                self.instructions_next_tier_start = next_tier;
-            }
+        if let Some(instr_tier_next) = self.instructions_next_tier_start
+            && self.instructions_executed > instr_tier_next
+        {
+            let (instr_cost, next_tier) =
+                self.cost_table.instruction_tier(self.instructions_executed);
+            self.instructions_current_tier_mult = instr_cost;
+            self.instructions_next_tier_start = next_tier;
         }
 
         Ok(())
@@ -211,13 +202,12 @@ impl GasStatus {
             }
         }
 
-        if let Some(stack_size_tier_next) = self.stack_size_next_tier_start {
-            if self.stack_size_current > stack_size_tier_next {
-                let (next_mul, next_tier) =
-                    self.cost_table.stack_size_tier(self.stack_size_current);
-                self.stack_size_current_tier_mult = next_mul;
-                self.stack_size_next_tier_start = next_tier;
-            }
+        if let Some(stack_size_tier_next) = self.stack_size_next_tier_start
+            && self.stack_size_current > stack_size_tier_next
+        {
+            let (next_mul, next_tier) = self.cost_table.stack_size_tier(self.stack_size_current);
+            self.stack_size_current_tier_mult = next_mul;
+            self.stack_size_next_tier_start = next_tier;
         }
 
         Ok(())
@@ -342,6 +332,14 @@ impl GasStatus {
     pub fn instructions_executed(&self) -> u64 {
         self.instructions_executed
     }
+
+    pub fn stack_height_current(&self) -> u64 {
+        self.stack_height_current
+    }
+
+    pub fn stack_size_current(&self) -> u64 {
+        self.stack_size_current
+    }
 }
 
 pub fn zero_cost_schedule() -> CostTable {
@@ -398,7 +396,6 @@ pub fn initial_cost_schedule_v1() -> CostTable {
         (8000, 5),
         (10000, 9),
         (11000, 16),
-        (11500, 29),
         (11500, 50),
     ]
     .into_iter()
@@ -449,7 +446,6 @@ pub fn initial_cost_schedule_v2() -> CostTable {
         (8000, 5),
         (10000, 9),
         (11000, 16),
-        (11500, 29),
         (11500, 50),
         (15000, 150),
         (20000, 250),
@@ -500,7 +496,6 @@ pub fn initial_cost_schedule_v3() -> CostTable {
         (8000, 5),
         (10000, 9),
         (11000, 16),
-        (11500, 29),
         (11500, 50),
         (20000, 100),
     ]
@@ -573,18 +568,5 @@ pub fn initial_cost_schedule_v5() -> CostTable {
         instruction_tiers,
         stack_size_tiers,
         stack_height_tiers,
-    }
-}
-
-// Convert from our representation of gas costs to the type that the MoveVM expects for unit tests.
-// We don't want our gas depending on the MoveVM test utils and we don't want to fix our
-// representation to whatever is there, so instead we perform this translation from our gas units
-// and cost schedule to the one expected by the Move unit tests.
-pub fn initial_cost_schedule_for_unit_tests() -> move_vm_test_utils::gas_schedule::CostTable {
-    let table = initial_cost_schedule_v5();
-    move_vm_test_utils::gas_schedule::CostTable {
-        instruction_tiers: table.instruction_tiers.into_iter().collect(),
-        stack_height_tiers: table.stack_height_tiers.into_iter().collect(),
-        stack_size_tiers: table.stack_size_tiers.into_iter().collect(),
     }
 }

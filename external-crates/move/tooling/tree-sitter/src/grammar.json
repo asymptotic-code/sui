@@ -5,8 +5,17 @@
     "source_file": {
       "type": "REPEAT",
       "content": {
-        "type": "SYMBOL",
-        "name": "module_definition"
+        "type": "CHOICE",
+        "members": [
+          {
+            "type": "SYMBOL",
+            "name": "module_extension_definition"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "module_definition"
+          }
+        ]
       }
     },
     "use_declaration": {
@@ -556,6 +565,23 @@
         {
           "type": "STRING",
           "value": "key"
+        }
+      ]
+    },
+    "module_extension_definition": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "extend"
+        },
+        {
+          "type": "FIELD",
+          "name": "module",
+          "content": {
+            "type": "SYMBOL",
+            "name": "module_definition"
+          }
         }
       ]
     },
@@ -3045,10 +3071,6 @@
         {
           "type": "STRING",
           "value": "signer"
-        },
-        {
-          "type": "STRING",
-          "value": "bytearray"
         }
       ]
     },
@@ -6696,6 +6718,10 @@
         {
           "type": "SYMBOL",
           "name": "byte_string_literal"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "string_literal"
         }
       ]
     },
@@ -6744,7 +6770,7 @@
     },
     "address_literal": {
       "type": "PATTERN",
-      "value": "@(0x[a-fA-F0-9]+|[0-9]+)"
+      "value": "@(0x[a-fA-F0-9][a-fA-F0-9_]*|[0-9]+)"
     },
     "bool_literal": {
       "type": "CHOICE",
@@ -6821,6 +6847,10 @@
     "byte_string_literal": {
       "type": "PATTERN",
       "value": "b\"(\\\\.|[^\\\\\"])*\""
+    },
+    "string_literal": {
+      "type": "PATTERN",
+      "value": "\"(\\\\.|[^\\\\\"])*\""
     },
     "_module_identifier": {
       "type": "ALIAS",
@@ -6921,6 +6951,10 @@
         {
           "type": "SYMBOL",
           "name": "_exists"
+        },
+        {
+          "type": "STRING",
+          "value": "spec"
         }
       ]
     },
@@ -7053,6 +7087,10 @@
     ],
     [
       "abort_expression"
+    ],
+    [
+      "spec_block",
+      "_reserved_identifier"
     ]
   ],
   "precedences": [],

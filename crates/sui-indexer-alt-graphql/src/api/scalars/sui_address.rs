@@ -1,15 +1,23 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt, str::FromStr};
+use std::fmt;
+use std::str::FromStr;
 
-use async_graphql::{InputValueError, InputValueResult, Scalar, ScalarType, Value};
+use async_graphql::InputValueError;
+use async_graphql::InputValueResult;
+use async_graphql::Scalar;
+use async_graphql::ScalarType;
+use async_graphql::Value;
 use move_core_types::account_address::AccountAddress;
-use sui_types::base_types::{ObjectID, SuiAddress as NativeSuiAddress};
+use serde::Deserialize;
+use serde::Serialize;
+use sui_types::base_types::ObjectID;
+use sui_types::base_types::SuiAddress as NativeSuiAddress;
 
 const SUI_ADDRESS_LENGTH: usize = 32;
 
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub(crate) struct SuiAddress([u8; SUI_ADDRESS_LENGTH]);
 
 #[derive(thiserror::Error, Debug)]
@@ -41,6 +49,12 @@ impl ScalarType for SuiAddress {
 
     fn to_value(&self) -> Value {
         Value::String(self.to_string())
+    }
+}
+
+impl SuiAddress {
+    pub fn into_vec(self) -> Vec<u8> {
+        self.0.to_vec()
     }
 }
 
@@ -119,6 +133,12 @@ impl From<NativeSuiAddress> for SuiAddress {
     }
 }
 
+impl From<AccountAddress> for SuiAddress {
+    fn from(value: AccountAddress) -> Self {
+        SuiAddress(value.into_bytes())
+    }
+}
+
 impl From<ObjectID> for SuiAddress {
     fn from(value: ObjectID) -> Self {
         SuiAddress(value.into_bytes())
@@ -127,8 +147,9 @@ impl From<ObjectID> for SuiAddress {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use async_graphql::Value;
+
+    use super::*;
 
     const FULL_ADDRESS_STR: &str =
         "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

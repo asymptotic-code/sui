@@ -1,29 +1,33 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{anyhow, Context as _};
-use sui_json::{MoveTypeLayout, SuiJsonValue};
-use sui_json_rpc_types::{
-    BcsName, DynamicFieldInfo as DynamicFieldInfoResponse, SuiMoveValue, SuiObjectDataOptions,
-    SuiObjectResponse,
-};
-use sui_types::{
-    base_types::ObjectID,
-    dynamic_field::{derive_dynamic_field_id, visitor as DFV, DynamicFieldInfo, DynamicFieldName},
-    error::SuiObjectResponseError,
-    object::{bounded_visitor::BoundedVisitor, Object},
-    TypeTag,
-};
+use anyhow::Context as _;
+use anyhow::anyhow;
+use sui_json::MoveTypeLayout;
+use sui_json::SuiJsonValue;
+use sui_json_rpc_types::BcsName;
+use sui_json_rpc_types::DynamicFieldInfo as DynamicFieldInfoResponse;
+use sui_json_rpc_types::SuiMoveValue;
+use sui_json_rpc_types::SuiObjectDataOptions;
+use sui_json_rpc_types::SuiObjectResponse;
+use sui_types::TypeTag;
+use sui_types::base_types::ObjectID;
+use sui_types::dynamic_field::DynamicFieldInfo;
+use sui_types::dynamic_field::DynamicFieldName;
+use sui_types::dynamic_field::derive_dynamic_field_id;
+use sui_types::dynamic_field::visitor as DFV;
+use sui_types::error::SuiObjectResponseError;
+use sui_types::object::Object;
+use sui_types::object::bounded_visitor::BoundedVisitor;
 use tokio::try_join;
 
-use crate::{
-    api::objects,
-    context::Context,
-    data::load_live,
-    error::{invalid_params, rpc_bail, RpcError},
-};
-
-use super::error::Error;
+use crate::api::dynamic_fields::error::Error;
+use crate::api::objects;
+use crate::context::Context;
+use crate::data::load_live;
+use crate::error::RpcError;
+use crate::error::invalid_params;
+use crate::error::rpc_bail;
 
 /// Fetch the latest version of a dynamic field object, identified by its parent ID and name.
 pub(super) async fn dynamic_field_object(

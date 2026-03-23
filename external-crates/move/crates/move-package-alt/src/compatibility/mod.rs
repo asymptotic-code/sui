@@ -1,17 +1,25 @@
+// Copyright (c) The Move Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 pub mod legacy;
+pub mod legacy_lockfile;
 pub mod legacy_parser;
 
-use std::collections::{BTreeMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+use crate::{
+    package::layout::SourcePackageLayout, package::paths::PackagePath, schema::PackageName,
+};
 
-use anyhow::{Result, bail};
-use move_core_types::account_address::AccountAddress;
+use move_core_types::account_address::{AccountAddress, AccountAddressParseError};
+
+use anyhow::Result;
 use regex::Regex;
-
-use crate::package::layout::SourcePackageLayout;
-use crate::package::paths::PackagePath;
-use crate::schema::PackageName;
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
+use tracing::debug;
 
 pub type LegacyVersion = (u64, u64, u64);
 pub type LegacySubstitution = BTreeMap<String, LegacySubstOrRename>;
@@ -30,11 +38,29 @@ pub enum LegacySubstOrRename {
 /// The regex to detect `module <name>::<module_name>` on its different forms.
 const MODULE_REGEX: &str = r"\bmodule\s+([a-zA-Z_][\w]*)::([a-zA-Z_][\w]*)";
 
+// Compile regex once at program startup
+#[cfg(not(msim))]
+fn get_module_regex() -> &'static Regex {
+    static MODULE_REGEX_COMPILED: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(MODULE_REGEX).unwrap());
+    &MODULE_REGEX_COMPILED
+}
+
+// In simtests we need to use a thread local to avoid breaking determinism.
+#[cfg(msim)]
+fn get_module_regex() -> Regex {
+    thread_local! {
+        static MODULE_REGEX_COMPILED: LazyLock<Regex> = LazyLock::new(|| Regex::new(MODULE_REGEX).unwrap());
+    }
+
+    MODULE_REGEX_COMPILED.with(|val| (*val).clone())
+}
+
 /// This is a naive way to detect all module names that are part of the source code
 /// for a given package.
 ///
 /// This helps us when we fail to detect any module name with 0x0 in the Manifest file,
-pub(crate) fn find_module_name_for_package(path: &PackagePath) -> Result<PackageName> {
+pub(crate) fn find_module_name_for_package(path: &PackagePath) -> Result<Option<PackageName>> {
     let mut files = Vec::new();
     find_files(
         &mut files,
@@ -55,15 +81,28 @@ pub(crate) fn find_module_name_for_package(path: &PackagePath) -> Result<Package
         }
     }
 
+    debug!(
+        "Parsed source for finding module names for package. Names are: {:?}",
+        names
+    );
+
     if names.len() > 1 {
-        bail!("Multiple module names found in the package.");
+        return Ok(None);
     }
 
     let Some(name) = names.iter().next() else {
-        bail!("No module names found in the package.");
+        return Ok(None);
     };
 
-    PackageName::new(name.as_str())
+    Ok(Some(PackageName::new(name.as_str())?))
+}
+
+// Safely parses address for both the 0x and non prefixed hex format.
+fn parse_address_literal(address_str: &str) -> Result<AccountAddress, AccountAddressParseError> {
+    if !address_str.starts_with("0x") {
+        return AccountAddress::from_hex(address_str);
+    }
+    AccountAddress::from_hex_literal(address_str)
 }
 
 /// Find all files matching the extension in a given path.
@@ -78,10 +117,10 @@ fn find_files(files: &mut Vec<PathBuf>, dir: &Path, extension: &str, max_depth: 
 
             if let Ok(metadata) = entry.metadata() {
                 if metadata.is_file() {
-                    if let Some(ext) = path.extension() {
-                        if ext == extension {
-                            files.push(path);
-                        }
+                    if let Some(ext) = path.extension()
+                        && ext == extension
+                    {
+                        files.push(path);
                     }
                 } else if metadata.is_dir() {
                     find_files(files, &path, extension, max_depth - 1);
@@ -94,16 +133,20 @@ fn find_files(files: &mut Vec<PathBuf>, dir: &Path, extension: &str, max_depth: 
 // Consider supporting the legacy `address { module {} }` format.
 fn parse_module_names(contents: &str) -> Result<HashSet<String>> {
     let clean = strip_comments(contents);
-    let mut set = HashSet::new();
+
     // This matches `module a::b {}`, and `module a::b;` cases.
     // In both cases, the match is the 2nd group (so `match.get(1)`)
-    let regex = Regex::new(MODULE_REGEX).unwrap();
+    Ok(get_module_regex()
+        .captures_iter(&clean)
+        .filter_map(|cap| {
+            let name = &cap[1];
+            (!is_address_like(name)).then(|| name.to_string())
+        })
+        .collect())
+}
 
-    for cap in regex.captures_iter(&clean) {
-        set.insert(cap[1].to_string());
-    }
-
-    Ok(set)
+fn is_address_like(name: &str) -> bool {
+    (name.starts_with("0x") || name.starts_with("0X")) && AccountAddress::from_hex(name).is_ok()
 }
 
 /// Returns a copy of `source` with all the comments removed.
@@ -205,7 +248,7 @@ mod tests {
                 }
                 */
                 /// module aa::bb {
-                /// 
+                ///
                 /// }
                 module works::perfectly {}
             ",
@@ -248,8 +291,22 @@ mod tests {
             ),
             (
                 r"
-                module a::/* this is odd but 
+                module a::/* this is odd but
                 it works */b {} // module bb::aa {}
+                ",
+                set(vec!["a"]),
+            ),
+            (
+                r"
+                module 0x0::a {}
+                module 0X0::b {}
+                ",
+                set(vec![]),
+            ),
+            (
+                r"
+                module 0x0::a {}
+                module a::b {}
                 ",
                 set(vec!["a"]),
             ),

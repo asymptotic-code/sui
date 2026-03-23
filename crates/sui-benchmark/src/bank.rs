@@ -1,11 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::ValidatorProxy;
 use crate::util::UpdatedAndNewlyMintedGasCoins;
 use crate::workloads::payload::Payload;
-use crate::workloads::workload::{Workload, WorkloadBuilder, MAX_BUDGET};
+use crate::workloads::workload::{MAX_BUDGET, Workload, WorkloadBuilder};
 use crate::workloads::{Gas, GasCoinConfig};
-use crate::ValidatorProxy;
 use anyhow::{Error, Result};
 use itertools::Itertools;
 use std::collections::{HashMap, VecDeque};
@@ -18,15 +18,21 @@ use tracing::info;
 /// Bank is used for generating gas for running the benchmark.
 #[derive(Clone)]
 pub struct BenchmarkBank {
-    pub proxy: Arc<dyn ValidatorProxy + Send + Sync>,
+    pub execution_proxy: Arc<dyn ValidatorProxy + Send + Sync>,
+    pub fullnode_proxies: Vec<Arc<dyn ValidatorProxy + Send + Sync>>,
     // Coin used for paying for gas & splitting into smaller gas coins
     pub primary_coin: Gas,
 }
 
 impl BenchmarkBank {
-    pub fn new(proxy: Arc<dyn ValidatorProxy + Send + Sync>, primary_coin: Gas) -> Self {
+    pub fn new(
+        execution_proxy: Arc<dyn ValidatorProxy + Send + Sync>,
+        fullnode_proxies: Vec<Arc<dyn ValidatorProxy + Send + Sync>>,
+        primary_coin: Gas,
+    ) -> Self {
         BenchmarkBank {
-            proxy,
+            execution_proxy,
+            fullnode_proxies,
             primary_coin,
         }
     }
@@ -121,18 +127,21 @@ impl BenchmarkBank {
             MAX_BUDGET,
         );
 
-        let (_, execution_result) = self.proxy.execute_transaction_block(tx).await;
+        let (_, execution_result) = self.execution_proxy.execute_transaction_block(tx).await;
         let effects = execution_result?;
 
         if !effects.is_ok() {
             effects.print_gas_summary();
-            panic!("Could not generate coins for workload...");
+            panic!(
+                "Could not generate coins for workload.... Got error: {:?}",
+                effects
+            );
         }
 
         let updated_gas = effects
             .mutated()
             .into_iter()
-            .find(|(k, _)| k.0 == init_coin.0 .0)
+            .find(|(k, _)| k.0 == init_coin.0.0)
             .ok_or("Input gas missing in the effects")
             .map_err(Error::msg)?;
 
@@ -173,7 +182,7 @@ impl BenchmarkBank {
             gas_price,
         );
 
-        let (_, execution_result) = self.proxy.execute_transaction_block(tx).await;
+        let (_, execution_result) = self.execution_proxy.execute_transaction_block(tx).await;
         let effects = execution_result?;
 
         if !effects.is_ok() {
@@ -184,7 +193,7 @@ impl BenchmarkBank {
         let updated_gas = effects
             .mutated()
             .into_iter()
-            .find(|(k, _)| k.0 == self.primary_coin.0 .0)
+            .find(|(k, _)| k.0 == self.primary_coin.0.0)
             .ok_or("Input gas missing in the effects")
             .map_err(Error::msg)?;
 

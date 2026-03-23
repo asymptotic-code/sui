@@ -4,24 +4,27 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use move_core_types::{ident_str, language_storage::StructTag};
+use move_core_types::ident_str;
+use move_core_types::language_storage::StructTag;
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::Value;
+use serde_json::json;
 use simulacrum::Simulacrum;
-use sui_indexer_alt::config::{IndexerConfig, PipelineLayer};
-use sui_indexer_alt_consistent_store::config::ServiceConfig as ConsistentConfig;
-use sui_indexer_alt_e2e_tests::{find_address_owned, find_immutable, FullCluster};
-use sui_indexer_alt_framework::IndexerArgs;
-use sui_indexer_alt_graphql::config::RpcConfig as GraphQlConfig;
-use sui_indexer_alt_jsonrpc::config::{PackageResolverLayer, RpcConfig as JsonRpcConfig};
+use sui_indexer_alt::config::IndexerConfig;
+use sui_indexer_alt::config::PipelineLayer;
+use sui_indexer_alt_jsonrpc::config::PackageResolverLayer;
+use sui_indexer_alt_jsonrpc::config::RpcConfig as JsonRpcConfig;
 use sui_move_build::BuildConfig;
-use sui_types::{
-    base_types::ObjectID,
-    programmable_transaction_builder::ProgrammableTransactionBuilder,
-    transaction::{Transaction, TransactionData},
-    Identifier, TypeTag,
-};
-use tokio_util::sync::CancellationToken;
+use sui_types::Identifier;
+use sui_types::TypeTag;
+use sui_types::base_types::ObjectID;
+use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
+use sui_types::transaction::Transaction;
+use sui_types::transaction::TransactionData;
+
+use sui_indexer_alt_e2e_tests::FullCluster;
+use sui_indexer_alt_e2e_tests::OffchainClusterConfig;
+use sui_indexer_alt_e2e_tests::find;
 
 /// 5 SUI gas budget
 const DEFAULT_GAS_BUDGET: u64 = 5_000_000_000;
@@ -39,8 +42,6 @@ async fn test_within_limits() {
         result["result"]["data"]["content"].is_object(),
         "Result: {result:#?}"
     );
-
-    c.cluster.stopped().await;
 }
 
 /// If we set a limit on how deeply nested some type arguments can be, then trying to fetch an
@@ -62,7 +63,6 @@ async fn test_type_argument_depth() {
     };
 
     assert!(err.contains("Type parameter nesting exceeded"), "{err}");
-    c.cluster.stopped().await;
 }
 
 /// There is also a limit on how many type parameters a single type can have.
@@ -83,7 +83,6 @@ async fn test_type_argument_width() {
     };
 
     assert!(err.contains("Expected at most 3 type parameters"), "{err}");
-    c.cluster.stopped().await;
 }
 
 /// This limit controls the number of types that need to be loaded to resolve the layout of a type.
@@ -107,8 +106,6 @@ async fn test_type_nodes() {
         err.contains("More than 3 struct definitions required to resolve type"),
         "{err}"
     );
-
-    c.cluster.stopped().await;
 }
 
 /// This limit controls the depth of the resulting value layout.
@@ -132,8 +129,6 @@ async fn test_value_depth() {
         err.contains("Type layout nesting exceeded limit of 3"),
         "{err}"
     );
-
-    c.cluster.stopped().await;
 }
 
 struct TypeLimitCluster {
@@ -149,27 +144,24 @@ impl TypeLimitCluster {
         // (1) Set-up a cluster that indexes object data and sets the given limits up.
         let mut cluster = FullCluster::new_with_configs(
             Simulacrum::new(),
-            IndexerArgs::default(),
-            IndexerArgs::default(),
-            IndexerConfig {
-                pipeline: PipelineLayer {
-                    cp_sequence_numbers: Some(Default::default()),
-                    kv_objects: Some(Default::default()),
-                    kv_packages: Some(Default::default()),
-                    obj_info: Some(Default::default()),
-                    obj_versions: Some(Default::default()),
+            OffchainClusterConfig {
+                indexer_config: IndexerConfig {
+                    pipeline: PipelineLayer {
+                        cp_sequence_numbers: Some(Default::default()),
+                        kv_objects: Some(Default::default()),
+                        kv_packages: Some(Default::default()),
+                        obj_versions: Some(Default::default()),
+                        ..Default::default()
+                    },
+                    ..IndexerConfig::for_test()
+                },
+                jsonrpc_config: JsonRpcConfig {
+                    package_resolver: package_resolver.finish(),
                     ..Default::default()
                 },
-                ..IndexerConfig::for_test()
+                ..Default::default()
             },
-            ConsistentConfig::for_test(),
-            JsonRpcConfig {
-                package_resolver: package_resolver.finish(),
-                ..JsonRpcConfig::default()
-            },
-            GraphQlConfig::default(),
             &prometheus::Registry::new(),
-            CancellationToken::new(),
         )
         .await
         .expect("Failed to set-up cluster");
@@ -207,7 +199,7 @@ impl TypeLimitCluster {
             .execute_transaction(Transaction::from_data_and_signer(data, vec![&kp]))
             .expect("Publish failed");
 
-        let package_id = find_immutable(&fx).expect("Couldn't find package").0;
+        let package_id = find::immutable(&fx).expect("Couldn't find package").0;
 
         Self {
             cluster,
@@ -262,7 +254,7 @@ impl TypeLimitCluster {
             .execute_transaction(Transaction::from_data_and_signer(data, vec![&kp]))
             .expect("Transaction failed");
 
-        find_address_owned(&fx).unwrap().0
+        find::address_owned(&fx).unwrap().0
     }
 
     /// Run a transaction on the cluster to create an instance of the `Wide` type from the test
@@ -299,7 +291,7 @@ impl TypeLimitCluster {
             .execute_transaction(Transaction::from_data_and_signer(data, vec![&kp]))
             .expect("Transaction failed");
 
-        find_address_owned(&fx).unwrap().0
+        find::address_owned(&fx).unwrap().0
     }
 
     /// Try and fetch the contents of an object from the cluster's RPC.

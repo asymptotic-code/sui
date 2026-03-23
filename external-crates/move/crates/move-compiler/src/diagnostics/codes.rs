@@ -164,6 +164,7 @@ codes!(
         InvalidName: { msg: "invalid name", severity: BlockingError },
         InvalidMacro: { msg: "invalid macro invocation", severity: BlockingError },
         InvalidMatch: { msg: "invalid 'match'", severity: BlockingError },
+        InvalidString: { msg: "invalid string literal", severity: NonblockingError },
     ],
     // errors for any rules around declaration items
     Declarations: [
@@ -194,6 +195,7 @@ codes!(
         MissingSyntaxMethod: { msg: "no valid 'syntax' declaration found", severity: BlockingError },
         DuplicateAlias: { msg: "duplicate alias", severity: Warning },
         InvalidEnum: { msg: "invalid 'enum' declaration", severity: NonblockingError },
+        AmbiguousAddress: { msg: "ambiguous address", severity: Warning },
     ],
     // errors name resolution, mostly expansion/translate and naming/translate
     NameResolution: [
@@ -206,7 +208,7 @@ codes!(
         TooManyTypeArguments: { msg: "too many type arguments", severity: NonblockingError },
         TooFewTypeArguments: { msg: "too few type arguments", severity: BlockingError },
         UnboundVariable: { msg: "unbound variable", severity: BlockingError },
-        UnboundField: { msg: "unbound field", severity: BlockingError },
+        UnboundField: { msg: "unbound field", severity: NonblockingError },
         ReservedName: { msg: "invalid use of reserved name", severity: BlockingError },
         UnboundMacro: { msg: "unbound macro", severity: BlockingError },
         PositionalCallMismatch: { msg: "positional call mismatch", severity: NonblockingError },
@@ -238,7 +240,7 @@ codes!(
             { msg: "invalid statement or expression in constant", severity: BlockingError },
         InvalidLoopControl: { msg: "invalid loop control", severity: BlockingError },
         InvalidNativeUsage: { msg: "invalid use of native item", severity: BlockingError },
-        TooFewArguments: { msg: "too few arguments", severity: BlockingError },
+        TooFewArguments: { msg: "too few arguments", severity: NonblockingError },
         TooManyArguments: { msg: "too many arguments", severity: NonblockingError },
         CyclicData: { msg: "cyclic data", severity: NonblockingError },
         CyclicInstantiation:
@@ -266,6 +268,9 @@ codes!(
         InvalidErrorUsage: { msg: "invalid constant usage in error context", severity: BlockingError },
         IncompletePattern: { msg: "non-exhaustive pattern", severity: BlockingError },
         DeprecatedUsage: { msg: "deprecated usage", severity: Warning },
+        InvalidString: { msg: "invalid string after type inference", severity: NonblockingError },
+        MissingLiteralType:
+            { msg: "unable to determine principal type for literal", severity: Warning },
     ],
     // errors for ability rules. mostly typing/translate
     AbilitySafety: [
@@ -360,6 +365,7 @@ codes!(
         MissingMatchArms: { msg: "IDE missing match arms", severity: Note },
         EllipsisExpansion: { msg: "IDE ellipsis expansion", severity: Note },
         PathAutocomplete: { msg: "IDE path autocomplete", severity: Note },
+        StringValue: { msg: "IDE string value", severity: Note },
     ],
 );
 

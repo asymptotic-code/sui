@@ -4,6 +4,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 use sui_core::authority_client::NetworkAuthorityClient;
+use sui_core::test_utils::wait_for_tx;
+use sui_core::transaction_driver::SubmitTransactionOptions;
 use sui_core::transaction_orchestrator::TransactionOrchestrator;
 use sui_macros::sim_test;
 use sui_storage::key_value_store::TransactionKeyValueStore;
@@ -12,11 +14,14 @@ use sui_test_transaction_builder::{
     batch_make_transfer_transactions, make_staking_transaction, make_transfer_sui_transaction,
 };
 use sui_types::effects::TransactionEffectsAPI;
-use sui_types::quorum_driver_types::{
-    ExecuteTransactionRequestType, ExecuteTransactionRequestV3, ExecuteTransactionResponseV3,
-    FinalizedEffects, IsTransactionExecutedLocally, QuorumDriverError,
-};
+use sui_types::error::ErrorCategory;
+use sui_types::messages_grpc::SubmitTxRequest;
+use sui_types::object::PastObjectRead;
 use sui_types::transaction::Transaction;
+use sui_types::transaction_driver_types::{
+    ExecuteTransactionRequestType, ExecuteTransactionRequestV3, ExecuteTransactionResponseV3,
+    FinalizedEffects, IsTransactionExecutedLocally, TransactionSubmissionError,
+};
 use test_cluster::TestClusterBuilder;
 use tokio::time::timeout;
 use tracing::info;
@@ -40,14 +45,18 @@ async fn test_blocking_execution() -> Result<(), anyhow::Error> {
         txn_count,
     );
 
-    // Quorum driver does not execute txn locally
+    // Transaction driver does not execute txn locally
     let txn = txns.swap_remove(0);
     let digest = *txn.digest();
     orchestrator
-        .quorum_driver()
-        .submit_transaction_no_ticket(
-            ExecuteTransactionRequestV3::new_v2(txn),
-            Some(make_socket_addr()),
+        .transaction_driver()
+        .drive_transaction(
+            SubmitTxRequest::new_transaction(txn),
+            SubmitTransactionOptions {
+                forwarded_client_addr: Some(make_socket_addr()),
+                ..Default::default()
+            },
+            Some(Duration::from_secs(60)),
         )
         .await?;
 
@@ -79,11 +88,13 @@ async fn test_blocking_execution() -> Result<(), anyhow::Error> {
         handle.state(),
     ));
 
-    assert!(handle
-        .state()
-        .get_executed_transaction_and_effects(digest, kv_store)
-        .await
-        .is_ok());
+    assert!(
+        handle
+            .state()
+            .get_executed_transaction_and_effects(digest, kv_store)
+            .await
+            .is_ok()
+    );
 
     Ok(())
 }
@@ -92,7 +103,7 @@ async fn test_blocking_execution() -> Result<(), anyhow::Error> {
 async fn test_fullnode_wal_log() -> Result<(), anyhow::Error> {
     #[cfg(msim)]
     {
-        use sui_core::authority::{init_checkpoint_timeout_config, CheckpointTimeoutConfig};
+        use sui_core::authority::{CheckpointTimeoutConfig, init_checkpoint_timeout_config};
         init_checkpoint_timeout_config(CheckpointTimeoutConfig {
             warning_timeout: Duration::from_secs(2),
             panic_timeout: None,
@@ -132,43 +143,48 @@ async fn test_fullnode_wal_log() -> Result<(), anyhow::Error> {
     // Stop 2 validators and we lose quorum
     test_cluster.stop_node(&validator_addresses[0]);
     test_cluster.stop_node(&validator_addresses[1]);
+    // TODO: stop the fullnode as well, after we fix releasing the DB handles when stopping the fullnode.
 
     let txn = txns.swap_remove(0);
-    // Expect tx to fail
-    execute_with_orchestrator(
-        &orchestrator,
-        txn.clone(),
-        ExecuteTransactionRequestType::WaitForLocalExecution,
+    // Expect tx to timeout.
+    let result = timeout(
+        Duration::from_secs(10),
+        execute_with_orchestrator(
+            &orchestrator,
+            txn.clone(),
+            ExecuteTransactionRequestType::WaitForLocalExecution,
+        ),
     )
-    .await
-    .unwrap_err();
+    .await;
+    assert!(result.is_err());
 
-    // Because the tx did not go through, we expect to see it in the WAL log
+    // Because the tx was inflight, we expect to see it in the WAL log.
     let pending_txes: Vec<_> = orchestrator
-        .load_all_pending_transactions()?
+        .load_all_pending_transactions_in_test()?
         .into_iter()
         .map(|t| t.into_inner())
         .collect();
     assert_eq!(pending_txes, vec![txn.clone()]);
 
-    // Bring up 1 validator, we obtain quorum again and tx should succeed
+    // Bring back both validators so there's quorum again.
+    // TODO: investigate why only starting one validator can prevent the txn from
+    // being executed for > 120s.
     test_cluster.start_node(&validator_addresses[0]).await;
+    test_cluster.start_node(&validator_addresses[1]).await;
     tokio::task::yield_now().await;
-    execute_with_orchestrator(
-        &orchestrator,
-        txn,
-        ExecuteTransactionRequestType::WaitForLocalExecution,
-    )
-    .await
-    .unwrap();
 
-    // TODO: wal erasing is done in the loop handling effects, so may have some delay.
-    // However, once the refactoring is completed the wal removal will be done before
-    // response is returned and we will not need the sleep.
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    // The tx should be erased in wal log.
-    let pending_txes = orchestrator.load_all_pending_transactions()?;
+    // The transaction should eventually be retried and succeed now that quorum is restored.
+    // Wait for txn to be executed.
+    wait_for_tx(
+        *txn.digest(),
+        orchestrator.authority_state().clone(),
+        Duration::from_secs(120),
+    )
+    .await;
+
+    let pending_txes = orchestrator.load_all_pending_transactions_in_test()?;
     assert!(pending_txes.is_empty());
+    assert!(orchestrator.empty_pending_tx_log_in_test());
 
     Ok(())
 }
@@ -180,8 +196,9 @@ async fn test_transaction_orchestrator_reconfig() {
     let epoch = test_cluster.fullnode_handle.sui_node.with(|node| {
         node.transaction_orchestrator()
             .unwrap()
-            .quorum_driver()
-            .current_epoch()
+            .authority_state()
+            .epoch_store_for_testing()
+            .epoch()
     });
     assert_eq!(epoch, 0);
 
@@ -195,8 +212,9 @@ async fn test_transaction_orchestrator_reconfig() {
             let epoch = test_cluster.fullnode_handle.sui_node.with(|node| {
                 node.transaction_orchestrator()
                     .unwrap()
-                    .quorum_driver()
-                    .current_epoch()
+                    .authority_state()
+                    .epoch_store_for_testing()
+                    .epoch()
             });
             if epoch == 1 {
                 break;
@@ -257,7 +275,7 @@ async fn test_tx_across_epoch_boundaries() {
                 info!(?tx_digest, "tx result: ok");
                 result_tx.send(response.effects).await.unwrap();
             }
-            Err(QuorumDriverError::TimeoutBeforeFinality) => {
+            Err(TransactionSubmissionError::TimeoutBeforeFinality) => {
                 info!(?tx_digest, "tx result: timeout and will retry")
             }
             Err(other) => panic!("unexpected error: {:?}", other),
@@ -281,6 +299,13 @@ async fn test_tx_across_epoch_boundaries() {
         Ok(Some(effects_cert)) if effects_cert.epoch() == 1 => (),
         other => panic!("unexpected error: {:?}", other),
     }
+
+    let to = test_cluster
+        .fullnode_handle
+        .sui_node
+        .with(|node| node.transaction_orchestrator().unwrap());
+    assert!(to.empty_pending_tx_log_in_test());
+
     info!("test completed in {:?}", start.elapsed());
 }
 
@@ -288,7 +313,8 @@ async fn execute_with_orchestrator(
     orchestrator: &TransactionOrchestrator<NetworkAuthorityClient>,
     txn: Transaction,
     request_type: ExecuteTransactionRequestType,
-) -> Result<(ExecuteTransactionResponseV3, IsTransactionExecutedLocally), QuorumDriverError> {
+) -> Result<(ExecuteTransactionResponseV3, IsTransactionExecutedLocally), TransactionSubmissionError>
+{
     orchestrator
         .execute_transaction_block(ExecuteTransactionRequestV3::new_v2(txn), request_type, None)
         .await
@@ -360,15 +386,15 @@ async fn execute_transaction_v3_staking_transaction() -> Result<(), anyhow::Erro
     let orchestrator = handle.with(|n| n.transaction_orchestrator().as_ref().unwrap().clone());
 
     let validator_address = context
-        .get_client()
+        .grpc_client()?
+        .get_system_state(None)
         .await?
-        .governance_api()
-        .get_latest_sui_system_state()
-        .await?
-        .active_validators
+        .validators()
+        .active_validators()
         .first()
         .unwrap()
-        .sui_address;
+        .address()
+        .parse()?;
     let transaction = make_staking_transaction(context, validator_address).await;
 
     let request = ExecuteTransactionRequestV3 {
@@ -407,6 +433,156 @@ async fn execute_transaction_v3_staking_transaction() -> Result<(), anyhow::Erro
         .collect::<Vec<_>>();
     actual_output_objects_received.sort_by_key(|&(id, _version, _digest)| id);
     assert_eq!(expected_output_objects, actual_output_objects_received);
+
+    Ok(())
+}
+
+#[sim_test]
+async fn test_early_validation_with_old_object_version() -> Result<(), anyhow::Error> {
+    // This test verifies that early validation catches transactions with old object versions.
+    // Early validation checks the live object version (via get_object by ID) against the
+    // transaction's requested version, catching ObjectVersionUnavailableForConsumption errors
+    // before submission to consensus.
+
+    let mut test_cluster = TestClusterBuilder::new().build().await;
+    let context = &mut test_cluster.wallet;
+    let handle = &test_cluster.fullnode_handle.sui_node;
+    let orchestrator = handle.with(|n| n.transaction_orchestrator().as_ref().unwrap().clone());
+
+    // Create and execute a valid transaction to mutate an object
+    let mut txns = batch_make_transfer_transactions(context, 1).await;
+    let valid_txn = txns.swap_remove(0);
+
+    let (response, _) = execute_with_orchestrator(
+        &orchestrator,
+        valid_txn.clone(),
+        ExecuteTransactionRequestType::WaitForLocalExecution,
+    )
+    .await?;
+
+    // Get one of the mutated objects
+    let effects = &response.effects.effects;
+    let mutated_objects = effects.mutated();
+    assert!(!mutated_objects.is_empty());
+
+    let (object_id, _, _) = mutated_objects[0].0;
+
+    // Get the old object reference (before mutation)
+    let old_obj_refs = effects.modified_at_versions();
+    let (_, old_version) = old_obj_refs
+        .iter()
+        .find(|(id, _)| *id == object_id)
+        .expect("Should find old version");
+
+    // Get the old object's digest
+    let past_read = handle
+        .state()
+        .get_past_object_read(&object_id, *old_version)
+        .expect("Should be able to read past object");
+
+    let old_digest = match past_read {
+        PastObjectRead::VersionFound(obj_ref, _, _) => obj_ref.2,
+        _ => panic!("Expected to find past object version"),
+    };
+
+    // Create a transaction using the OLD object version
+    let sender = context.active_address().unwrap();
+    let recipient = context.get_addresses()[1];
+    let gas_price = context.get_reference_gas_price().await?;
+
+    use sui_test_transaction_builder::TestTransactionBuilder;
+    let invalid_tx_data =
+        TestTransactionBuilder::new(sender, (object_id, *old_version, old_digest), gas_price)
+            .transfer_sui(None, recipient)
+            .build();
+
+    let invalid_txn = context.sign_transaction(&invalid_tx_data).await;
+
+    // Execute the transaction - it should be rejected during early validation
+    let result = execute_with_orchestrator(
+        &orchestrator,
+        invalid_txn,
+        ExecuteTransactionRequestType::WaitForLocalExecution,
+    )
+    .await;
+
+    // Verify the transaction was rejected
+    assert!(
+        result.is_err(),
+        "Transaction with old object version should be rejected"
+    );
+
+    let err = result.unwrap_err();
+    match err {
+        TransactionSubmissionError::TransactionFailed { category, details } => {
+            // Should be non-retriable
+            assert_eq!(category, ErrorCategory::InvalidTransaction);
+            assert!(!category.is_submission_retriable());
+
+            // Verify the error indicates object version conflict
+            assert!(
+                details.contains("not available for consumption")
+                    || details.contains("current version"),
+                "Error should indicate version conflict: {}",
+                details
+            );
+        }
+        _ => panic!("Expected TransactionFailed, got: {:?}", err),
+    }
+
+    Ok(())
+}
+
+#[sim_test]
+async fn test_early_validation_no_side_effects() -> Result<(), anyhow::Error> {
+    let mut test_cluster = TestClusterBuilder::new().build().await;
+    let context = &mut test_cluster.wallet;
+    let handle = &test_cluster.fullnode_handle.sui_node;
+    let orchestrator = handle.with(|n| n.transaction_orchestrator().as_ref().unwrap().clone());
+
+    let txn_count = 2;
+    let mut txns = batch_make_transfer_transactions(context, txn_count).await;
+    assert!(txns.len() >= txn_count);
+
+    // Execute first transaction to establish baseline
+    let txn1 = txns.swap_remove(0);
+    let digest1 = *txn1.digest();
+
+    let result1 = execute_with_orchestrator(
+        &orchestrator,
+        txn1,
+        ExecuteTransactionRequestType::WaitForLocalExecution,
+    )
+    .await;
+
+    assert!(
+        result1.is_ok(),
+        "First transaction should succeed: {:?}",
+        result1.err()
+    );
+
+    // Execute second transaction - early validation should not have caused lock conflicts
+    let txn2 = txns.swap_remove(0);
+    let digest2 = *txn2.digest();
+
+    let result2 = execute_with_orchestrator(
+        &orchestrator,
+        txn2,
+        ExecuteTransactionRequestType::WaitForLocalExecution,
+    )
+    .await;
+
+    assert!(
+        result2.is_ok(),
+        "Second transaction should succeed without lock conflicts: {:?}",
+        result2.err()
+    );
+
+    // Verify both transactions executed
+    assert_ne!(
+        digest1, digest2,
+        "Transactions should have different digests"
+    );
 
     Ok(())
 }

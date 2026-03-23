@@ -3,22 +3,25 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use anyhow::Result;
+use async_trait::async_trait;
 use diesel_async::RunQueryDsl;
-use sui_indexer_alt_framework::{
-    pipeline::{concurrent::Handler, Processor},
-    postgres::{Connection, Db},
-    types::full_checkpoint_content::CheckpointData,
-};
-use sui_indexer_alt_schema::{objects::StoredObject, schema::kv_objects};
+use sui_indexer_alt_framework::pipeline::Processor;
+use sui_indexer_alt_framework::postgres::Connection;
+use sui_indexer_alt_framework::postgres::handler::Handler;
+use sui_indexer_alt_framework::types::full_checkpoint_content::Checkpoint;
+use sui_indexer_alt_schema::objects::StoredObject;
+use sui_indexer_alt_schema::schema::kv_objects;
 
 pub(crate) struct KvObjects;
 
+#[async_trait]
 impl Processor for KvObjects {
     const NAME: &'static str = "kv_objects";
     type Value = StoredObject;
 
-    fn process(&self, checkpoint: &Arc<CheckpointData>) -> Result<Vec<Self::Value>> {
+    async fn process(&self, checkpoint: &Arc<Checkpoint>) -> Result<Vec<Self::Value>> {
         let deleted_objects = checkpoint
             .eventually_removed_object_refs_post_version()
             .into_iter()
@@ -30,22 +33,19 @@ impl Processor for KvObjects {
                 })
             });
 
-        let created_objects =
-            checkpoint
-                .transactions
-                .iter()
-                .flat_map(|txn| txn.output_objects.iter())
-                .map(|o| {
-                    let id = o.id();
-                    let version = o.version().value();
-                    Ok(StoredObject {
-                        object_id: id.to_vec(),
-                        object_version: version as i64,
-                        serialized_object: Some(bcs::to_bytes(o).with_context(|| {
-                            format!("Serializing object {id} version {version}")
-                        })?),
-                    })
-                });
+        let created_objects = checkpoint.transactions.iter().flat_map(|txn| {
+            txn.output_objects(&checkpoint.object_set).map(|o| {
+                let id = o.id();
+                let version = o.version();
+                Ok(StoredObject {
+                    object_id: id.to_vec(),
+                    object_version: version.value() as i64,
+                    serialized_object: Some(bcs::to_bytes(o).with_context(|| {
+                        format!("Serializing object {id} version {}", version.value())
+                    })?),
+                })
+            })
+        });
 
         deleted_objects
             .chain(created_objects)
@@ -53,10 +53,8 @@ impl Processor for KvObjects {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl Handler for KvObjects {
-    type Store = Db;
-
     const MIN_EAGER_ROWS: usize = 100;
     const MAX_PENDING_ROWS: usize = 10000;
 

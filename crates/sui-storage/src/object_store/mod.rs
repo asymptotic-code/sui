@@ -1,12 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use object_store::path::Path;
-use object_store::{DynObjectStore, ObjectMeta, ObjectStore};
+use object_store::{DynObjectStore, ObjectMeta, ObjectStore, ObjectStoreExt};
 use std::sync::Arc;
 
 pub mod http;

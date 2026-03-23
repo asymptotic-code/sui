@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use proc_macro::TokenStream;
-use quote::{quote, quote_spanned, ToTokens};
+use quote::{ToTokens, quote, quote_spanned};
 use syn::{
-    fold::{fold_expr, fold_item_macro, fold_stmt, Fold},
-    parse::Parser,
-    parse2, parse_macro_input,
-    punctuated::Punctuated,
-    spanned::Spanned,
     Attribute, BinOp, Data, DataEnum, DeriveInput, Expr, ExprBinary, ExprMacro, Item, ItemMacro,
     Stmt, StmtMacro, Token, UnOp,
+    fold::{Fold, fold_expr, fold_item_macro, fold_stmt},
+    parse::Parser,
+    parse_macro_input, parse2,
+    punctuated::Punctuated,
+    spanned::Spanned,
 };
 
 #[proc_macro_attribute]
@@ -48,25 +48,6 @@ pub fn init_static_initializers(_args: TokenStream, item: TokenStream) -> TokenS
                 let mut cache = ::sui_simulator::lru::LruCache::new(1.try_into().unwrap());
                 cache.put(1, 1);
 
-                {
-                    // Initialize the static initializers here:
-                    // https://github.com/move-language/move/blob/652badf6fd67e1d4cc2aa6dc69d63ad14083b673/language/tools/move-package/src/package_lock.rs#L12
-                    use std::path::PathBuf;
-                    use sui_simulator::sui_move_build::{BuildConfig, SuiPackageHooks};
-                    use sui_simulator::tempfile::TempDir;
-                    use sui_simulator::move_package::package_hooks::register_package_hooks;
-
-                    register_package_hooks(Box::new(SuiPackageHooks {}));
-                    let mut path = PathBuf::from(env!("SIMTEST_STATIC_INIT_MOVE"));
-                    let mut build_config = BuildConfig::new_for_testing();
-
-                    build_config.config.install_dir = Some(TempDir::new().unwrap().keep());
-                    let _all_module_bytes = build_config
-                        .build(&path)
-                        .unwrap()
-                        .get_package_bytes(/* with_unpublished_deps */ false);
-                }
-
                 use std::sync::Arc;
 
                 use ::sui_simulator::anemo_tower::callback::CallbackLayer;
@@ -85,6 +66,23 @@ pub fn init_static_initializers(_args: TokenStream, item: TokenStream) -> TokenS
                 let rt = ::sui_simulator::runtime::Runtime::new();
                 rt.block_on(async move {
                     use ::sui_simulator::anemo::{Network, Request};
+
+                    {
+                        // Initialize the static initializers here:
+                        // https://github.com/move-language/move/blob/652badf6fd67e1d4cc2aa6dc69d63ad14083b673/language/tools/move-package/src/package_lock.rs#L12
+                        use std::path::PathBuf;
+                        use sui_simulator::sui_move_build::BuildConfig;
+                        use sui_simulator::tempfile::TempDir;
+
+                        let mut path = PathBuf::from(env!("SIMTEST_STATIC_INIT_MOVE"));
+                        let mut build_config = BuildConfig::new_for_testing();
+                        build_config.config.install_dir = Some(TempDir::new().unwrap().keep());
+                        let _all_module_bytes = build_config
+                            .build_async(&path)
+                            .await
+                            .unwrap()
+                            .get_package_bytes(/* with_unpublished_deps */ false);
+                    }
 
                     let make_network = |port: u16| {
                         let registry = prometheus::Registry::new();
@@ -206,7 +204,15 @@ pub fn sim_test(args: TokenStream, item: TokenStream) -> TokenStream {
             #sig {
                 async fn body_fn() #return_type { #body }
 
-                let ret = body_fn().await;
+                let timeout_secs: u64 = std::env::var("SUI_SIM_TEST_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1000);
+                let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
+
+                let ret = tokio::time::timeout(timeout_duration, body_fn())
+                    .await
+                    .expect("sim_test timed out");
 
                 ::sui_simulator::task::shutdown_all_nodes();
 
@@ -317,7 +323,7 @@ impl CheckArithmetic {
         let Ok(exprs) = parser.parse(tokens.clone().into()) else {
             return Err(syn::Error::new_spanned(
                 tokens,
-                "could not process macro contents - use #[skip_checked_arithmetic] to skip this macro"
+                "could not process macro contents - use #[skip_checked_arithmetic] to skip this macro",
             ));
         };
 

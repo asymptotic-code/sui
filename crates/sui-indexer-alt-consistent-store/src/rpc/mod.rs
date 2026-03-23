@@ -1,25 +1,30 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::{convert::Infallible, sync::Arc};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context;
+use axum::Router;
 use axum::extract::Request;
 use axum::response::IntoResponse;
-use axum::Router;
+use axum_server::Handle;
+use axum_server::tls_rustls::RustlsConfig;
+use futures::future::BoxFuture;
 use metrics::RpcMetrics;
 use middleware::metrics::MakeMetricsHandler;
+use middleware::panic::CatchPanicLayer;
 use middleware::version::Version;
 use mysten_network::callback::CallbackLayer;
 use prometheus::Registry;
+use sui_futures::service::Service;
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tokio::sync::oneshot;
 use tonic::server::NamedService;
 use tonic_health::ServingStatus;
-use tower::Service;
-use tracing::{error, info};
+use tracing::info;
 
 pub(crate) mod consistent_service;
 mod error;
@@ -34,6 +39,25 @@ pub struct RpcArgs {
     /// Address to accept incoming RPC connections on.
     #[clap(long, default_value_t = Self::default().rpc_listen_address)]
     pub rpc_listen_address: SocketAddr,
+
+    /// TLS configuration
+    #[clap(flatten)]
+    pub tls: TlsArgs,
+}
+
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct TlsArgs {
+    /// Address to accept incoming TLS/HTTPS connections on
+    #[clap(long, requires_all = &["tls_cert", "tls_key"])]
+    pub rpc_tls_listen_address: Option<SocketAddr>,
+
+    /// Path to TLS certificate file (PEM format)
+    #[clap(long, requires_all = &["rpc_tls_listen_address", "tls_key"])]
+    pub tls_cert: Option<PathBuf>,
+
+    /// Path to TLS private key file (PEM format)
+    #[clap(long, requires_all = &["rpc_tls_listen_address", "tls_cert"])]
+    pub tls_key: Option<PathBuf>,
 }
 
 /// Responsible for the set-up of a gRPC service -- adding services, configuring reflection,
@@ -41,6 +65,12 @@ pub struct RpcArgs {
 pub(crate) struct RpcService<'d> {
     /// Address to accept incoming RPC connections on.
     rpc_listen_address: SocketAddr,
+
+    /// Optional address to accept incoming TLS RPC connections on.
+    rpc_tls_listen_address: Option<SocketAddr>,
+
+    /// TLS configuration
+    tls_config: Option<RustlsConfig>,
 
     /// The version string to report with each response, as an HTTP header.
     version: &'static str,
@@ -50,39 +80,56 @@ pub(crate) struct RpcService<'d> {
     reflection_v1: tonic_reflection::server::Builder<'d>,
     reflection_v1alpha: tonic_reflection::server::Builder<'d>,
 
-    /// The names of gRPC services registered with this instance.
-    service_names: Vec<&'static str>,
+    /// Names of gRPC services and associated readiness futures registered with this instance.
+    service_futures: Vec<(&'static str, BoxFuture<'static, ()>)>,
 
     /// The axum router that wil handle incoming requests.
     router: Router,
 
     /// Metrics for the RPC service.
     metrics: Arc<RpcMetrics>,
-
-    /// Cancellation token controls lifecycle for all RPC-related services.
-    cancel: CancellationToken,
 }
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 impl<'d> RpcService<'d> {
-    pub(crate) fn new(
+    pub(crate) async fn new(
         args: RpcArgs,
         version: &'static str,
         registry: &Registry,
-        cancel: CancellationToken,
-    ) -> Self {
-        let RpcArgs { rpc_listen_address } = args;
-        Self {
+    ) -> anyhow::Result<Self> {
+        let RpcArgs {
             rpc_listen_address,
+            tls,
+        } = args;
+
+        let TlsArgs {
+            rpc_tls_listen_address,
+            tls_cert,
+            tls_key,
+        } = tls;
+
+        let tls_config = if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
+            Some(
+                RustlsConfig::from_pem_file(cert, key)
+                    .await
+                    .context("Failed to load TLS configuration")?,
+            )
+        } else {
+            None
+        };
+
+        Ok(Self {
+            rpc_listen_address,
+            rpc_tls_listen_address,
+            tls_config,
             version,
             reflection_v1: tonic_reflection::server::Builder::configure(),
             reflection_v1alpha: tonic_reflection::server::Builder::configure(),
-            service_names: vec![],
+            service_futures: vec![],
             router: Router::new(),
             metrics: Arc::new(RpcMetrics::new(registry)),
-            cancel,
-        }
+        })
     }
 
     /// Register a file descriptor set to be exposed via the reflection service.
@@ -95,30 +142,32 @@ impl<'d> RpcService<'d> {
     }
 
     /// Register a new gRPC service.
-    pub(crate) fn add_service<S>(mut self, s: S) -> Self
+    pub(crate) fn add_service<S, F>(mut self, s: S, ready: F) -> Self
     where
         S: Clone + Send + Sync + 'static,
         S: NamedService,
-        S: Service<Request, Response: IntoResponse, Error = Infallible>,
+        S: tower::Service<Request, Response: IntoResponse, Error = Infallible>,
         S::Future: Send + 'static,
         S::Error: Send + Into<BoxError>,
+        F: Future<Output = ()> + Send + 'static,
     {
-        self.service_names.push(S::NAME);
+        self.service_futures.push((S::NAME, Box::pin(ready)));
         self.router = add_service(self.router, s);
         self
     }
 
     /// Run the RPC service. This binds the listener and exposes handlers for the RPC service.
-    pub(crate) async fn run(self) -> anyhow::Result<JoinHandle<()>> {
+    pub(crate) async fn run(self) -> anyhow::Result<Service> {
         let Self {
             rpc_listen_address,
+            rpc_tls_listen_address,
+            tls_config,
             version,
             reflection_v1,
             reflection_v1alpha,
-            mut service_names,
+            service_futures,
             mut router,
             metrics,
-            cancel,
         } = self;
 
         let reflection_v1 = reflection_v1
@@ -133,47 +182,95 @@ impl<'d> RpcService<'d> {
 
         let (health_reporter, health_service) = tonic_health::server::health_reporter();
 
-        service_names.extend([
+        let internal_services = vec![
             service_name(&reflection_v1),
             service_name(&reflection_v1alpha),
             service_name(&health_service),
-        ]);
+        ];
 
         router = add_service(router, reflection_v1);
         router = add_service(router, reflection_v1alpha);
         router = add_service(router, health_service);
         router = router
-            .layer(CallbackLayer::new(MakeMetricsHandler::new(metrics)))
+            .layer(CallbackLayer::new(MakeMetricsHandler::new(metrics.clone())))
             .layer(axum::middleware::from_fn_with_state(
                 Version(version),
                 middleware::version::set_version,
-            ));
+            ))
+            .layer(CatchPanicLayer::new(metrics));
 
-        for service_name in service_names {
+        for service_name in internal_services {
             health_reporter
                 .set_service_status(service_name, ServingStatus::Serving)
                 .await;
         }
 
+        // Create a Service to be attached as secondary to the main service
+        let mut readiness_checks = Service::new();
+
+        for (name, ready) in service_futures {
+            health_reporter
+                .set_service_status(name, ServingStatus::NotServing)
+                .await;
+
+            let reporter = health_reporter.clone();
+            readiness_checks = readiness_checks.spawn(async move {
+                ready.await;
+                reporter
+                    .set_service_status(name, ServingStatus::Serving)
+                    .await;
+                info!("gRPC service {name} is now SERVING");
+                Ok(())
+            });
+        }
+
+        let mut service = Service::new();
+        service = service.attach(readiness_checks);
+
+        // Start HTTPS server if TLS is configured
+        if let (Some(listen_address), Some(config)) = (rpc_tls_listen_address, tls_config) {
+            info!("Starting Consistent RPC TLS service on {listen_address}");
+            let handle = Handle::new();
+            let tls_router = router.clone();
+
+            service = service
+                .with_shutdown_signal({
+                    let handle = handle.clone();
+                    async move {
+                        handle.graceful_shutdown(None);
+                    }
+                })
+                .spawn(async move {
+                    axum_server::bind_rustls(listen_address, config)
+                        .handle(handle)
+                        .serve(tls_router.into_make_service())
+                        .await
+                        .context("Consistent RPC TLS service failed")?;
+                    Ok(())
+                });
+        }
+
+        // Start HTTP server
         info!("Starting Consistent RPC service on {rpc_listen_address}");
         let listener = TcpListener::bind(rpc_listen_address)
             .await
             .context("Failed to bind Consistent RPC to listen address")?;
 
-        let service = axum::serve(listener, router).with_graceful_shutdown({
-            let cancel = cancel.clone();
-            async move {
-                cancel.cancelled().await;
-                info!("Shutting down Consistent RPC service");
-            }
-        });
+        let (stx, srx) = oneshot::channel::<()>();
+        service = service
+            .with_shutdown_signal(async move {
+                let _ = stx.send(());
+            })
+            .spawn(async move {
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(async move {
+                        let _ = srx.await;
+                    })
+                    .await
+                    .context("Consistent RPC HTTP service failed")
+            });
 
-        Ok(tokio::spawn(async move {
-            if let Err(e) = service.await {
-                error!("Failed to start Consistent RPC service: {e:?}");
-                cancel.cancel();
-            }
-        }))
+        Ok(service)
     }
 }
 
@@ -181,6 +278,7 @@ impl Default for RpcArgs {
     fn default() -> Self {
         Self {
             rpc_listen_address: "0.0.0.0:7001".parse().unwrap(),
+            tls: TlsArgs::default(),
         }
     }
 }
@@ -193,7 +291,7 @@ fn add_service<S>(router: Router, s: S) -> Router
 where
     S: Clone + Send + Sync + 'static,
     S: NamedService,
-    S: Service<Request, Response: IntoResponse, Error = Infallible>,
+    S: tower::Service<Request, Response: IntoResponse, Error = Infallible>,
     S::Future: Send + 'static,
     S::Error: Send + Into<BoxError>,
 {

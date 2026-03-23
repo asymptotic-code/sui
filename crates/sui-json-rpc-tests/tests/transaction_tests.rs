@@ -1,6 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(deprecated)]
+
 #[cfg(not(msim))]
 use std::str::FromStr;
 
@@ -15,15 +17,15 @@ use sui_json_rpc_types::{
     SuiTransactionBlockResponseOptions, TransactionBlockBytes,
 };
 use sui_macros::sim_test;
+use sui_types::SUI_FRAMEWORK_ADDRESS;
 use sui_types::base_types::ObjectID;
 use sui_types::base_types::SuiAddress;
 use sui_types::gas_coin::GAS;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use sui_types::quorum_driver_types::ExecuteTransactionRequestType;
 use sui_types::transaction::Command;
 use sui_types::transaction::SenderSignedData;
 use sui_types::transaction::TransactionData;
-use sui_types::SUI_FRAMEWORK_ADDRESS;
+use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 use test_cluster::TestClusterBuilder;
 
 use sui_json_rpc_api::{IndexerApiClient, TransactionBuilderClient, WriteApiClient};
@@ -65,7 +67,8 @@ async fn test_get_transaction_block() -> Result<(), anyhow::Error> {
             .await?;
         let tx = cluster
             .wallet
-            .sign_transaction(&transaction_bytes.to_data()?);
+            .sign_transaction(&transaction_bytes.to_data()?)
+            .await;
 
         let (tx_bytes, signatures) = tx.to_tx_bytes_and_signatures();
 
@@ -139,7 +142,8 @@ async fn test_get_raw_transaction() -> Result<(), anyhow::Error> {
         .await?;
     let tx = cluster
         .wallet
-        .sign_transaction(&transaction_bytes.to_data()?);
+        .sign_transaction(&transaction_bytes.to_data()?)
+        .await;
     let original_sender_signed_data = tx.data().clone();
 
     let (tx_bytes, signatures) = tx.to_tx_bytes_and_signatures();
@@ -166,11 +170,9 @@ async fn test_get_raw_transaction() -> Result<(), anyhow::Error> {
 async fn test_get_fullnode_transaction() -> Result<(), anyhow::Error> {
     let cluster = TestClusterBuilder::new().build().await;
 
-    let context = &cluster.wallet;
-
     let mut tx_responses: Vec<SuiTransactionBlockResponse> = Vec::new();
 
-    let client = context.get_client().await.unwrap();
+    let client = cluster.sui_client().clone();
 
     for address in cluster.get_addresses() {
         let objects = client
@@ -197,7 +199,7 @@ async fn test_get_fullnode_transaction() -> Result<(), anyhow::Error> {
                 .transaction_builder()
                 .transfer_object(address, oref.object_id, Some(gas_id), 1_000_000, address)
                 .await?;
-            let tx = cluster.wallet.sign_transaction(&data);
+            let tx = cluster.wallet.sign_transaction(&data).await;
 
             let response = client
                 .quorum_driver_api()
@@ -344,8 +346,7 @@ async fn test_get_fullnode_transaction() -> Result<(), anyhow::Error> {
 #[sim_test]
 async fn test_query_transaction_blocks() -> Result<(), anyhow::Error> {
     let mut cluster = TestClusterBuilder::new().build().await;
-    let context = &cluster.wallet;
-    let client = context.get_client().await.unwrap();
+    let client = cluster.sui_client().clone();
 
     let address = cluster.get_address_0();
     let objects = client
@@ -420,7 +421,7 @@ async fn test_query_transaction_blocks() -> Result<(), anyhow::Error> {
     let pt = pt_builer.finish();
 
     let tx_data = TransactionData::new_programmable(signer, vec![gas], pt, 10_000_000, 1000);
-    let signed_data = cluster.wallet.sign_transaction(&tx_data);
+    let signed_data = cluster.wallet.sign_transaction(&tx_data).await;
     let _response = client
         .quorum_driver_api()
         .execute_transaction_block(
@@ -450,7 +451,7 @@ async fn test_query_transaction_blocks() -> Result<(), anyhow::Error> {
 #[sim_test]
 async fn test_display_transaction_block_with_empty_balance_changes() {
     let cluster = TestClusterBuilder::new()
-        .with_epoch_duration_ms(5_000)
+        .with_epoch_duration_ms(10_000)
         .build()
         .await;
     cluster.wait_for_epoch(Some(1)).await;

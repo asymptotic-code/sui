@@ -34,6 +34,9 @@ FungibleStakedSuiData
 FungibleStakedSuiDataKey
 	public struct
 	0x3::staking_pool
+UnderflowSuiBalance
+	public struct
+	0x3::staking_pool
 new
 	public(package) fun
 	0x3::staking_pool
@@ -514,9 +517,6 @@ convert_to_fungible_staked_sui
 redeem_fungible_staked_sui
 	public(package) fun
 	0x3::validator_set
-request_set_commission_rate
-	public(package) fun
-	0x3::validator_set
 advance_epoch
 	public(package) fun
 	0x3::validator_set
@@ -589,19 +589,28 @@ find_validator_from_table_vec
 get_validator_indices
 	fun
 	0x3::validator_set
-get_validator_mut
+any_validator
 	public(package) fun
 	0x3::validator_set
-get_active_or_pending_or_candidate_validator_mut
-	fun
-	0x3::validator_set
-get_validator_mut_with_verified_cap
+any_validator_mut
 	public(package) fun
 	0x3::validator_set
-get_validator_mut_with_ctx
+active_validator
 	public(package) fun
 	0x3::validator_set
-get_validator_mut_with_ctx_including_candidates
+active_validator_mut
+	public(package) fun
+	0x3::validator_set
+pending_validator
+	public(package) fun
+	0x3::validator_set
+pending_validator_mut
+	public(package) fun
+	0x3::validator_set
+candidate_validator
+	public(package) fun
+	0x3::validator_set
+candidate_validator_mut
 	public(package) fun
 	0x3::validator_set
 get_validator_ref
@@ -609,12 +618,6 @@ get_validator_ref
 	0x3::validator_set
 get_active_or_pending_or_candidate_validator_ref
 	public(package) fun
-	0x3::validator_set
-get_active_validator_ref
-	public fun
-	0x3::validator_set
-get_pending_validator_ref
-	public fun
 	0x3::validator_set
 verify_cap
 	public(package) fun
@@ -679,6 +682,12 @@ is_at_risk_validator
 active_validator_addresses
 	public(package) fun
 	0x3::validator_set
+get_active_validator_ref
+	public fun
+	0x3::validator_set
+get_pending_validator_ref
+	public fun
+	0x3::validator_set
 StorageFund
 	public struct
 	0x3::storage_fund
@@ -709,6 +718,9 @@ current_epoch_subsidy_amount
 get_distribution_counter
 	public(package) fun
 	0x3::stake_subsidy
+ExecutionTimeObservationChunkKey
+	public struct
+	0x3::sui_system_state_inner
 SystemParameters
 	public struct
 	0x3::sui_system_state_inner
@@ -895,13 +907,25 @@ extract_coin_balance
 store_execution_time_estimates
 	public(package) fun
 	0x3::sui_system_state_inner
+store_execution_time_estimates_v2
+	public(package) fun
+	0x3::sui_system_state_inner
 validators
 	public(package) fun
 	0x3::sui_system_state_inner
 validators_mut
 	public(package) fun
 	0x3::sui_system_state_inner
+extra_fields
+	public(package) fun
+	0x3::sui_system_state_inner
+extra_fields_mut
+	public(package) fun
+	0x3::sui_system_state_inner
 SuiSystemState
+	public struct
+	0x3::sui_system
+AccumulatorStorageCostKey
 	public struct
 	0x3::sui_system
 create
@@ -1024,6 +1048,12 @@ pool_exchange_rates
 active_validator_addresses
 	public fun
 	0x3::sui_system
+active_validator_addresses_ref
+	public fun
+	0x3::sui_system
+active_validator_voting_powers
+	public fun
+	0x3::sui_system
 calculate_rewards
 	public(package) fun
 	0x3::sui_system
@@ -1036,6 +1066,9 @@ load_system_state
 load_system_state_mut
 	fun
 	0x3::sui_system
+load_system_state_ref
+	fun
+	0x3::sui_system
 load_inner_maybe_upgrade
 	fun
 	0x3::sui_system
@@ -1043,6 +1076,15 @@ validator_voting_powers
 	fun
 	0x3::sui_system
 store_execution_time_estimates
+	fun
+	0x3::sui_system
+store_execution_time_estimates_v2
+	fun
+	0x3::sui_system
+get_accumulator_storage_fund_amount
+	fun
+	0x3::sui_system
+write_accumulator_storage_cost
 	fun
 	0x3::sui_system
 GenesisValidatorMetadata
@@ -1084,12 +1126,6 @@ ecvrf_verify
 ed25519_verify
 	public fun
 	0x2::ed25519
-blake2b256
-	public fun
-	0x2::hash
-keccak256
-	public fun
-	0x2::hash
 hash_to_input
 	public fun
 	0x2::vdf
@@ -1192,7 +1228,7 @@ try_get
 contains
 	public fun
 	0x2::vec_map
-size
+length
 	public fun
 	0x2::vec_map
 is_empty
@@ -1223,6 +1259,9 @@ get_entry_by_idx_mut
 	public fun
 	0x2::vec_map
 remove_entry_by_idx
+	public fun
+	0x2::vec_map
+size
 	public fun
 	0x2::vec_map
 Party
@@ -1324,8 +1363,23 @@ sui_accumulator_root_object_id
 sui_accumulator_root_address
 	public(package) fun
 	0x2::object
+sui_coin_registry_object_id
+	public(package) fun
+	0x2::object
+sui_coin_registry_address
+	public(package) fun
+	0x2::object
+sui_display_registry_object_id
+	public(package) fun
+	0x2::object
+sui_display_registry_address
+	public(package) fun
+	0x2::object
 bridge
 	fun
+	0x2::object
+address_alias_state
+	public(package) fun
 	0x2::object
 uid_as_inner
 	public fun
@@ -1474,35 +1528,59 @@ has_child_object_with_ty
 AccumulatorRoot
 	public struct
 	0x2::accumulator
-Key
+U128
 	public struct
 	0x2::accumulator
-U128
+Key
 	public struct
 	0x2::accumulator
 create
 	fun
 	0x2::accumulator
+root_id
+	public(package) fun
+	0x2::accumulator
+root_id_mut
+	public(package) fun
+	0x2::accumulator
+accumulator_u128_exists
+	public(package) fun
+	0x2::accumulator
+accumulator_u128_read
+	public(package) fun
+	0x2::accumulator
+create_u128
+	public(package) fun
+	0x2::accumulator
+destroy_u128
+	public(package) fun
+	0x2::accumulator
+update_u128
+	public(package) fun
+	0x2::accumulator
+is_zero_u128
+	public(package) fun
+	0x2::accumulator
+accumulator_key
+	public(package) fun
+	0x2::accumulator
 accumulator_address
 	public(package) fun
 	0x2::accumulator
 root_has_accumulator
-	fun
+	public(package) fun
 	0x2::accumulator
 root_add_accumulator
-	fun
+	public(package) fun
 	0x2::accumulator
 root_borrow_accumulator_mut
-	fun
+	public(package) fun
+	0x2::accumulator
+root_borrow_accumulator
+	public(package) fun
 	0x2::accumulator
 root_remove_accumulator
-	fun
-	0x2::accumulator
-settlement_prologue
-	fun
-	0x2::accumulator
-settle_u128
-	fun
+	public(package) fun
 	0x2::accumulator
 emit_deposit_event
 	public(package) fun
@@ -1510,60 +1588,6 @@ emit_deposit_event
 emit_withdraw_event
 	public(package) fun
 	0x2::accumulator
-AuthenticatorState
-	public struct
-	0x2::authenticator_state
-AuthenticatorStateInner
-	public struct
-	0x2::authenticator_state
-JWK
-	public struct
-	0x2::authenticator_state
-JwkId
-	public struct
-	0x2::authenticator_state
-ActiveJwk
-	public struct
-	0x2::authenticator_state
-active_jwk_equal
-	fun
-	0x2::authenticator_state
-jwk_equal
-	fun
-	0x2::authenticator_state
-jwk_id_equal
-	fun
-	0x2::authenticator_state
-string_bytes_lt
-	fun
-	0x2::authenticator_state
-jwk_lt
-	fun
-	0x2::authenticator_state
-create
-	fun
-	0x2::authenticator_state
-load_inner_mut
-	fun
-	0x2::authenticator_state
-load_inner
-	fun
-	0x2::authenticator_state
-check_sorted
-	fun
-	0x2::authenticator_state
-update_authenticator_state
-	fun
-	0x2::authenticator_state
-deduplicate
-	fun
-	0x2::authenticator_state
-expire_jwks
-	fun
-	0x2::authenticator_state
-get_active_jwks
-	fun
-	0x2::authenticator_state
 Bag
 	public struct
 	0x2::bag
@@ -1597,57 +1621,33 @@ is_empty
 destroy_empty
 	public fun
 	0x2::bag
-Supply
+OwnerKey
 	public struct
-	0x2::balance
-Balance
+	0x2::accumulator_metadata
+Owner
 	public struct
-	0x2::balance
-value
-	public fun
-	0x2::balance
-supply_value
-	public fun
-	0x2::balance
-create_supply
-	public fun
-	0x2::balance
-increase_supply
-	public fun
-	0x2::balance
-decrease_supply
-	public fun
-	0x2::balance
-zero
-	public fun
-	0x2::balance
-join
-	public fun
-	0x2::balance
-split
-	public fun
-	0x2::balance
-withdraw_all
-	public fun
-	0x2::balance
-destroy_zero
-	public fun
-	0x2::balance
-create_staking_rewards
+	0x2::accumulator_metadata
+MetadataKey
+	public struct
+	0x2::accumulator_metadata
+Metadata
+	public struct
+	0x2::accumulator_metadata
+AccumulatorObjectCountKey
+	public struct
+	0x2::accumulator_metadata
+record_accumulator_object_changes
 	fun
-	0x2::balance
-destroy_storage_rebates
+	0x2::accumulator_metadata
+get_accumulator_object_count
 	fun
-	0x2::balance
-destroy_supply
-	public(package) fun
-	0x2::balance
-send_to_account
-	fun
-	0x2::balance
-withdraw_from_account
-	fun
-	0x2::balance
+	0x2::accumulator_metadata
+blake2b256
+	public fun
+	0x2::hash
+keccak256
+	public fun
+	0x2::hash
 BCS
 	public struct
 	0x2::bcs
@@ -1741,6 +1741,264 @@ peel_option_u128
 peel_option_u256
 	public fun
 	0x2::bcs
+EventStreamHead
+	public struct
+	0x2::accumulator_settlement
+settlement_prologue
+	fun
+	0x2::accumulator_settlement
+settle_u128
+	fun
+	0x2::accumulator_settlement
+record_settlement_sui_conservation
+	fun
+	0x2::accumulator_settlement
+add_to_mmr
+	fun
+	0x2::accumulator_settlement
+u256_from_bytes
+	fun
+	0x2::accumulator_settlement
+hash_two_to_one_u256
+	fun
+	0x2::accumulator_settlement
+new_stream_head
+	fun
+	0x2::accumulator_settlement
+settle_events
+	fun
+	0x2::accumulator_settlement
+VecSet
+	public struct
+	0x2::vec_set
+empty
+	public fun
+	0x2::vec_set
+singleton
+	public fun
+	0x2::vec_set
+insert
+	public fun
+	0x2::vec_set
+remove
+	public fun
+	0x2::vec_set
+contains
+	public fun
+	0x2::vec_set
+length
+	public fun
+	0x2::vec_set
+is_empty
+	public fun
+	0x2::vec_set
+into_keys
+	public fun
+	0x2::vec_set
+from_keys
+	public fun
+	0x2::vec_set
+keys
+	public fun
+	0x2::vec_set
+size
+	public fun
+	0x2::vec_set
+Claimed
+	public struct
+	0x2::derived_object
+DerivedObjectKey
+	public struct
+	0x2::derived_object
+ClaimedStatus
+	public enum
+	0x2::derived_object
+claim
+	public fun
+	0x2::derived_object
+exists
+	public fun
+	0x2::derived_object
+derive_address
+	public fun
+	0x2::derived_object
+AddressAliasState
+	public struct
+	0x2::address_alias
+AddressAliases
+	public struct
+	0x2::address_alias
+AliasKey
+	public struct
+	0x2::address_alias
+create
+	fun
+	0x2::address_alias
+enable
+	entry fun
+	0x2::address_alias
+add
+	entry fun
+	0x2::address_alias
+replace_all
+	entry fun
+	0x2::address_alias
+remove
+	entry fun
+	0x2::address_alias
+AuthenticatorState
+	public struct
+	0x2::authenticator_state
+AuthenticatorStateInner
+	public struct
+	0x2::authenticator_state
+JWK
+	public struct
+	0x2::authenticator_state
+JwkId
+	public struct
+	0x2::authenticator_state
+ActiveJwk
+	public struct
+	0x2::authenticator_state
+active_jwk_equal
+	fun
+	0x2::authenticator_state
+jwk_equal
+	fun
+	0x2::authenticator_state
+jwk_id_equal
+	fun
+	0x2::authenticator_state
+string_bytes_lt
+	fun
+	0x2::authenticator_state
+jwk_lt
+	fun
+	0x2::authenticator_state
+create
+	fun
+	0x2::authenticator_state
+load_inner_mut
+	fun
+	0x2::authenticator_state
+load_inner
+	fun
+	0x2::authenticator_state
+check_sorted
+	fun
+	0x2::authenticator_state
+update_authenticator_state
+	fun
+	0x2::authenticator_state
+deduplicate
+	fun
+	0x2::authenticator_state
+expire_jwks
+	fun
+	0x2::authenticator_state
+get_active_jwks
+	fun
+	0x2::authenticator_state
+is_feature_enabled
+	public(package) fun
+	0x2::protocol_config
+Withdrawal
+	public struct
+	0x2::funds_accumulator
+withdrawal_owner
+	public fun
+	0x2::funds_accumulator
+withdrawal_limit
+	public fun
+	0x2::funds_accumulator
+withdrawal_split
+	public fun
+	0x2::funds_accumulator
+withdrawal_join
+	public fun
+	0x2::funds_accumulator
+redeem
+	public(package) fun
+	0x2::funds_accumulator
+withdraw_from_object
+	public(package) fun
+	0x2::funds_accumulator
+add_impl
+	public(package) fun
+	0x2::funds_accumulator
+withdraw_impl
+	fun
+	0x2::funds_accumulator
+add_to_accumulator_address
+	fun
+	0x2::funds_accumulator
+withdraw_from_accumulator_address
+	fun
+	0x2::funds_accumulator
+create_withdrawal
+	public(package) fun
+	0x2::funds_accumulator
+Supply
+	public struct
+	0x2::balance
+Balance
+	public struct
+	0x2::balance
+value
+	public fun
+	0x2::balance
+supply_value
+	public fun
+	0x2::balance
+create_supply
+	public fun
+	0x2::balance
+increase_supply
+	public fun
+	0x2::balance
+decrease_supply
+	public fun
+	0x2::balance
+zero
+	public fun
+	0x2::balance
+join
+	public fun
+	0x2::balance
+split
+	public fun
+	0x2::balance
+withdraw_all
+	public fun
+	0x2::balance
+destroy_zero
+	public fun
+	0x2::balance
+send_funds
+	public fun
+	0x2::balance
+redeem_funds
+	public fun
+	0x2::balance
+withdraw_funds_from_object
+	public fun
+	0x2::balance
+settled_funds_value
+	public fun
+	0x2::balance
+create_supply_internal
+	public(package) fun
+	0x2::balance
+create_staking_rewards
+	fun
+	0x2::balance
+destroy_storage_rebates
+	fun
+	0x2::balance
+destroy_supply
+	public(package) fun
+	0x2::balance
 Element
 	public struct
 	0x2::group_ops
@@ -2005,39 +2263,6 @@ update
 is_one_time_witness
 	public fun
 	0x2::types
-VecSet
-	public struct
-	0x2::vec_set
-empty
-	public fun
-	0x2::vec_set
-singleton
-	public fun
-	0x2::vec_set
-insert
-	public fun
-	0x2::vec_set
-remove
-	public fun
-	0x2::vec_set
-contains
-	public fun
-	0x2::vec_set
-size
-	public fun
-	0x2::vec_set
-is_empty
-	public fun
-	0x2::vec_set
-into_keys
-	public fun
-	0x2::vec_set
-from_keys
-	public fun
-	0x2::vec_set
-keys
-	public fun
-	0x2::vec_set
 Table
 	public struct
 	0x2::table
@@ -2073,6 +2298,12 @@ drop
 	0x2::table
 emit
 	public fun
+	0x2::event
+emit_authenticated
+	public fun
+	0x2::event
+emit_authenticated_impl
+	fun
 	0x2::event
 Wrapper
 	public struct
@@ -2293,6 +2524,12 @@ take
 put
 	public fun
 	0x2::coin
+redeem_funds
+	public fun
+	0x2::coin
+send_funds
+	public fun
+	0x2::coin
 join
 	public entry fun
 	0x2::coin
@@ -2380,6 +2617,27 @@ get_description
 get_icon_url
 	public fun
 	0x2::coin
+destroy_metadata
+	public(package) fun
+	0x2::coin
+deny_cap_id
+	public(package) fun
+	0x2::coin
+new_deny_cap_v2
+	public(package) fun
+	0x2::coin
+new_treasury_cap
+	public(package) fun
+	0x2::coin
+allow_global_pause
+	public(package) fun
+	0x2::coin
+new_coin_metadata
+	public(package) fun
+	0x2::coin
+update_coin_metadata
+	public(package) fun
+	0x2::coin
 supply
 	public fun
 	0x2::coin
@@ -2395,6 +2653,168 @@ deny_list_remove
 deny_list_contains
 	public fun
 	0x2::coin
+CoinRegistry
+	public struct
+	0x2::coin_registry
+ExtraField
+	public struct
+	0x2::coin_registry
+CurrencyKey
+	public struct
+	0x2::coin_registry
+LegacyMetadataKey
+	public struct
+	0x2::coin_registry
+MetadataCap
+	public struct
+	0x2::coin_registry
+Borrow
+	public struct
+	0x2::coin_registry
+Currency
+	public struct
+	0x2::coin_registry
+CurrencyInitializer
+	public struct
+	0x2::coin_registry
+SupplyState
+	public enum
+	0x2::coin_registry
+RegulatedState
+	public enum
+	0x2::coin_registry
+MetadataCapState
+	public enum
+	0x2::coin_registry
+new_currency
+	public fun
+	0x2::coin_registry
+new_currency_with_otw
+	public fun
+	0x2::coin_registry
+claim_metadata_cap
+	public fun
+	0x2::coin_registry
+make_regulated
+	public fun
+	0x2::coin_registry
+make_supply_fixed_init
+	public fun
+	0x2::coin_registry
+make_supply_burn_only_init
+	public fun
+	0x2::coin_registry
+make_supply_fixed
+	public fun
+	0x2::coin_registry
+make_supply_burn_only
+	public fun
+	0x2::coin_registry
+finalize
+	public fun
+	0x2::coin_registry
+finalize_and_delete_metadata_cap
+	public fun
+	0x2::coin_registry
+finalize_registration
+	public fun
+	0x2::coin_registry
+delete_metadata_cap
+	public fun
+	0x2::coin_registry
+burn
+	public fun
+	0x2::coin_registry
+burn_balance
+	public fun
+	0x2::coin_registry
+set_name
+	public fun
+	0x2::coin_registry
+set_description
+	public fun
+	0x2::coin_registry
+set_icon_url
+	public fun
+	0x2::coin_registry
+set_treasury_cap_id
+	public fun
+	0x2::coin_registry
+migrate_legacy_metadata
+	public fun
+	0x2::coin_registry
+update_from_legacy_metadata
+	public fun
+	0x2::coin_registry
+delete_migrated_legacy_metadata
+	public fun
+	0x2::coin_registry
+migrate_regulated_state_by_metadata
+	public fun
+	0x2::coin_registry
+migrate_regulated_state_by_cap
+	public fun
+	0x2::coin_registry
+borrow_legacy_metadata
+	public fun
+	0x2::coin_registry
+return_borrowed_legacy_metadata
+	public fun
+	0x2::coin_registry
+decimals
+	public fun
+	0x2::coin_registry
+name
+	public fun
+	0x2::coin_registry
+symbol
+	public fun
+	0x2::coin_registry
+description
+	public fun
+	0x2::coin_registry
+icon_url
+	public fun
+	0x2::coin_registry
+is_metadata_cap_claimed
+	public fun
+	0x2::coin_registry
+is_metadata_cap_deleted
+	public fun
+	0x2::coin_registry
+metadata_cap_id
+	public fun
+	0x2::coin_registry
+treasury_cap_id
+	public fun
+	0x2::coin_registry
+deny_cap_id
+	public fun
+	0x2::coin_registry
+is_supply_fixed
+	public fun
+	0x2::coin_registry
+is_supply_burn_only
+	public fun
+	0x2::coin_registry
+is_regulated
+	public fun
+	0x2::coin_registry
+total_supply
+	public fun
+	0x2::coin_registry
+exists
+	public fun
+	0x2::coin_registry
+is_migrated_from_legacy
+	fun
+	0x2::coin_registry
+to_legacy_metadata
+	fun
+	0x2::coin_registry
+create
+	fun
+	0x2::coin_registry
 Publisher
 	public struct
 	0x2::package
@@ -2521,12 +2941,84 @@ version
 fields
 	public fun
 	0x2::display
+destroy
+	public(package) fun
+	0x2::display
 create_internal
 	fun
 	0x2::display
 add_internal
 	fun
 	0x2::display
+DisplayRegistry
+	public struct
+	0x2::display_registry
+SystemMigrationCap
+	public struct
+	0x2::display_registry
+Display
+	public struct
+	0x2::display_registry
+DisplayCap
+	public struct
+	0x2::display_registry
+DisplayKey
+	public struct
+	0x2::display_registry
+new
+	public fun
+	0x2::display_registry
+new_with_publisher
+	public fun
+	0x2::display_registry
+unset
+	public fun
+	0x2::display_registry
+set
+	public fun
+	0x2::display_registry
+clear
+	public fun
+	0x2::display_registry
+share
+	public fun
+	0x2::display_registry
+claim
+	public fun
+	0x2::display_registry
+claim_with_publisher
+	public fun
+	0x2::display_registry
+system_migration
+	public fun
+	0x2::display_registry
+migrate_v1_to_v2
+	public fun
+	0x2::display_registry
+destroy_system_migration_cap
+	entry fun
+	0x2::display_registry
+transfer_migration_cap
+	entry fun
+	0x2::display_registry
+delete_legacy
+	public fun
+	0x2::display_registry
+fields
+	public fun
+	0x2::display_registry
+cap_id
+	public fun
+	0x2::display_registry
+migration_cap_receiver
+	public(package) fun
+	0x2::display_registry
+new_display
+	fun
+	0x2::display_registry
+create
+	fun
+	0x2::display_registry
 Curve
 	public struct
 	0x2::groth16
@@ -3196,6 +3688,66 @@ generate_u8_in_range
 shuffle
 	public fun
 	0x2::random
+Scalar
+	public struct
+	0x2::ristretto255
+G
+	public struct
+	0x2::ristretto255
+scalar_from_bytes
+	public fun
+	0x2::ristretto255
+scalar_from_u64
+	public fun
+	0x2::ristretto255
+scalar_zero
+	public fun
+	0x2::ristretto255
+scalar_one
+	public fun
+	0x2::ristretto255
+scalar_add
+	public fun
+	0x2::ristretto255
+scalar_sub
+	public fun
+	0x2::ristretto255
+scalar_mul
+	public fun
+	0x2::ristretto255
+scalar_div
+	public fun
+	0x2::ristretto255
+scalar_neg
+	public fun
+	0x2::ristretto255
+scalar_inv
+	public fun
+	0x2::ristretto255
+g_from_bytes
+	public fun
+	0x2::ristretto255
+g_identity
+	public fun
+	0x2::ristretto255
+g_generator
+	public fun
+	0x2::ristretto255
+g_add
+	public fun
+	0x2::ristretto255
+g_sub
+	public fun
+	0x2::ristretto255
+g_mul
+	public fun
+	0x2::ristretto255
+g_div
+	public fun
+	0x2::ristretto255
+g_neg
+	public fun
+	0x2::ristretto255
 TableVec
 	public struct
 	0x2::table_vec
@@ -4084,6 +4636,9 @@ BridgeMessageKey
 TokenTransferPayload
 	public struct
 	0xb::message
+TokenTransferPayloadV2
+	public struct
+	0xb::message
 EmergencyOp
 	public struct
 	0xb::message
@@ -4105,6 +4660,12 @@ ParsedTokenTransferMessage
 extract_token_bridge_payload
 	public fun
 	0xb::message
+extract_token_bridge_payload_v2
+	public fun
+	0xb::message
+to_token_payload_v1
+	public(package) fun
+	0xb::message
 extract_emergency_op_payload
 	public fun
 	0xb::message
@@ -4124,6 +4685,9 @@ serialize_message
 	public fun
 	0xb::message
 create_token_bridge_message
+	public fun
+	0xb::message
+create_token_bridge_message_v2
 	public fun
 	0xb::message
 create_emergency_op_message
@@ -4174,6 +4738,9 @@ token_type
 token_amount
 	public fun
 	0xb::message
+timestamp_ms
+	public fun
+	0xb::message
 emergency_op_type
 	public fun
 	0xb::message
@@ -4220,6 +4787,9 @@ required_voting_power
 	public fun
 	0xb::message
 to_parsed_token_transfer_message
+	public fun
+	0xb::message
+token_transfer_message_version
 	public fun
 	0xb::message
 reverse_bytes
@@ -4312,6 +4882,9 @@ BridgeInner
 TokenDepositedEvent
 	public struct
 	0xb::bridge
+TokenDepositedEventV2
+	public struct
+	0xb::bridge
 EmergencyOpEvent
 	public struct
 	0xb::bridge
@@ -4351,6 +4924,9 @@ register_foreign_token
 send_token
 	public fun
 	0xb::bridge
+send_token_v2
+	public fun
+	0xb::bridge
 approve_token_transfer
 	public fun
 	0xb::bridge
@@ -4376,6 +4952,9 @@ load_inner_mut
 	fun
 	0xb::bridge
 claim_token_internal
+	fun
+	0xb::bridge
+send_token_internal
 	fun
 	0xb::bridge
 execute_emergency_op
@@ -4432,102 +5011,12 @@ sha2_256
 sha3_256
 	public fun
 	0x1::hash
-UQ32_32
+Permit
 	public struct
-	0x1::uq32_32
-from_quotient
+	0x1::internal
+permit
 	public fun
-	0x1::uq32_32
-from_int
-	public fun
-	0x1::uq32_32
-add
-	public fun
-	0x1::uq32_32
-sub
-	public fun
-	0x1::uq32_32
-mul
-	public fun
-	0x1::uq32_32
-div
-	public fun
-	0x1::uq32_32
-to_int
-	public fun
-	0x1::uq32_32
-int_mul
-	public fun
-	0x1::uq32_32
-int_div
-	public fun
-	0x1::uq32_32
-le
-	public fun
-	0x1::uq32_32
-lt
-	public fun
-	0x1::uq32_32
-ge
-	public fun
-	0x1::uq32_32
-gt
-	public fun
-	0x1::uq32_32
-to_raw
-	public fun
-	0x1::uq32_32
-from_raw
-	public fun
-	0x1::uq32_32
-UQ64_64
-	public struct
-	0x1::uq64_64
-from_quotient
-	public fun
-	0x1::uq64_64
-from_int
-	public fun
-	0x1::uq64_64
-add
-	public fun
-	0x1::uq64_64
-sub
-	public fun
-	0x1::uq64_64
-mul
-	public fun
-	0x1::uq64_64
-div
-	public fun
-	0x1::uq64_64
-to_int
-	public fun
-	0x1::uq64_64
-int_mul
-	public fun
-	0x1::uq64_64
-int_div
-	public fun
-	0x1::uq64_64
-le
-	public fun
-	0x1::uq64_64
-lt
-	public fun
-	0x1::uq64_64
-ge
-	public fun
-	0x1::uq64_64
-gt
-	public fun
-	0x1::uq64_64
-to_raw
-	public fun
-	0x1::uq64_64
-from_raw
-	public fun
-	0x1::uq64_64
+	0x1::internal
 empty
 	public fun
 	0x1::vector
@@ -4801,13 +5290,40 @@ length
 TypeName
 	public struct
 	0x1::type_name
+with_defining_ids
+	public fun
+	0x1::type_name
+with_original_ids
+	public fun
+	0x1::type_name
+defining_id
+	public fun
+	0x1::type_name
+original_id
+	public fun
+	0x1::type_name
+is_primitive
+	public fun
+	0x1::type_name
+as_string
+	public fun
+	0x1::type_name
+address_string
+	public fun
+	0x1::type_name
+module_string
+	public fun
+	0x1::type_name
+datatype_string
+	public fun
+	0x1::type_name
+into_string
+	public fun
+	0x1::type_name
 get
 	public fun
 	0x1::type_name
 get_with_original_ids
-	public fun
-	0x1::type_name
-is_primitive
 	public fun
 	0x1::type_name
 borrow_string
@@ -4817,9 +5333,6 @@ get_address
 	public fun
 	0x1::type_name
 get_module
-	public fun
-	0x1::type_name
-into_string
 	public fun
 	0x1::type_name
 bitwise_not
@@ -4858,6 +5371,42 @@ try_as_u64
 to_string
 	public fun
 	0x1::u128
+checked_add
+	public fun
+	0x1::u128
+checked_sub
+	public fun
+	0x1::u128
+checked_mul
+	public fun
+	0x1::u128
+checked_div
+	public fun
+	0x1::u128
+saturating_add
+	public fun
+	0x1::u128
+saturating_sub
+	public fun
+	0x1::u128
+saturating_mul
+	public fun
+	0x1::u128
+checked_shl
+	public fun
+	0x1::u128
+checked_shr
+	public fun
+	0x1::u128
+lossless_shl
+	public fun
+	0x1::u128
+lossless_shr
+	public fun
+	0x1::u128
+lossless_div
+	public fun
+	0x1::u128
 bitwise_not
 	public fun
 	0x1::u16
@@ -4883,6 +5432,42 @@ try_as_u8
 	public fun
 	0x1::u16
 to_string
+	public fun
+	0x1::u16
+checked_add
+	public fun
+	0x1::u16
+checked_sub
+	public fun
+	0x1::u16
+checked_mul
+	public fun
+	0x1::u16
+checked_div
+	public fun
+	0x1::u16
+saturating_add
+	public fun
+	0x1::u16
+saturating_sub
+	public fun
+	0x1::u16
+saturating_mul
+	public fun
+	0x1::u16
+checked_shl
+	public fun
+	0x1::u16
+checked_shr
+	public fun
+	0x1::u16
+lossless_shl
+	public fun
+	0x1::u16
+lossless_shr
+	public fun
+	0x1::u16
+lossless_div
 	public fun
 	0x1::u16
 bitwise_not
@@ -4921,6 +5506,36 @@ try_as_u128
 to_string
 	public fun
 	0x1::u256
+checked_add
+	public fun
+	0x1::u256
+checked_sub
+	public fun
+	0x1::u256
+checked_mul
+	public fun
+	0x1::u256
+checked_div
+	public fun
+	0x1::u256
+saturating_add
+	public fun
+	0x1::u256
+saturating_sub
+	public fun
+	0x1::u256
+saturating_mul
+	public fun
+	0x1::u256
+lossless_shl
+	public fun
+	0x1::u256
+lossless_shr
+	public fun
+	0x1::u256
+lossless_div
+	public fun
+	0x1::u256
 bitwise_not
 	public fun
 	0x1::u32
@@ -4949,6 +5564,42 @@ try_as_u16
 	public fun
 	0x1::u32
 to_string
+	public fun
+	0x1::u32
+checked_add
+	public fun
+	0x1::u32
+checked_sub
+	public fun
+	0x1::u32
+checked_mul
+	public fun
+	0x1::u32
+checked_div
+	public fun
+	0x1::u32
+saturating_add
+	public fun
+	0x1::u32
+saturating_sub
+	public fun
+	0x1::u32
+saturating_mul
+	public fun
+	0x1::u32
+checked_shl
+	public fun
+	0x1::u32
+checked_shr
+	public fun
+	0x1::u32
+lossless_shl
+	public fun
+	0x1::u32
+lossless_shr
+	public fun
+	0x1::u32
+lossless_div
 	public fun
 	0x1::u32
 bitwise_not
@@ -4984,6 +5635,42 @@ try_as_u32
 to_string
 	public fun
 	0x1::u64
+checked_add
+	public fun
+	0x1::u64
+checked_sub
+	public fun
+	0x1::u64
+checked_mul
+	public fun
+	0x1::u64
+checked_div
+	public fun
+	0x1::u64
+saturating_add
+	public fun
+	0x1::u64
+saturating_sub
+	public fun
+	0x1::u64
+saturating_mul
+	public fun
+	0x1::u64
+checked_shl
+	public fun
+	0x1::u64
+checked_shr
+	public fun
+	0x1::u64
+lossless_shl
+	public fun
+	0x1::u64
+lossless_shr
+	public fun
+	0x1::u64
+lossless_div
+	public fun
+	0x1::u64
 bitwise_not
 	public fun
 	0x1::u8
@@ -5008,3 +5695,135 @@ sqrt
 to_string
 	public fun
 	0x1::u8
+checked_add
+	public fun
+	0x1::u8
+checked_sub
+	public fun
+	0x1::u8
+checked_mul
+	public fun
+	0x1::u8
+checked_div
+	public fun
+	0x1::u8
+saturating_add
+	public fun
+	0x1::u8
+saturating_sub
+	public fun
+	0x1::u8
+saturating_mul
+	public fun
+	0x1::u8
+checked_shl
+	public fun
+	0x1::u8
+checked_shr
+	public fun
+	0x1::u8
+lossless_shl
+	public fun
+	0x1::u8
+lossless_shr
+	public fun
+	0x1::u8
+lossless_div
+	public fun
+	0x1::u8
+UQ32_32
+	public struct
+	0x1::uq32_32
+from_quotient
+	public fun
+	0x1::uq32_32
+from_int
+	public fun
+	0x1::uq32_32
+add
+	public fun
+	0x1::uq32_32
+sub
+	public fun
+	0x1::uq32_32
+mul
+	public fun
+	0x1::uq32_32
+div
+	public fun
+	0x1::uq32_32
+to_int
+	public fun
+	0x1::uq32_32
+int_mul
+	public fun
+	0x1::uq32_32
+int_div
+	public fun
+	0x1::uq32_32
+le
+	public fun
+	0x1::uq32_32
+lt
+	public fun
+	0x1::uq32_32
+ge
+	public fun
+	0x1::uq32_32
+gt
+	public fun
+	0x1::uq32_32
+to_raw
+	public fun
+	0x1::uq32_32
+from_raw
+	public fun
+	0x1::uq32_32
+UQ64_64
+	public struct
+	0x1::uq64_64
+from_quotient
+	public fun
+	0x1::uq64_64
+from_int
+	public fun
+	0x1::uq64_64
+add
+	public fun
+	0x1::uq64_64
+sub
+	public fun
+	0x1::uq64_64
+mul
+	public fun
+	0x1::uq64_64
+div
+	public fun
+	0x1::uq64_64
+to_int
+	public fun
+	0x1::uq64_64
+int_mul
+	public fun
+	0x1::uq64_64
+int_div
+	public fun
+	0x1::uq64_64
+le
+	public fun
+	0x1::uq64_64
+lt
+	public fun
+	0x1::uq64_64
+ge
+	public fun
+	0x1::uq64_64
+gt
+	public fun
+	0x1::uq64_64
+to_raw
+	public fun
+	0x1::uq64_64
+from_raw
+	public fun
+	0x1::uq64_64

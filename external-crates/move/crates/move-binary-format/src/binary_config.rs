@@ -50,8 +50,8 @@ impl TableConfig {
             // These can be any number
             enum_defs: u16::MAX,
             enum_def_instantiations: u16::MAX,
-            variant_handles: 1024,
-            variant_instantiation_handles: 1024,
+            variant_handles: u16::MAX,
+            variant_instantiation_handles: u16::MAX,
         }
     }
 }
@@ -63,6 +63,7 @@ pub struct BinaryConfig {
     pub max_binary_format_version: u32,
     pub min_binary_format_version: u32,
     pub check_no_extraneous_bytes: bool,
+    pub deprecate_global_storage_ops: bool,
     pub table_config: TableConfig,
     allow_unpublishable: bool,
 }
@@ -72,12 +73,14 @@ impl BinaryConfig {
         max_binary_format_version: u32,
         min_binary_format_version: u32,
         check_no_extraneous_bytes: bool,
+        deprecate_global_storage_ops: bool,
         table_config: TableConfig,
     ) -> Self {
         Self {
             max_binary_format_version,
             min_binary_format_version,
             check_no_extraneous_bytes,
+            deprecate_global_storage_ops,
             table_config,
             allow_unpublishable: false,
         }
@@ -88,24 +91,36 @@ impl BinaryConfig {
         max_binary_format_version: u32,
         min_binary_format_version: u32,
         check_no_extraneous_bytes: bool,
+        deprecate_global_storage_ops: bool,
     ) -> Self {
         Self::new(
             max_binary_format_version,
             min_binary_format_version,
             check_no_extraneous_bytes,
+            deprecate_global_storage_ops,
             TableConfig::legacy(),
         )
     }
 
     /// Creates a configuration with max version, legacy table config,
-    /// and controllable extraneous bytes check.
-    pub fn with_extraneous_bytes_check(check_no_extraneous_bytes: bool) -> Self {
-        Self::legacy(VERSION_MAX, VERSION_1, check_no_extraneous_bytes)
+    /// and controllable extraneous bytes check and deprecate_global_storage_ops flag.
+    pub fn legacy_with_flags(
+        check_no_extraneous_bytes: bool,
+        deprecate_global_storage_ops: bool,
+    ) -> Self {
+        Self::legacy(
+            VERSION_MAX,
+            VERSION_1,
+            check_no_extraneous_bytes,
+            deprecate_global_storage_ops,
+        )
     }
 
     /// Standard configuration: VERSION_MAX and check_no_extraneous_bytes = true
     pub fn standard() -> Self {
-        Self::with_extraneous_bytes_check(true)
+        Self::legacy_with_flags(
+            /* check_no_extraneous_bytes */ true, /* deprecate_global_storage_ops */ true,
+        )
     }
 
     pub fn new_unpublishable() -> Self {
@@ -113,6 +128,7 @@ impl BinaryConfig {
             max_binary_format_version: VERSION_MAX,
             min_binary_format_version: VERSION_1,
             check_no_extraneous_bytes: true,
+            deprecate_global_storage_ops: true,
             table_config: TableConfig::legacy(),
             allow_unpublishable: true,
         }
@@ -120,5 +136,12 @@ impl BinaryConfig {
 
     pub fn allow_unpublishable(&self) -> bool {
         self.allow_unpublishable
+    }
+
+    /// This function exists solely for propagating a VMConfig down into the unit testing
+    /// environment. It should never be called anywhere else.
+    #[cfg(feature = "testing")]
+    pub fn allow_unpublishable_for_move_unit_testing(&mut self) {
+        self.allow_unpublishable = true;
     }
 }

@@ -76,11 +76,11 @@ module t2::o2 {
     }
 
     public fun dofer(parent: &mut Obj2, o2: Obj2) {
-        dof::add(&mut parent.id, 0, o2);
+        dof::add(&mut parent.id, 0u64, o2);
     }
 
     public fun dfer(parent: &mut Obj2, o2: Obj2) {
-        df::add(&mut parent.id, 0, o2);
+        df::add(&mut parent.id, 0u64, o2);
     }
 
     public fun transferer(o2: Obj2) {
@@ -172,7 +172,7 @@ module t2::o2 {
 //> 1: t2::o2::pop_coin(Result(0));
 //> 2: SplitCoins(Result(1), [Input(0)]);
 //> 3: TransferObjects([Result(2)], Input(2));
-//> 4: sui::transfer::public_share_object(Input(1));
+//> 4: sui::transfer::public_share_object<sui::coin::Coin<sui::sui::SUI>>(Input(1));
 
 // Try to reshare the shared object -- this should fail since the input was
 // used for the `MakeMoveVec` call

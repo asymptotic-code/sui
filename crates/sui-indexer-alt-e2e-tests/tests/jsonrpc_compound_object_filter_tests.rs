@@ -1,29 +1,31 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::BTreeSet, str::FromStr};
+use std::collections::BTreeSet;
+use std::str::FromStr;
 
 use move_core_types::ident_str;
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
+use serde_json::json;
 use simulacrum::Simulacrum;
-use sui_indexer_alt::config::IndexerConfig;
-use sui_indexer_alt_consistent_store::config::ServiceConfig as ConsistentConfig;
-use sui_indexer_alt_e2e_tests::{find_address_owned, FullCluster};
-use sui_indexer_alt_framework::IndexerArgs;
-use sui_indexer_alt_graphql::config::RpcConfig as GraphQlConfig;
-use sui_indexer_alt_jsonrpc::config::{ObjectsConfig, RpcConfig as JsonRpcConfig};
+use sui_indexer_alt_jsonrpc::config::ObjectsConfig;
+use sui_indexer_alt_jsonrpc::config::RpcConfig as JsonRpcConfig;
 use sui_json_rpc_types::Page;
-use sui_types::{
-    base_types::{ObjectID, SuiAddress},
-    crypto::get_account_key_pair,
-    effects::TransactionEffectsAPI,
-    programmable_transaction_builder::ProgrammableTransactionBuilder,
-    transaction::{Transaction, TransactionData},
-    TypeTag, SUI_FRAMEWORK_PACKAGE_ID,
-};
-use tokio_util::sync::CancellationToken;
+use sui_types::SUI_FRAMEWORK_PACKAGE_ID;
+use sui_types::TypeTag;
+use sui_types::base_types::ObjectID;
+use sui_types::base_types::SuiAddress;
+use sui_types::crypto::get_account_key_pair;
+use sui_types::effects::TransactionEffectsAPI;
+use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
+use sui_types::transaction::Transaction;
+use sui_types::transaction::TransactionData;
+
+use sui_indexer_alt_e2e_tests::FullCluster;
+use sui_indexer_alt_e2e_tests::OffchainClusterConfig;
+use sui_indexer_alt_e2e_tests::find;
 
 /// 5 SUI gas budget
 const DEFAULT_GAS_BUDGET: u64 = 5_000_000_000;
@@ -141,8 +143,7 @@ async fn test_multi_fetch() {
     assert!(has_next_page);
 }
 
-/// There are too few results in total to return a full page, so we end up fetching all the owned
-/// objects to make sure.
+/// Test correct pagination when there are fewer results than the requested limit.
 #[tokio::test]
 async fn test_too_few_results() {
     let mut cluster = setup_cluster(ObjectsConfig {
@@ -325,17 +326,14 @@ async fn test_next_cursor() {
 async fn setup_cluster(config: ObjectsConfig) -> FullCluster {
     FullCluster::new_with_configs(
         Simulacrum::new(),
-        IndexerArgs::default(),
-        IndexerArgs::default(),
-        IndexerConfig::for_test(),
-        ConsistentConfig::for_test(),
-        JsonRpcConfig {
-            objects: config,
-            ..JsonRpcConfig::default()
+        OffchainClusterConfig {
+            jsonrpc_config: JsonRpcConfig {
+                objects: config,
+                ..Default::default()
+            },
+            ..Default::default()
         },
-        GraphQlConfig::default(),
         &prometheus::Registry::new(),
-        CancellationToken::new(),
     )
     .await
     .expect("Failed to set-up cluster")
@@ -366,7 +364,7 @@ fn create_coin(cluster: &mut FullCluster, owner: SuiAddress, amount: u64) -> Obj
 
     assert!(fx.status().is_ok(), "create coin transaction failed");
 
-    find_address_owned(&fx)
+    find::address_owned(&fx)
         .expect("Failed to find created coin")
         .0
 }
@@ -416,7 +414,7 @@ fn create_bag(cluster: &mut FullCluster, owner: SuiAddress, size: u64) -> Object
 
     assert!(fx.status().is_ok(), "create bag transaction failed");
 
-    find_address_owned(&fx)
+    find::address_owned(&fx)
         .expect("Failed to find created bag")
         .0
 }

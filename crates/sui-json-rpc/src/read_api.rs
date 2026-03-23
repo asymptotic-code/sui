@@ -7,20 +7,22 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use backoff::future::retry;
 use backoff::ExponentialBackoff;
+use backoff::future::retry;
 use fastcrypto::encoding::Base64;
 use fastcrypto_zkp::bn254::zk_login_api::ZkLoginEnv;
 use futures::future::join_all;
 use im::hashmap::HashMap as ImHashMap;
 use indexmap::map::IndexMap;
 use itertools::Itertools;
-use jsonrpsee::core::RpcResult;
 use jsonrpsee::RpcModule;
+use jsonrpsee::core::RpcResult;
 use move_bytecode_utils::module_cache::GetModule;
+use move_core_types::account_address::AccountAddress;
 use move_core_types::annotated_value::{MoveStructLayout, MoveTypeLayout};
 use move_core_types::language_storage::StructTag;
 use once_cell::sync::Lazy;
+use serde_json::Value as Json;
 use shared_crypto::intent::{IntentMessage, PersonalMessage};
 use sui_display::v1::Format;
 use sui_json_rpc_types::ZkLoginIntentScope;
@@ -32,11 +34,10 @@ use tap::TapFallible;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 use mysten_metrics::add_server_timing;
-use mysten_metrics::spawn_monitored_task;
 use sui_core::authority::AuthorityState;
 use sui_json_rpc_api::{
-    validate_limit, JsonRpcMetrics, ReadApiOpenRpc, ReadApiServer, QUERY_MAX_RESULT_LIMIT,
-    QUERY_MAX_RESULT_LIMIT_CHECKPOINTS,
+    JsonRpcMetrics, QUERY_MAX_RESULT_LIMIT, QUERY_MAX_RESULT_LIMIT_CHECKPOINTS, ReadApiOpenRpc,
+    ReadApiServer, validate_limit,
 };
 use sui_json_rpc_types::{
     BalanceChange, Checkpoint, CheckpointId, CheckpointPage, DisplayFieldsResponse, EventFilter,
@@ -50,6 +51,7 @@ use sui_storage::key_value_store::TransactionKeyValueStore;
 use sui_types::base_types::{ObjectID, SequenceNumber, TransactionDigest};
 use sui_types::crypto::AggregateAuthoritySignature;
 use sui_types::display::DisplayVersionUpdatedEvent;
+use sui_types::display_registry;
 use sui_types::effects::{TransactionEffects, TransactionEffectsAPI, TransactionEvents};
 use sui_types::error::{SuiError, SuiObjectResponseError};
 use sui_types::messages_checkpoint::{
@@ -62,21 +64,77 @@ use sui_types::transaction::{Transaction, TransactionData};
 
 use crate::authority_state::{StateRead, StateReadError, StateReadResult};
 use crate::error::{Error, RpcInterimResult, SuiRpcInputError};
+use crate::{ObjectProvider, with_tracing};
 use crate::{
-    get_balance_changes_from_effect, get_object_changes, ObjectProviderCache, SuiRpcModule,
+    ObjectProviderCache, SuiRpcModule, get_balance_changes_from_effect, get_object_changes,
 };
-use crate::{with_tracing, ObjectProvider};
 use fastcrypto::encoding::Encoding;
 use fastcrypto::traits::ToFromBytes;
 use shared_crypto::intent::Intent;
 use sui_json_rpc_types::ZkLoginVerifyResult;
-use sui_types::authenticator_state::{get_authenticator_state, ActiveJwk};
+use sui_types::authenticator_state::{ActiveJwk, get_authenticator_state};
 
-/// A field access in a  Display string cannot exceed this level of nesting.
-const MAX_DISPLAY_NESTED_LEVEL: usize = 10;
+/// Default max depth used while converting rendered Display values to JSON.
+const DEFAULT_MAX_DISPLAY_MOVE_VALUE_DEPTH: usize = 32;
 
 /// Default budget for Display output size.
 const DEFAULT_MAX_DISPLAY_OUTPUT_SIZE: usize = 1024 * 1024;
+
+/// A field access in a Display string cannot exceed this level of nesting.
+static MAX_DISPLAY_FIELD_DEPTH: Lazy<usize> = Lazy::new(|| {
+    let max_opt = std::env::var("MAX_DISPLAY_FIELD_DEPTH")
+        .ok()
+        .and_then(|s| s.parse().ok());
+
+    if let Some(max) = max_opt {
+        info!("Using custom value for 'MAX_DISPLAY_FIELD_DEPTH': {max}");
+        max
+    } else {
+        sui_display::v2::Limits::default().max_depth
+    }
+});
+
+/// Parser node budget for Display v2.
+static MAX_DISPLAY_FORMAT_NODES: Lazy<usize> = Lazy::new(|| {
+    let max_opt = std::env::var("MAX_DISPLAY_FORMAT_NODES")
+        .ok()
+        .and_then(|s| s.parse().ok());
+
+    if let Some(max) = max_opt {
+        info!("Using custom value for 'MAX_DISPLAY_FORMAT_NODES': {max}");
+        max
+    } else {
+        sui_display::v2::Limits::default().max_nodes
+    }
+});
+
+/// Max object loads budget for Display v2.
+static MAX_DISPLAY_OBJECT_LOADS: Lazy<usize> = Lazy::new(|| {
+    let max_opt = std::env::var("MAX_DISPLAY_OBJECT_LOADS")
+        .ok()
+        .and_then(|s| s.parse().ok());
+
+    if let Some(max) = max_opt {
+        info!("Using custom value for 'MAX_DISPLAY_OBJECT_LOADS': {max}");
+        max
+    } else {
+        sui_display::v2::Limits::default().max_loads
+    }
+});
+
+/// Maximum depth used while converting rendered Display values to JSON.
+static MAX_DISPLAY_MOVE_VALUE_DEPTH: Lazy<usize> = Lazy::new(|| {
+    let max_opt = std::env::var("MAX_MOVE_VALUE_DEPTH")
+        .ok()
+        .and_then(|s| s.parse().ok());
+
+    if let Some(max) = max_opt {
+        info!("Using custom value for 'MAX_MOVE_VALUE_DEPTH': {max}");
+        max
+    } else {
+        DEFAULT_MAX_DISPLAY_MOVE_VALUE_DEPTH
+    }
+});
 
 /// Overall display output cannot exceed this size.
 static MAX_DISPLAY_OUTPUT_SIZE: Lazy<usize> = Lazy::new(|| {
@@ -91,6 +149,38 @@ static MAX_DISPLAY_OUTPUT_SIZE: Lazy<usize> = Lazy::new(|| {
         DEFAULT_MAX_DISPLAY_OUTPUT_SIZE
     }
 });
+
+struct DisplayStore<'s> {
+    state: &'s dyn StateRead,
+}
+
+impl<'s> DisplayStore<'s> {
+    fn new(state: &'s dyn StateRead) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl sui_display::v2::Store for DisplayStore<'_> {
+    async fn object(
+        &self,
+        id: AccountAddress,
+    ) -> anyhow::Result<Option<sui_display::v2::OwnedSlice>> {
+        let read = self.state.get_object_read(&id.into())?;
+        let ObjectRead::Exists(_, object, Some(layout)) = read else {
+            return Ok(None);
+        };
+
+        let Some(move_object) = object.data.try_as_move() else {
+            return Ok(None);
+        };
+
+        Ok(Some(sui_display::v2::OwnedSlice {
+            bytes: move_object.contents().to_vec(),
+            layout: MoveTypeLayout::Struct(Box::new(layout)),
+        }))
+    }
+}
 
 // An implementation of the read portion of the JSON-RPC interface intended for use in
 // Fullnodes.
@@ -341,10 +431,10 @@ impl ReadApi {
             trace!("getting events");
             let mut non_empty_digests = vec![];
             for cache_entry in temp_response.values() {
-                if let Some(effects) = &cache_entry.effects {
-                    if effects.events_digest().is_some() {
-                        non_empty_digests.push(cache_entry.digest);
-                    }
+                if let Some(effects) = &cache_entry.effects
+                    && effects.events_digest().is_some()
+                {
+                    non_empty_digests.push(cache_entry.digest);
                 }
             }
             // fetch events from the DB with retry, retry each 0.5s for 3s
@@ -373,8 +463,8 @@ impl ReadApi {
             .await
             .map_err(|e| {
                 Error::UnexpectedError(format!(
-                "Retrieving events with retry failed for transaction digests {digests:?}: {e:?}"
-            ))
+                    "Retrieving events with retry failed for transaction digests {digests:?}: {e:?}"
+                ))
             })?
             .into_iter();
 
@@ -390,7 +480,9 @@ impl ReadApi {
                                 Some(to_sui_transaction_events(self, cache_entry.digest, ev)?)
                         }
                         None | Some(None) => {
-                            error!("Failed to fetch events with event digest {events_digest:?} for txn {transaction_digest}");
+                            error!(
+                                "Failed to fetch events with event digest {events_digest:?} for txn {transaction_digest}"
+                            );
                             cache_entry.errors.push(format!(
                                 "Failed to fetch events with event digest {events_digest:?}",
                             ))
@@ -550,14 +642,10 @@ impl ReadApiServer for ReadApi {
     ) -> RpcResult<SuiObjectResponse> {
         with_tracing!(async move {
             let state = self.state.clone();
-            let object_read = spawn_monitored_task!(async move {
-                state.get_object_read(&object_id).map_err(|e| {
-                    warn!(?object_id, "Failed to get object: {:?}", e);
-                    Error::from(e)
-                })
-            })
-            .await
-            .map_err(Error::from)??;
+            let object_read = state.get_object_read(&object_id).map_err(|e| {
+                warn!(?object_id, "Failed to get object: {:?}", e);
+                Error::from(e)
+            })?;
             let options = options.unwrap_or_default();
 
             match object_read {
@@ -652,12 +740,12 @@ impl ReadApiServer for ReadApi {
     ) -> RpcResult<SuiPastObjectResponse> {
         with_tracing!(async move {
             let state = self.state.clone();
-            let past_read = spawn_monitored_task!(async move {
-            state.get_past_object_read(&object_id, version)
-            .map_err(|e| {
-                error!("Failed to call try_get_past_object for object: {object_id:?} version: {version:?} with error: {e:?}");
-                Error::from(e)
-            })}).await.map_err(Error::from)??;
+            let past_read = state
+                .get_past_object_read(&object_id, version)
+                .map_err(|e| {
+                    error!("Failed to call try_get_past_object for object: {object_id:?} version: {version:?} with error: {e:?}");
+                    Error::from(e)
+                })?;
             let options = options.unwrap_or_default();
             match past_read {
                 PastObjectRead::ObjectNotExists(id) => {
@@ -784,16 +872,15 @@ impl ReadApiServer for ReadApi {
 
             // Fetch transaction to determine existence
             let transaction_kv_store = self.transaction_kv_store.clone();
-            let transaction = spawn_monitored_task!(async move {
+            let transaction = async move {
                 let ret = transaction_kv_store.get_tx(digest).await.map_err(|err| {
                     debug!(tx_digest=?digest, "Failed to get transaction: {}", err);
                     Error::from(err)
                 });
                 add_server_timing("tx_kv_lookup");
                 ret
-            })
-            .await
-            .map_err(Error::from)??;
+            }
+            .await?;
             let input_objects = transaction
                 .data()
                 .inner()
@@ -811,17 +898,13 @@ impl ReadApiServer for ReadApi {
             if opts.require_effects() {
                 let transaction_kv_store = self.transaction_kv_store.clone();
                 temp_response.effects = Some(
-                    spawn_monitored_task!(async move {
-                        transaction_kv_store
-                            .get_fx_by_tx_digest(digest)
-                            .await
-                            .map_err(|err| {
-                                debug!(tx_digest=?digest, "Failed to get effects: {:?}", err);
-                                Error::from(err)
-                            })
-                    })
-                    .await
-                    .map_err(Error::from)??,
+                    transaction_kv_store
+                        .get_fx_by_tx_digest(digest)
+                        .await
+                        .map_err(|err| {
+                            debug!(tx_digest=?digest, "Failed to get effects: {:?}", err);
+                            Error::from(err)
+                        })?,
                 );
             }
 
@@ -837,33 +920,27 @@ impl ReadApiServer for ReadApi {
             if let Some(checkpoint_seq) = &temp_response.checkpoint_seq {
                 let kv_store = self.transaction_kv_store.clone();
                 let checkpoint_seq = *checkpoint_seq;
-                let checkpoint = spawn_monitored_task!(async move {
-                    kv_store
+                let checkpoint = kv_store
                     // safe to unwrap because we have checked `is_some` above
                     .get_checkpoint_summary(checkpoint_seq)
                     .await
                     .map_err(|e| {
                         error!("Failed to get checkpoint by sequence number: {checkpoint_seq:?} with error: {e:?}");
                         Error::from(e)
-                    })
-                }).await.map_err(Error::from)??;
+                    })?;
                 // TODO(chris): we don't need to fetch the whole checkpoint summary
                 temp_response.timestamp = Some(checkpoint.timestamp_ms);
             }
 
             if opts.show_events && temp_response.effects.is_some() {
                 let transaction_kv_store = self.transaction_kv_store.clone();
-                let events = spawn_monitored_task!(async move {
-                    transaction_kv_store
-                        .multi_get_events_by_tx_digests(&[digest])
-                        .await
-                        .map_err(|e| {
-                            error!("Failed to call get transaction events for transaction: {digest:?} with error {e:?}");
-                            Error::from(e)
-                        })
-                    })
+                let events = transaction_kv_store
+                    .multi_get_events_by_tx_digests(&[digest])
                     .await
-                    .map_err(Error::from)??
+                    .map_err(|e| {
+                        error!("Failed to call get transaction events for transaction: {digest:?} with error {e:?}");
+                        Error::from(e)
+                    })?
                     .pop()
                     .flatten();
                 match events {
@@ -877,50 +954,45 @@ impl ReadApiServer for ReadApi {
 
             let object_cache =
                 ObjectProviderCache::new((self.state.clone(), self.transaction_kv_store.clone()));
-            if opts.show_balance_changes {
-                if let Some(effects) = &temp_response.effects {
-                    let balance_changes = get_balance_changes_from_effect(
-                        &object_cache,
-                        effects,
-                        input_objects,
-                        None,
-                    )
-                    .await;
+            if opts.show_balance_changes
+                && let Some(effects) = &temp_response.effects
+            {
+                let balance_changes =
+                    get_balance_changes_from_effect(&object_cache, effects, input_objects, None)
+                        .await;
 
-                    if let Ok(balance_changes) = balance_changes {
-                        temp_response.balance_changes = Some(balance_changes);
-                    } else {
-                        temp_response.errors.push(format!(
-                            "Cannot retrieve balance changes: {}",
-                            balance_changes.unwrap_err()
-                        ));
-                    }
+                if let Ok(balance_changes) = balance_changes {
+                    temp_response.balance_changes = Some(balance_changes);
+                } else {
+                    temp_response.errors.push(format!(
+                        "Cannot retrieve balance changes: {}",
+                        balance_changes.unwrap_err()
+                    ));
                 }
             }
 
-            if opts.show_object_changes {
-                if let (Some(effects), Some(input)) =
+            if opts.show_object_changes
+                && let (Some(effects), Some(input)) =
                     (&temp_response.effects, &temp_response.transaction)
-                {
-                    let sender = input.data().intent_message().value.sender();
-                    let object_changes = get_object_changes(
-                        &object_cache,
-                        effects,
-                        sender,
-                        effects.modified_at_versions(),
-                        effects.all_changed_objects(),
-                        effects.all_removed_objects(),
-                    )
-                    .await;
+            {
+                let sender = input.data().intent_message().value.sender();
+                let object_changes = get_object_changes(
+                    &object_cache,
+                    effects,
+                    sender,
+                    effects.modified_at_versions(),
+                    effects.all_changed_objects(),
+                    effects.all_removed_objects(),
+                )
+                .await;
 
-                    if let Ok(object_changes) = object_changes {
-                        temp_response.object_changes = Some(object_changes);
-                    } else {
-                        temp_response.errors.push(format!(
-                            "Cannot retrieve object changes: {}",
-                            object_changes.unwrap_err()
-                        ));
-                    }
+                if let Ok(object_changes) = object_changes {
+                    temp_response.object_changes = Some(object_changes);
+                } else {
+                    temp_response.errors.push(format!(
+                        "Cannot retrieve object changes: {}",
+                        object_changes.unwrap_err()
+                    ));
                 }
             }
             let epoch_store = self.state.load_epoch_store_one_call_per_task();
@@ -935,14 +1007,8 @@ impl ReadApiServer for ReadApi {
         opts: Option<SuiTransactionBlockResponseOptions>,
     ) -> RpcResult<Vec<SuiTransactionBlockResponse>> {
         with_tracing!(async move {
-            let cloned_self = self.clone();
-            spawn_monitored_task!(async move {
-                cloned_self
-                    .multi_get_transaction_blocks_internal(digests, opts)
-                    .await
-            })
-            .await
-            .map_err(Error::from)?
+            self.multi_get_transaction_blocks_internal(digests, opts)
+                .await
         })
     }
 
@@ -951,32 +1017,37 @@ impl ReadApiServer for ReadApi {
         with_tracing!(async move {
             let state = self.state.clone();
             let transaction_kv_store = self.transaction_kv_store.clone();
-            spawn_monitored_task!(async move{
-            let store = state.load_epoch_store_one_call_per_task();
-            let events = transaction_kv_store
-                .multi_get_events_by_tx_digests(&[transaction_digest])
-                .await
-                .map_err(
-                    |e| {
+            async move {
+                let store = state.load_epoch_store_one_call_per_task();
+                let events = transaction_kv_store
+                    .multi_get_events_by_tx_digests(&[transaction_digest])
+                    .await
+                    .map_err(|e| {
                         error!("Failed to get transaction events for transaction {transaction_digest:?} with error: {e:?}");
                         Error::StateReadError(e.into())
                     })?
-                .pop()
-                .flatten();
-            Ok(match events {
-                Some(events) => events
-                    .data
-                    .into_iter()
-                    .enumerate()
-                    .map(|(seq, e)| {
-                        let layout = store.executor().type_layout_resolver(Box::new(&state.get_backing_package_store().as_ref())).get_annotated_layout(&e.type_)?;
-                        SuiEvent::try_from(e, transaction_digest, seq as u64, None, layout)
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(Error::SuiError)?,
-                None => vec![],
-            })
-        }).await.map_err(Error::from)?
+                    .pop()
+                    .flatten();
+                Ok(match events {
+                    Some(events) => events
+                        .data
+                        .into_iter()
+                        .enumerate()
+                        .map(|(seq, e)| {
+                            let layout = store
+                                .executor()
+                                .type_layout_resolver(Box::new(
+                                    &state.get_backing_package_store().as_ref(),
+                                ))
+                                .get_annotated_layout(&e.type_)?;
+                            SuiEvent::try_from(e, transaction_digest, seq as u64, None, layout)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(Error::SuiError)?,
+                    None => vec![],
+                })
+            }
+            .await
         })
     }
 
@@ -1017,15 +1088,14 @@ impl ReadApiServer for ReadApi {
 
             self.metrics.get_checkpoints_limit.observe(limit as f64);
 
-            let mut data = spawn_monitored_task!(Self::get_checkpoints_internal(
+            let mut data = Self::get_checkpoints_internal(
                 state,
                 kv_store,
                 cursor.map(|s| *s),
                 limit as u64 + 1,
                 descending_order,
-            ))
+            )
             .await
-            .map_err(Error::from)?
             .map_err(Error::from)?;
 
             let has_next_page = data.len() > limit;
@@ -1150,6 +1220,7 @@ impl ReadApiServer for ReadApi {
             true,
             Some(30),
             true,
+            true,
         );
         match intent_scope {
             ZkLoginIntentScope::TransactionData => {
@@ -1251,6 +1322,9 @@ pub enum ObjectDisplayError {
 
     #[error(transparent)]
     StateReadError(#[from] StateReadError),
+
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
 }
 
 #[instrument(skip(fullnode_api, kv_store))]
@@ -1260,7 +1334,11 @@ async fn get_display_fields(
     original_object: &Object,
     original_layout: &Option<MoveStructLayout>,
 ) -> Result<DisplayFieldsResponse, ObjectDisplayError> {
-    let Some(layout) = original_layout else {
+    let (layout, type_) = if let Some(layout) = original_layout {
+        let type_ = &layout.type_;
+        let layout = MoveTypeLayout::Struct(Box::new(layout.clone()));
+        (layout, type_)
+    } else {
         return Ok(DisplayFieldsResponse {
             data: None,
             error: None,
@@ -1271,39 +1349,88 @@ async fn get_display_fields(
         return Err(ObjectDisplayError::MoveObject);
     };
 
-    let Some(display_object) =
-        get_display_object_by_type(kv_store, fullnode_api, &layout.type_).await?
-    else {
-        return Ok(DisplayFieldsResponse {
-            data: None,
-            error: None,
-        });
-    };
+    let display: Vec<(String, Result<Json, anyhow::Error>)> =
+        if let Some(display_object) = get_display_object_v2_by_type(fullnode_api, type_)? {
+            let root = sui_display::v2::OwnedSlice {
+                bytes: move_object.contents().to_owned(),
+                layout,
+            };
 
-    let format = match Format::parse(MAX_DISPLAY_NESTED_LEVEL, &display_object.fields) {
-        Ok(format) => format,
-        Err(e) => {
+            let store = DisplayStore::new(fullnode_api.state.as_ref());
+            let interpreter = sui_display::v2::Interpreter::new(root, store);
+            let limits = sui_display::v2::Limits {
+                max_depth: *MAX_DISPLAY_FIELD_DEPTH,
+                max_nodes: *MAX_DISPLAY_FORMAT_NODES,
+                max_loads: *MAX_DISPLAY_OBJECT_LOADS,
+            };
+
+            match sui_display::v2::Display::parse(limits, display_object.fields()) {
+                Ok(display) => match display
+                    .display::<Json>(
+                        *MAX_DISPLAY_MOVE_VALUE_DEPTH,
+                        *MAX_DISPLAY_OUTPUT_SIZE,
+                        &interpreter,
+                    )
+                    .await
+                {
+                    Ok(fields) => fields
+                        .into_iter()
+                        .map(|(field, value)| (field, value.map_err(anyhow::Error::from)))
+                        .collect(),
+                    Err(e) => {
+                        return Ok(DisplayFieldsResponse {
+                            data: None,
+                            error: Some(SuiObjectResponseError::DisplayError {
+                                error: e.to_string(),
+                            }),
+                        });
+                    }
+                },
+
+                Err(e) => {
+                    return Ok(DisplayFieldsResponse {
+                        data: None,
+                        error: Some(SuiObjectResponseError::DisplayError {
+                            error: e.to_string(),
+                        }),
+                    });
+                }
+            }
+        } else if let Some(display_object) =
+            get_display_object_v1_by_type(kv_store, fullnode_api, type_).await?
+        {
+            let format = match Format::parse(*MAX_DISPLAY_FIELD_DEPTH, &display_object.fields) {
+                Ok(format) => format,
+                Err(e) => {
+                    return Ok(DisplayFieldsResponse {
+                        data: None,
+                        error: Some(SuiObjectResponseError::DisplayError {
+                            error: e.to_string(),
+                        }),
+                    });
+                }
+            };
+
+            match format.display(*MAX_DISPLAY_OUTPUT_SIZE, move_object.contents(), &layout) {
+                Ok(fields) => fields
+                    .into_iter()
+                    .map(|(field, value)| (field, value.map(Json::String)))
+                    .collect(),
+                Err(e) => {
+                    return Ok(DisplayFieldsResponse {
+                        data: None,
+                        error: Some(SuiObjectResponseError::DisplayError {
+                            error: e.to_string(),
+                        }),
+                    });
+                }
+            }
+        } else {
             return Ok(DisplayFieldsResponse {
                 data: None,
-                error: Some(SuiObjectResponseError::DisplayError {
-                    error: e.to_string(),
-                }),
+                error: None,
             });
-        }
-    };
-
-    let layout = MoveTypeLayout::Struct(Box::new(layout.clone()));
-    let display = match format.display(*MAX_DISPLAY_OUTPUT_SIZE, move_object.contents(), &layout) {
-        Ok(fields) => fields,
-        Err(e) => {
-            return Ok(DisplayFieldsResponse {
-                data: None,
-                error: Some(SuiObjectResponseError::DisplayError {
-                    error: e.to_string(),
-                }),
-            });
-        }
-    };
+        };
 
     let mut fields = BTreeMap::new();
     let mut errors = vec![];
@@ -1328,11 +1455,10 @@ async fn get_display_fields(
 }
 
 #[instrument(skip(kv_store, fullnode_api))]
-async fn get_display_object_by_type(
+async fn get_display_object_v1_by_type(
     kv_store: &Arc<TransactionKeyValueStore>,
     fullnode_api: &ReadApi,
     object_type: &StructTag,
-    // TODO: add query version support
 ) -> Result<Option<DisplayVersionUpdatedEvent>, ObjectDisplayError> {
     let mut events = fullnode_api
         .state
@@ -1346,13 +1472,29 @@ async fn get_display_object_by_type(
         .await?;
 
     // If there's any recent version of Display, give it to the client.
-    // TODO: add support for version query.
     if let Some(event) = events.pop() {
         let display: DisplayVersionUpdatedEvent = bcs::from_bytes(&event.bcs.into_bytes())?;
         Ok(Some(display))
     } else {
         Ok(None)
     }
+}
+
+#[instrument(skip(fullnode_api))]
+fn get_display_object_v2_by_type(
+    fullnode_api: &ReadApi,
+    object_type: &StructTag,
+) -> Result<Option<display_registry::Display>, ObjectDisplayError> {
+    let object_id = display_registry::display_object_id(object_type.clone().into())?;
+    let ObjectRead::Exists(_, object, _) = fullnode_api.state.get_object_read(&object_id)? else {
+        return Ok(None);
+    };
+
+    let Some(move_object) = object.data.try_as_move() else {
+        return Ok(None);
+    };
+
+    Ok(Some(bcs::from_bytes(move_object.contents())?))
 }
 
 #[instrument(skip_all)]

@@ -6,17 +6,17 @@ use move_core_types::{account_address::AccountAddress, identifier::Identifier};
 use proptest::arbitrary::*;
 use proptest::prelude::*;
 
-use sui_core::test_utils::send_and_confirm_transaction;
+use sui_core::authority::authority_test_utils::submit_and_execute;
 use sui_types::base_types::ObjectID;
 use sui_types::effects::{TransactionEffects, TransactionEffectsAPI};
 use sui_types::error::SuiError;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{ProgrammableTransaction, TransactionData, TransactionKind};
 use sui_types::utils::to_sender_signed_transaction;
-use sui_types::{TypeTag, SUI_FRAMEWORK_PACKAGE_ID};
+use sui_types::{SUI_FRAMEWORK_PACKAGE_ID, TypeTag};
 
 use crate::account_universe::AccountCurrent;
-use crate::executor::{assert_is_acceptable_result, Executor};
+use crate::executor::{Executor, assert_is_acceptable_result};
 
 const GAS_PRICE: u64 = 700;
 const GAS: u64 = 1_000_000 * GAS_PRICE;
@@ -170,6 +170,6 @@ pub fn run_pt_effects(
     );
     let signed_txn = to_sender_signed_transaction(tx_data, &account.initial_data.account.key);
     exec.rt
-        .block_on(send_and_confirm_transaction(&exec.state, None, signed_txn))
+        .block_on(submit_and_execute(&exec.state, signed_txn))
         .map(|(_, effects)| effects.into_data())
 }

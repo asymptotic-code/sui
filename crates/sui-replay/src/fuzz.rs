@@ -3,8 +3,7 @@
 
 use sui_config::node::ExpensiveSafetyCheckConfig;
 use sui_types::{
-    digests::TransactionDigest, execution_status::ExecutionFailureStatus,
-    transaction::TransactionKind,
+    digests::TransactionDigest, execution_status::ExecutionErrorKind, transaction::TransactionKind,
 };
 use thiserror::Error;
 use tracing::{error, info};
@@ -75,7 +74,6 @@ impl ReplayFuzzer {
                 None,
                 None,
                 None,
-                None,
             )
             .await?;
 
@@ -120,8 +118,8 @@ impl ReplayFuzzer {
         if let Some(Err(e)) = &sandbox_state.local_exec_status {
             let stat = e.to_execution_status().0;
             match &stat {
-                ExecutionFailureStatus::InvariantViolation
-                | ExecutionFailureStatus::VMInvariantViolation => {
+                ExecutionErrorKind::InvariantViolation
+                | ExecutionErrorKind::VMInvariantViolation => {
                     return Err(ReplayFuzzError::InvariantViolation {
                         tx_digest: sandbox_state.transaction_info.tx_digest,
                         kind: transaction_kind.clone(),
@@ -158,8 +156,7 @@ impl ReplayFuzzer {
                     Err(e) => {
                         error!(
                             "Error executing transaction: base tx: {}, mutation: {:?} with error{:?}",
-                            self.sandbox_state.transaction_info.tx_digest,
-                            mutation, e
+                            self.sandbox_state.transaction_info.tx_digest, mutation, e
                         );
                         if self.config.fail_over_on_err {
                             return Err(e);
@@ -193,7 +190,7 @@ pub enum ReplayFuzzError {
     InvariantViolation {
         tx_digest: TransactionDigest,
         kind: TransactionKind,
-        exec_status: ExecutionFailureStatus,
+        exec_status: ExecutionErrorKind,
     },
 
     #[error(

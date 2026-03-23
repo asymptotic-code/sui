@@ -1,74 +1,81 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use futures::{future::join_all, StreamExt};
+use futures::{StreamExt, future::join_all};
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use mysten_common::fatal;
 use rand::{distributions::*, rngs::OsRng, seq::SliceRandom};
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use sui_config::genesis::Genesis;
+use sui_config::node::FundsWithdrawSchedulerType;
 use sui_config::node::{AuthorityOverloadConfig, DBCheckpointConfig, RunWithRange};
 use sui_config::{Config, ExecutionCacheConfig, SUI_CLIENT_CONFIG, SUI_NETWORK_CONFIG};
 use sui_config::{NodeConfig, PersistedConfig, SUI_KEYSTORE_FILENAME};
 use sui_core::authority_aggregator::AuthorityAggregator;
 use sui_core::authority_client::NetworkAuthorityClient;
-use sui_json_rpc_types::{
-    SuiExecutionStatus, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
-    TransactionFilter,
-};
+use sui_json_rpc_types::{SuiTransactionBlockEffectsAPI, TransactionFilter};
 use sui_keys::keystore::{AccountKeystore, FileBasedKeystore, Keystore};
 use sui_node::SuiNodeHandle;
 use sui_protocol_config::{Chain, ProtocolVersion};
-use sui_sdk::apis::QuorumDriverApi;
+use sui_rpc_api::Client;
+use sui_rpc_api::client::ExecutedTransaction;
 use sui_sdk::sui_client_config::{SuiClientConfig, SuiEnv};
 use sui_sdk::wallet_context::WalletContext;
 use sui_sdk::{SuiClient, SuiClientBuilder};
 use sui_swarm::memory::{Swarm, SwarmBuilder};
 use sui_swarm_config::genesis_config::{
-    AccountConfig, GenesisConfig, ValidatorGenesisConfig, DEFAULT_GAS_AMOUNT,
+    AccountConfig, DEFAULT_GAS_AMOUNT, GenesisConfig, ValidatorGenesisConfig,
 };
 use sui_swarm_config::network_config::NetworkConfig;
 use sui_swarm_config::network_config_builder::{
-    GlobalStateHashV2EnabledCallback, GlobalStateHashV2EnabledConfig, ProtocolVersionsConfig,
-    SupportedProtocolVersionsCallback,
+    FundsWithdrawSchedulerTypeConfig, GlobalStateHashV2EnabledCallback,
+    GlobalStateHashV2EnabledConfig, ProtocolVersionsConfig, SupportedProtocolVersionsCallback,
 };
 use sui_swarm_config::node_config_builder::{FullnodeConfigBuilder, ValidatorConfigBuilder};
 use sui_test_transaction_builder::TestTransactionBuilder;
+use sui_types::authenticator_state::get_authenticator_state;
 use sui_types::base_types::ConciseableName;
 use sui_types::base_types::{AuthorityName, ObjectID, ObjectRef, SuiAddress};
 use sui_types::committee::CommitteeTrait;
 use sui_types::committee::{Committee, EpochId};
 use sui_types::crypto::KeypairTraits;
 use sui_types::crypto::SuiKeyPair;
+use sui_types::digests::{ChainIdentifier, TransactionDigest};
+use sui_types::effects::TransactionEffectsAPI;
 use sui_types::effects::{TransactionEffects, TransactionEvents};
 use sui_types::error::SuiResult;
-use sui_types::message_envelope::Message;
+use sui_types::messages_grpc::{
+    RawSubmitTxRequest, SubmitTxRequest, SubmitTxResult, SubmitTxType, WaitForEffectsRequest,
+    WaitForEffectsResponse,
+};
 use sui_types::object::Object;
-use sui_types::sui_system_state::epoch_start_sui_system_state::EpochStartSystemStateTrait;
 use sui_types::sui_system_state::SuiSystemState;
 use sui_types::sui_system_state::SuiSystemStateTrait;
+use sui_types::sui_system_state::epoch_start_sui_system_state::EpochStartSystemStateTrait;
 use sui_types::supported_protocol_versions::SupportedProtocolVersions;
 use sui_types::traffic_control::{PolicyConfig, RemoteFirewallConfig};
-use sui_types::transaction::{
-    CertifiedTransaction, Transaction, TransactionData, TransactionDataAPI, TransactionKind,
-};
-use tokio::time::{timeout, Instant};
+use sui_types::transaction::{Transaction, TransactionData, TransactionDataAPI, TransactionKind};
+use tokio::sync::broadcast;
+use tokio::time::{Instant, timeout};
 use tokio::{task::JoinHandle, time::sleep};
+use tonic::IntoRequest;
 use tracing::{error, info};
 
-mod test_indexer_handle;
+pub mod addr_balance_test_env;
 
 const NUM_VALIDATOR: usize = 4;
 
 pub struct FullNodeHandle {
     pub sui_node: SuiNodeHandle,
+    #[deprecated = "use grpc_client"]
     pub sui_client: SuiClient,
+    #[deprecated = "use grpc_client"]
     pub rpc_client: HttpClient,
+    pub grpc_client: Client,
     pub rpc_url: String,
 }
 
@@ -78,11 +85,15 @@ impl FullNodeHandle {
         let rpc_client = HttpClientBuilder::default().build(&rpc_url).unwrap();
 
         let sui_client = SuiClientBuilder::default().build(&rpc_url).await.unwrap();
+        let grpc_client = Client::new(&rpc_url).unwrap();
 
         Self {
             sui_node,
+            #[allow(deprecated)]
             sui_client,
+            #[allow(deprecated)]
             rpc_client,
+            grpc_client,
             rpc_url,
         }
     }
@@ -92,34 +103,27 @@ pub struct TestCluster {
     pub swarm: Swarm,
     pub wallet: WalletContext,
     pub fullnode_handle: FullNodeHandle,
-    indexer_handle: Option<test_indexer_handle::IndexerHandle>,
-    transaction_driver_percentage: Option<u8>,
 }
 
 impl TestCluster {
+    #[deprecated = "use grpc_client()"]
     pub fn rpc_client(&self) -> &HttpClient {
-        self.indexer_handle
-            .as_ref()
-            .map(|h| &h.rpc_client)
-            .unwrap_or(&self.fullnode_handle.rpc_client)
+        #[allow(deprecated)]
+        &self.fullnode_handle.rpc_client
     }
 
+    #[deprecated = "use grpc_client()"]
     pub fn sui_client(&self) -> &SuiClient {
-        self.indexer_handle
-            .as_ref()
-            .map(|h| &h.sui_client)
-            .unwrap_or(&self.fullnode_handle.sui_client)
+        #[allow(deprecated)]
+        &self.fullnode_handle.sui_client
+    }
+
+    pub fn grpc_client(&self) -> Client {
+        self.fullnode_handle.grpc_client.clone()
     }
 
     pub fn rpc_url(&self) -> &str {
-        self.indexer_handle
-            .as_ref()
-            .map(|h| h.rpc_url.as_str())
-            .unwrap_or(&self.fullnode_handle.rpc_url)
-    }
-
-    pub fn quorum_driver_api(&self) -> &QuorumDriverApi {
-        self.sui_client().quorum_driver_api()
+        &self.fullnode_handle.rpc_url
     }
 
     pub fn wallet(&mut self) -> &WalletContext {
@@ -159,8 +163,12 @@ impl TestCluster {
             .with(|node| node.state().epoch_store_for_testing().committee().clone())
     }
 
-    pub fn transaction_driver_percentage(&self) -> Option<u8> {
-        self.transaction_driver_percentage
+    pub fn get_sui_system_state(&self) -> SuiSystemState {
+        self.fullnode_handle.sui_node.with(|node| {
+            node.state()
+                .get_sui_system_state_object_for_testing()
+                .unwrap()
+        })
     }
 
     /// Convenience method to start a new fullnode in the test cluster.
@@ -243,11 +251,14 @@ impl TestCluster {
     }
 
     pub async fn get_reference_gas_price(&self) -> u64 {
-        self.sui_client()
-            .governance_api()
+        self.grpc_client()
             .get_reference_gas_price()
             .await
             .expect("failed to get reference gas price")
+    }
+
+    pub fn get_chain_identifier(&self) -> ChainIdentifier {
+        ChainIdentifier::from(*self.swarm.config().genesis.checkpoint().digest())
     }
 
     pub async fn get_object_from_fullnode_store(&self, object_id: &ObjectID) -> Option<Object> {
@@ -472,6 +483,13 @@ impl TestCluster {
             .expect("timed out waiting for reconfiguration to complete");
     }
 
+    pub fn subscribe_to_epoch_change(&self) -> broadcast::Receiver<SuiSystemState> {
+        // fullnode_handle is not part of swarm and cannot be dropped / killed
+        self.fullnode_handle
+            .sui_node
+            .with(|node| node.subscribe_to_epoch_change())
+    }
+
     /// Upgrade the network protocol version, by restarting every validator with a new
     /// supported versions.
     /// Note that we don't restart the fullnode here, and it is assumed that the fulnode supports
@@ -516,10 +534,21 @@ impl TestCluster {
         timeout(
             Duration::from_secs(60),
             self.fullnode_handle.sui_node.with_async(|node| async move {
-                let mut txns = node.state().subscription_handler.subscribe_transactions(
+                let state = node.state();
+                let mut txns = state.subscription_handler.subscribe_transactions(
                     TransactionFilter::ChangedObject(ObjectID::from_hex_literal("0x7").unwrap()),
                 );
-                let state = node.state();
+
+                // Check if the state was already updated before subscribe_transactions was called
+                // above (after trigger_reconfiguration completes, the AuthenticatorStateUpdate
+                // transaction may have already been committed).
+                let has_active_jwks = get_authenticator_state(state.get_object_store())
+                    .ok()
+                    .flatten()
+                    .is_some_and(|state| !state.active_jwks.is_empty());
+                if has_active_jwks {
+                    return;
+                }
 
                 while let Some(tx) = txns.next().await {
                     let digest = *tx.transaction_digest();
@@ -584,23 +613,230 @@ impl TestCluster {
         TestTransactionBuilder::new(sender, gas, rgp)
     }
 
-    pub fn sign_transaction(&self, tx_data: &TransactionData) -> Transaction {
-        self.wallet.sign_transaction(tx_data)
+    pub async fn sign_transaction(&self, tx_data: &TransactionData) -> Transaction {
+        self.wallet.sign_transaction(tx_data).await
     }
 
     pub async fn sign_and_execute_transaction(
         &self,
         tx_data: &TransactionData,
-    ) -> SuiTransactionBlockResponse {
-        let tx = self.wallet.sign_transaction(tx_data);
+    ) -> ExecutedTransaction {
+        let tx = self.wallet.sign_transaction(tx_data).await;
         self.execute_transaction(tx).await
+    }
+
+    /// Sign and execute the transaction via direct validator submission, bypassing the fullnode.
+    pub async fn sign_and_execute_transaction_directly(
+        &self,
+        tx_data: &TransactionData,
+    ) -> SuiResult<(TransactionDigest, TransactionEffects)> {
+        let mut res = self
+            .sign_and_execute_txns_in_soft_bundle(std::slice::from_ref(tx_data))
+            .await?;
+        assert_eq!(res.len(), 1);
+        Ok(res.pop().unwrap())
+    }
+
+    /// Execute an already-signed transaction via direct validator submission, bypassing the fullnode.
+    pub async fn execute_transaction_directly(
+        &self,
+        tx: &Transaction,
+    ) -> SuiResult<(TransactionDigest, TransactionEffects)> {
+        let mut res = self
+            .execute_signed_txns_in_soft_bundle(std::slice::from_ref(tx))
+            .await?;
+        assert_eq!(res.len(), 1);
+        Ok(res.pop().unwrap())
+    }
+
+    /// Sign and execute multiple transactions in a soft bundle.
+    /// Soft bundles allow submitting multiple transactions together with best-effort
+    /// ordering if they use the same gas price. Transactions in a soft bundle can be
+    /// individually rejected or deferred without affecting other transactions.
+    ///
+    /// NOTE: This is a simplified implementation that processes transactions individually.
+    /// For true soft bundle submission, the test file should use the raw gRPC client directly
+    /// with tonic, as shown in test_soft_bundle_different_gas_payers.
+    pub async fn sign_and_execute_txns_in_soft_bundle(
+        &self,
+        txns: &[TransactionData],
+    ) -> SuiResult<Vec<(TransactionDigest, TransactionEffects)>> {
+        // Sign all transactions
+        let signed_txs: Vec<Transaction> =
+            futures::future::join_all(txns.iter().map(|tx| self.wallet.sign_transaction(tx))).await;
+
+        self.execute_signed_txns_in_soft_bundle(&signed_txs).await
+    }
+
+    pub async fn execute_signed_txns_in_soft_bundle(
+        &self,
+        signed_txs: &[Transaction],
+    ) -> SuiResult<Vec<(TransactionDigest, TransactionEffects)>> {
+        let digests: Vec<_> = signed_txs.iter().map(|tx| *tx.digest()).collect();
+
+        let request = RawSubmitTxRequest {
+            transactions: signed_txs
+                .iter()
+                .map(|tx| bcs::to_bytes(tx).unwrap().into())
+                .collect(),
+            submit_type: SubmitTxType::SoftBundle.into(),
+        };
+
+        let mut validator_client = self
+            .authority_aggregator()
+            .authority_clients
+            .iter()
+            .next()
+            .unwrap()
+            .1
+            .authority_client()
+            .get_client_for_testing()
+            .unwrap();
+
+        let result = validator_client
+            .submit_transaction(request.into_request())
+            .await
+            .map(tonic::Response::into_inner)?;
+        assert_eq!(result.results.len(), signed_txs.len());
+
+        for raw_result in result.results.iter() {
+            let submit_result: sui_types::messages_grpc::SubmitTxResult =
+                raw_result.clone().try_into()?;
+            if let sui_types::messages_grpc::SubmitTxResult::Rejected { error } = submit_result {
+                return Err(error);
+            }
+        }
+
+        let effects = self
+            .fullnode_handle
+            .sui_node
+            .with_async(|node| {
+                let digests = digests.clone();
+                async move {
+                    let state = node.state();
+                    let transaction_cache_reader = state.get_transaction_cache_reader();
+                    transaction_cache_reader
+                        .notify_read_executed_effects(
+                            "sign_and_execute_txns_in_soft_bundle",
+                            &digests,
+                        )
+                        .await
+                }
+            })
+            .await;
+
+        Ok(digests.into_iter().zip(effects.into_iter()).collect())
+    }
+
+    /// Execute signed transactions in a soft bundle and return results for each transaction.
+    /// Unlike `execute_signed_txns_in_soft_bundle`, this method handles conflicting transactions
+    /// where some may be executed and others rejected.
+    ///
+    /// Returns a vector of (digest, WaitForEffectsResponse) for each transaction.
+    pub async fn execute_soft_bundle_with_conflicts(
+        &self,
+        signed_txs: &[Transaction],
+    ) -> SuiResult<Vec<(TransactionDigest, WaitForEffectsResponse)>> {
+        let digests: Vec<_> = signed_txs.iter().map(|tx| *tx.digest()).collect();
+
+        let request = RawSubmitTxRequest {
+            transactions: signed_txs
+                .iter()
+                .map(|tx| bcs::to_bytes(tx).unwrap().into())
+                .collect(),
+            submit_type: SubmitTxType::SoftBundle.into(),
+        };
+
+        let authority_aggregator = self.authority_aggregator();
+        let (_, safe_client) = authority_aggregator
+            .authority_clients
+            .iter()
+            .next()
+            .unwrap();
+        let mut validator_client = safe_client
+            .authority_client()
+            .get_client_for_testing()
+            .unwrap();
+
+        let result = validator_client
+            .submit_transaction(request.into_request())
+            .await
+            .map(tonic::Response::into_inner)?;
+        assert_eq!(result.results.len(), signed_txs.len());
+
+        // Extract consensus positions from submission results
+        let mut consensus_positions = Vec::new();
+        for (i, raw_result) in result.results.iter().enumerate() {
+            let submit_result: SubmitTxResult = raw_result.clone().try_into()?;
+            match submit_result {
+                SubmitTxResult::Submitted { consensus_position } => {
+                    consensus_positions.push(consensus_position);
+                }
+                SubmitTxResult::Executed { .. } => {
+                    panic!(
+                        "Transaction {} was already executed during submission",
+                        i + 1
+                    );
+                }
+                SubmitTxResult::Rejected { error } => {
+                    return Err(error);
+                }
+            }
+        }
+
+        // Wait for effects using consensus positions
+        let wait_futures: Vec<_> = digests
+            .iter()
+            .zip(consensus_positions.iter())
+            .map(|(digest, position)| {
+                let request = WaitForEffectsRequest {
+                    transaction_digest: Some(*digest),
+                    consensus_position: Some(*position),
+                    include_details: false,
+                    ping_type: None,
+                };
+                safe_client.wait_for_effects(request, None)
+            })
+            .collect();
+
+        let responses = futures::future::join_all(wait_futures).await;
+
+        let results: SuiResult<Vec<_>> = digests
+            .into_iter()
+            .zip(responses.into_iter())
+            .map(|(digest, response)| Ok((digest, response?)))
+            .collect();
+
+        results
+    }
+
+    pub async fn wait_for_tx_settlement(&self, digests: &[TransactionDigest]) {
+        self.fullnode_handle
+            .sui_node
+            .with_async(|node| async move {
+                let state = node.state();
+                // wait until the transactions are in checkpoints
+                let checkpoint_seqs = state
+                    .epoch_store_for_testing()
+                    .transactions_executed_in_checkpoint_notify(digests.to_vec())
+                    .await
+                    .unwrap();
+
+                // then wait until the highest of the checkpoints is executed
+                let max_checkpoint_seq = checkpoint_seqs.into_iter().max().unwrap();
+                state
+                    .checkpoint_store
+                    .notify_read_executed_checkpoint(max_checkpoint_seq)
+                    .await;
+            })
+            .await;
     }
 
     /// Execute a transaction on the network and wait for it to be executed on the rpc fullnode.
     /// Also expects the effects status to be ExecutionStatus::Success.
     /// This function is recommended for transaction execution since it most resembles the
     /// production path.
-    pub async fn execute_transaction(&self, tx: Transaction) -> SuiTransactionBlockResponse {
+    pub async fn execute_transaction(&self, tx: Transaction) -> ExecutedTransaction {
         self.wallet.execute_transaction_must_succeed(tx).await
     }
 
@@ -616,9 +852,7 @@ impl TestCluster {
         &self,
         tx: Transaction,
     ) -> anyhow::Result<(TransactionEffects, TransactionEvents)> {
-        let results = self
-            .submit_transaction_to_validators(tx.clone(), &self.get_validator_pubkeys())
-            .await?;
+        let results = self.submit_and_execute(tx.clone(), None).await?;
         self.wallet.execute_transaction_may_fail(tx).await.unwrap();
         Ok(results)
     }
@@ -629,79 +863,66 @@ impl TestCluster {
             .with(|node| node.clone_authority_aggregator().unwrap())
     }
 
-    pub async fn create_certificate(
+    /// Submit a transaction and wait for it to be executed.
+    /// With MFP, transactions are submitted to consensus and executed by validators.
+    /// Returns the transaction effects and events on success.
+    pub async fn submit_and_execute(
         &self,
         tx: Transaction,
         client_addr: Option<SocketAddr>,
-    ) -> anyhow::Result<CertifiedTransaction> {
-        let agg = self.authority_aggregator();
-        Ok(agg
-            .process_transaction(tx, client_addr)
-            .await?
-            .into_cert_for_testing())
-    }
-
-    /// Execute a transaction on specified list of validators, and bypassing authority aggregator.
-    /// This allows us to obtain the return value directly from validators, so that we can access more
-    /// information directly such as the original effects, events and extra objects returned.
-    /// This also allows us to control which validator to send certificates to, which is useful in
-    /// some tests.
-    pub async fn submit_transaction_to_validators(
-        &self,
-        tx: Transaction,
-        pubkeys: &[AuthorityName],
     ) -> anyhow::Result<(TransactionEffects, TransactionEvents)> {
         let agg = self.authority_aggregator();
-        let certificate = agg
-            .process_transaction(tx, None)
-            .await?
-            .into_cert_for_testing();
-        let replies = loop {
-            let futures: Vec<_> = agg
-                .authority_clients
-                .iter()
-                .filter_map(|(name, client)| {
-                    if pubkeys.contains(name) {
-                        Some(client)
-                    } else {
-                        None
+        // Pick a validator to submit to
+        let (_, client) = agg
+            .authority_clients
+            .iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No authority clients available"))?;
+
+        // Submit the transaction
+        let submit_request = SubmitTxRequest::new_transaction(tx.clone());
+        let submit_response = client
+            .submit_transaction(submit_request, client_addr)
+            .await?;
+
+        // Check if already executed
+        for result in submit_response.results {
+            match result {
+                SubmitTxResult::Executed { details, .. } => {
+                    if let Some(data) = details {
+                        let events = data.events.unwrap_or_default();
+                        return Ok((data.effects, events));
                     }
-                })
-                .map(|client| {
-                    let cert = certificate.clone();
-                    async move { client.handle_certificate_v2(cert, None).await }
-                })
-                .collect();
-
-            let replies: Vec<_> = futures::future::join_all(futures)
-                .await
-                .into_iter()
-                .filter(|result| match result {
-                    Err(e) => !e.to_string().contains("deadline has elapsed"),
-                    _ => true,
-                })
-                .collect();
-
-            if !replies.is_empty() {
-                break replies;
+                }
+                SubmitTxResult::Rejected { error } => {
+                    return Err(error.into());
+                }
+                SubmitTxResult::Submitted { .. } => {
+                    // Need to wait for effects
+                }
             }
-        };
-        let replies: SuiResult<Vec<_>> = replies.into_iter().collect();
-        let replies = replies?;
-        let mut all_effects = HashMap::new();
-        let mut all_events = HashMap::new();
-        for reply in replies {
-            let effects = reply.signed_effects.into_data();
-            all_effects.insert(effects.digest(), effects);
-            all_events.insert(reply.events.digest(), reply.events);
-            // reply.fastpath_input_objects is unused.
         }
-        assert_eq!(all_effects.len(), 1);
-        assert_eq!(all_events.len(), 1);
-        Ok((
-            all_effects.into_values().next().unwrap(),
-            all_events.into_values().next().unwrap(),
-        ))
+
+        // Wait for effects
+        let wait_request = WaitForEffectsRequest {
+            transaction_digest: Some(*tx.digest()),
+            consensus_position: None,
+            include_details: true,
+            ping_type: None,
+        };
+
+        let response = client.wait_for_effects(wait_request, client_addr).await?;
+        match response {
+            WaitForEffectsResponse::Executed { details, .. } => {
+                let data = details.ok_or_else(|| anyhow::anyhow!("Expected execution details"))?;
+                let events = data.events.unwrap_or_default();
+                Ok((data.effects, events))
+            }
+            WaitForEffectsResponse::Rejected { error } => Err(error
+                .ok_or_else(|| anyhow::anyhow!("Transaction was rejected"))?
+                .into()),
+            WaitForEffectsResponse::Expired { .. } => Err(anyhow::anyhow!("Transaction expired")),
+        }
     }
 
     /// This call sends some funds from the seeded address to the funding
@@ -715,11 +936,13 @@ impl TestCluster {
     ) -> ObjectRef {
         let context = &self.wallet;
         let (sender, gas) = context.get_one_gas_object().await.unwrap().unwrap();
-        let tx = context.sign_transaction(
-            &TestTransactionBuilder::new(sender, gas, rgp)
-                .transfer_sui(amount, funding_address)
-                .build(),
-        );
+        let tx = context
+            .sign_transaction(
+                &TestTransactionBuilder::new(sender, gas, rgp)
+                    .transfer_sui(amount, funding_address)
+                    .build(),
+            )
+            .await;
         context.execute_transaction_must_succeed(tx).await;
 
         context
@@ -740,13 +963,9 @@ impl TestCluster {
             .await
             .transfer_sui(Some(amount), receiver)
             .build();
-        let effects = self
-            .sign_and_execute_transaction(&tx)
-            .await
-            .effects
-            .unwrap();
-        assert_eq!(&SuiExecutionStatus::Success, effects.status());
-        effects.created().first().unwrap().object_id()
+        let effects = self.sign_and_execute_transaction(&tx).await.effects;
+        assert!(effects.status().is_ok());
+        effects.created().first().unwrap().0.0
     }
 
     #[cfg(msim)]
@@ -851,12 +1070,18 @@ pub struct TestClusterBuilder {
     max_submit_position: Option<usize>,
     submit_delay_step_override_millis: Option<u64>,
     validator_global_state_hash_v2_enabled_config: GlobalStateHashV2EnabledConfig,
+    validator_funds_withdraw_scheduler_type_config: FundsWithdrawSchedulerTypeConfig,
 
-    indexer_backed_rpc: bool,
+    rpc_config: Option<sui_config::RpcConfig>,
 
     chain_override: Option<Chain>,
 
-    transaction_driver_percentage: Option<u8>,
+    execution_time_observer_config: Option<sui_config::node::ExecutionTimeObserverConfig>,
+
+    state_sync_config: Option<sui_config::p2p::StateSyncConfig>,
+
+    #[cfg(msim)]
+    inject_synthetic_execution_time: bool,
 }
 
 impl TestClusterBuilder {
@@ -890,9 +1115,33 @@ impl TestClusterBuilder {
             validator_global_state_hash_v2_enabled_config: GlobalStateHashV2EnabledConfig::Global(
                 true,
             ),
-            indexer_backed_rpc: false,
-            transaction_driver_percentage: None,
+            validator_funds_withdraw_scheduler_type_config:
+                FundsWithdrawSchedulerTypeConfig::PerValidator(Arc::new(|idx| {
+                    if idx % 2 == 0 {
+                        FundsWithdrawSchedulerType::Eager
+                    } else {
+                        FundsWithdrawSchedulerType::Naive
+                    }
+                })),
+            rpc_config: None,
+            execution_time_observer_config: None,
+            state_sync_config: None,
+            #[cfg(msim)]
+            inject_synthetic_execution_time: false,
         }
+    }
+
+    pub fn with_state_sync_config(mut self, config: sui_config::p2p::StateSyncConfig) -> Self {
+        self.state_sync_config = Some(config);
+        self
+    }
+
+    pub fn with_execution_time_observer_config(
+        mut self,
+        config: sui_config::node::ExecutionTimeObserverConfig,
+    ) -> Self {
+        self.execution_time_observer_config = Some(config);
+        self
     }
 
     pub fn with_fullnode_run_with_range(mut self, run_with_range: Option<RunWithRange>) -> Self {
@@ -980,6 +1229,10 @@ impl TestClusterBuilder {
     }
 
     pub fn with_epoch_duration_ms(mut self, epoch_duration_ms: u64) -> Self {
+        assert!(
+            epoch_duration_ms >= 10000,
+            "Epoch duration must be at least 10s (10000ms) to avoid flaky tests. Got {epoch_duration_ms}ms."
+        );
         self.get_or_init_genesis_config()
             .parameters
             .epoch_duration_ms = epoch_duration_ms;
@@ -1104,8 +1357,8 @@ impl TestClusterBuilder {
         self
     }
 
-    pub fn with_indexer_backed_rpc(mut self) -> Self {
-        self.indexer_backed_rpc = true;
+    pub fn with_rpc_config(mut self, config: sui_config::RpcConfig) -> Self {
+        self.rpc_config = Some(config);
         self
     }
 
@@ -1114,10 +1367,9 @@ impl TestClusterBuilder {
         self
     }
 
-    /// Percentage of transactions going through TransactionDriver, instead of QuorumDriver.
-    /// Can be overridden by setting the TRANSACTION_DRIVER environment variable.
-    pub fn transaction_driver_percentage(mut self, percent: u8) -> Self {
-        self.transaction_driver_percentage = Some(percent);
+    #[cfg(msim)]
+    pub fn with_synthetic_execution_time_injection(mut self) -> Self {
+        self.inject_synthetic_execution_time = true;
         self
     }
 
@@ -1128,7 +1380,7 @@ impl TestClusterBuilder {
         #[cfg(msim)]
         if !self.default_jwks {
             sui_node::set_jwk_injector(Arc::new(|_authority, provider| {
-                use fastcrypto_zkp::bn254::zk_login::{JwkId, JWK};
+                use fastcrypto_zkp::bn254::zk_login::{JWK, JwkId};
                 use rand::Rng;
 
                 // generate random (and possibly conflicting) id/key pairings.
@@ -1151,25 +1403,6 @@ impl TestClusterBuilder {
             }));
         }
 
-        let mut temp_data_ingestion_dir = None;
-        let mut data_ingestion_path = None;
-
-        if self.indexer_backed_rpc {
-            if self.data_ingestion_dir.is_none() {
-                temp_data_ingestion_dir = Some(mysten_common::tempdir().unwrap());
-                self.data_ingestion_dir = Some(
-                    temp_data_ingestion_dir
-                        .as_ref()
-                        .unwrap()
-                        .path()
-                        .to_path_buf(),
-                );
-                assert!(self.data_ingestion_dir.is_some());
-            }
-            assert!(self.data_ingestion_dir.is_some());
-            data_ingestion_path = Some(self.data_ingestion_dir.as_ref().unwrap().to_path_buf());
-        }
-
         let swarm = self.start_swarm().await.unwrap();
         let working_dir = swarm.dir();
 
@@ -1178,25 +1411,14 @@ impl TestClusterBuilder {
         let fullnode_handle =
             FullNodeHandle::new(fullnode.get_node_handle().unwrap(), json_rpc_address).await;
 
-        let (rpc_url, indexer_handle) = if self.indexer_backed_rpc {
-            let handle = test_indexer_handle::IndexerHandle::new(
-                fullnode_handle.rpc_url.clone(),
-                temp_data_ingestion_dir,
-                data_ingestion_path.unwrap(),
-            )
-            .await;
-            (handle.rpc_url.clone(), Some(handle))
-        } else {
-            (fullnode_handle.rpc_url.clone(), None)
-        };
-
         let mut wallet_conf: SuiClientConfig =
             PersistedConfig::read(&working_dir.join(SUI_CLIENT_CONFIG)).unwrap();
         wallet_conf.envs.push(SuiEnv {
             alias: "localnet".to_string(),
-            rpc: rpc_url,
+            rpc: fullnode_handle.rpc_url.clone(),
             ws: None,
             basic_auth: None,
+            chain_id: None,
         });
         wallet_conf.active_env = Some("localnet".to_string());
 
@@ -1208,14 +1430,10 @@ impl TestClusterBuilder {
         let wallet_conf = swarm.dir().join(SUI_CLIENT_CONFIG);
         let wallet = WalletContext::new(&wallet_conf).unwrap();
 
-        let transaction_driver_percentage = self.transaction_driver_percentage;
-
         TestCluster {
             swarm,
             wallet,
             fullnode_handle,
-            indexer_handle,
-            transaction_driver_percentage,
         }
     }
 
@@ -1229,6 +1447,9 @@ impl TestClusterBuilder {
             )
             .with_global_state_hash_v2_enabled_config(
                 self.validator_global_state_hash_v2_enabled_config.clone(),
+            )
+            .with_funds_withdraw_scheduler_type_config(
+                self.validator_funds_withdraw_scheduler_type_config.clone(),
             )
             .with_fullnode_count(1)
             .with_fullnode_supported_protocol_versions_config(
@@ -1272,6 +1493,10 @@ impl TestClusterBuilder {
         if let Some(fullnode_rpc_port) = self.fullnode_rpc_port {
             builder = builder.with_fullnode_rpc_port(fullnode_rpc_port);
         }
+
+        if let Some(rpc_config) = &self.rpc_config {
+            builder = builder.with_fullnode_rpc_config(rpc_config.clone());
+        }
         if let Some(num_unpruned_validators) = self.num_unpruned_validators {
             builder = builder.with_num_unpruned_validators(num_unpruned_validators);
         }
@@ -1297,8 +1522,28 @@ impl TestClusterBuilder {
                 builder.with_submit_delay_step_override_millis(submit_delay_step_override_millis);
         }
 
+        if let Some(state_sync_config) = self.state_sync_config.clone() {
+            builder = builder.with_state_sync_config(state_sync_config);
+        }
+
         if self.disable_fullnode_pruning {
             builder = builder.with_disable_fullnode_pruning();
+        }
+
+        #[cfg(msim)]
+        {
+            if let Some(mut config) = self.execution_time_observer_config.clone() {
+                if self.inject_synthetic_execution_time {
+                    config.inject_synthetic_execution_time = Some(true);
+                }
+                builder = builder.with_execution_time_observer_config(config);
+            } else if self.inject_synthetic_execution_time {
+                use sui_config::node::ExecutionTimeObserverConfig;
+
+                let mut config = ExecutionTimeObserverConfig::default();
+                config.inject_synthetic_execution_time = Some(true);
+                builder = builder.with_execution_time_observer_config(config);
+            }
         }
 
         let mut swarm = builder.build();
@@ -1311,16 +1556,19 @@ impl TestClusterBuilder {
         let keystore_path = dir.join(SUI_KEYSTORE_FILENAME);
 
         swarm.config().save(network_path)?;
-        let mut keystore = Keystore::from(FileBasedKeystore::new(&keystore_path)?);
+        let mut keystore = Keystore::from(FileBasedKeystore::load_or_create(&keystore_path)?);
         for key in &swarm.config().account_keys {
-            keystore.import(None, SuiKeyPair::Ed25519(key.copy()))?;
+            keystore
+                .import(None, SuiKeyPair::Ed25519(key.copy()))
+                .await?;
         }
 
         let active_address = keystore.addresses().first().cloned();
 
         // Create wallet config with stated authorities port
         SuiClientConfig {
-            keystore: Keystore::from(FileBasedKeystore::new(&keystore_path)?),
+            keystore: Keystore::from(FileBasedKeystore::load_or_create(&keystore_path)?),
+            external_keys: None,
             envs: Default::default(),
             active_address,
             active_env: Default::default(),

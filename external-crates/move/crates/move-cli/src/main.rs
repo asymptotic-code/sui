@@ -4,12 +4,25 @@
 
 use anyhow::Result;
 use move_core_types::account_address::AccountAddress;
-use move_stdlib_natives::{GasParameters, all_natives};
+use move_package_alt::Vanilla;
+use move_vm_runtime::natives::move_stdlib::{GasParameters, stdlib_native_function_table};
+use std::sync::LazyLock;
+use tracing_subscriber::EnvFilter;
 
-fn main() -> Result<()> {
-    let cost_table = &move_vm_test_utils::gas_schedule::INITIAL_COST_SCHEDULE;
+#[tokio::main]
+async fn main() -> Result<()> {
+    let _ = tracing_subscriber::fmt::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .without_time()
+        .with_target(false)
+        .try_init();
+
+    let cost_table = &move_vm_runtime::dev_utils::gas_schedule::INITIAL_COST_SCHEDULE;
     let addr = AccountAddress::from_hex_literal("0x1").unwrap();
-    let natives = all_natives(addr, GasParameters::zeros(), /* silent */ false);
+    let vm_test_setup = move_unit_test::vm_test_setup::DefaultVMTestSetup::new(
+        LazyLock::force(cost_table).clone(),
+        stdlib_native_function_table(addr, GasParameters::zeros(), /* silent */ false),
+    );
 
-    move_cli::move_cli(natives, cost_table)
+    move_cli::move_cli::<Vanilla, _>(vm_test_setup).await
 }

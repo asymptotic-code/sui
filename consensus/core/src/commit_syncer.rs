@@ -33,7 +33,7 @@ use std::{
 use bytes::Bytes;
 use consensus_config::AuthorityIndex;
 use consensus_types::block::BlockRef;
-use futures::{stream::FuturesOrdered, StreamExt as _};
+use futures::{StreamExt as _, stream::FuturesOrdered};
 use itertools::Itertools as _;
 use mysten_metrics::spawn_logged_monitored_task;
 use parking_lot::RwLock;
@@ -42,12 +42,13 @@ use tokio::{
     runtime::Handle,
     sync::oneshot,
     task::{JoinHandle, JoinSet},
-    time::{sleep, MissedTickBehavior},
+    time::{MissedTickBehavior, sleep},
 };
 use tracing::{debug, info, warn};
 
 use crate::{
-    block::{BlockAPI, SignedBlock, VerifiedBlock},
+    CommitConsumerMonitor, CommitIndex,
+    block::{BlockAPI, ExtendedBlock, SignedBlock, VerifiedBlock},
     block_verifier::BlockVerifier,
     commit::{
         CertifiedCommit, CertifiedCommits, Commit, CommitAPI as _, CommitDigest, CommitRange,
@@ -58,10 +59,10 @@ use crate::{
     core_thread::CoreThreadDispatcher,
     dag_state::DagState,
     error::{ConsensusError, ConsensusResult},
-    network::NetworkClient,
+    network::{CommitSyncerClient, ObserverNetworkClient, ValidatorNetworkClient},
+    round_tracker::RoundTracker,
     stake_aggregator::{QuorumThreshold, StakeAggregator},
     transaction_certifier::TransactionCertifier,
-    CommitConsumerMonitor, CommitIndex,
 };
 
 // Handle to stop the CommitSyncer loop.
@@ -74,19 +75,19 @@ impl CommitSyncerHandle {
     pub(crate) async fn stop(self) {
         let _ = self.tx_shutdown.send(());
         // Do not abort schedule task, which waits for fetches to shut down.
-        if let Err(e) = self.schedule_task.await {
-            if e.is_panic() {
-                std::panic::resume_unwind(e.into_panic());
-            }
+        if let Err(e) = self.schedule_task.await
+            && e.is_panic()
+        {
+            std::panic::resume_unwind(e.into_panic());
         }
     }
 }
 
-pub(crate) struct CommitSyncer<C: NetworkClient> {
+pub(crate) struct CommitSyncer<VC: ValidatorNetworkClient, OC: ObserverNetworkClient> {
     // States shared by scheduler and fetch tasks.
 
     // Shared components wrapper.
-    inner: Arc<Inner<C>>,
+    inner: Arc<Inner<VC, OC>>,
 
     // States only used by the scheduler.
 
@@ -107,7 +108,11 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
     synced_commit_index: CommitIndex,
 }
 
-impl<C: NetworkClient> CommitSyncer<C> {
+impl<VC, OC> CommitSyncer<VC, OC>
+where
+    VC: ValidatorNetworkClient,
+    OC: ObserverNetworkClient,
+{
     pub(crate) fn new(
         context: Arc<Context>,
         core_thread_dispatcher: Arc<dyn CoreThreadDispatcher>,
@@ -115,7 +120,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
         commit_consumer_monitor: Arc<CommitConsumerMonitor>,
         block_verifier: Arc<dyn BlockVerifier>,
         transaction_certifier: TransactionCertifier,
-        network_client: Arc<C>,
+        round_tracker: Arc<RwLock<RoundTracker>>,
+        network_client: Arc<CommitSyncerClient<VC, OC>>,
         dag_state: Arc<RwLock<DagState>>,
     ) -> Self {
         let inner = Arc::new(Inner {
@@ -125,6 +131,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             commit_consumer_monitor,
             block_verifier,
             transaction_certifier,
+            round_tracker,
             network_client,
             dag_state,
         });
@@ -203,7 +210,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let unhandled_commits_threshold = self.unhandled_commits_threshold();
         info!(
             "Checking to schedule fetches: synced_commit_index={}, highest_handled_index={}, highest_scheduled_index={}, quorum_commit_index={}, unhandled_commits_threshold={}",
-            self.synced_commit_index, highest_handled_index, highest_scheduled_index, quorum_commit_index, unhandled_commits_threshold,
+            self.synced_commit_index,
+            highest_handled_index,
+            highest_scheduled_index,
+            quorum_commit_index,
+            unhandled_commits_threshold,
         );
 
         // TODO: cleanup inflight fetches that are no longer needed.
@@ -225,7 +236,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
             }
             // Pause scheduling new fetches when handling of commits is lagging.
             if highest_handled_index + unhandled_commits_threshold < range_end {
-                warn!("Skip scheduling new commit fetches: consensus handler is lagging. highest_handled_index={}, highest_scheduled_index={}", highest_handled_index, highest_scheduled_index);
+                warn!(
+                    "Skip scheduling new commit fetches: consensus handler is lagging. highest_handled_index={}, highest_scheduled_index={}",
+                    highest_handled_index, highest_scheduled_index
+                );
                 break;
             }
             self.pending_fetches
@@ -419,7 +433,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
     // where at least a prefix of the commit range is fetched.
     // Returns the fetched commits and blocks referenced by the commits.
     async fn fetch_loop(
-        inner: Arc<Inner<C>>,
+        inner: Arc<Inner<VC, OC>>,
         commit_range: CommitRange,
     ) -> (CommitIndex, CertifiedCommits) {
         // Individual request base timeout.
@@ -493,7 +507,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             .metrics
                             .node_metrics
                             .commit_sync_fetch_once_errors
-                            .with_label_values(&[&hostname, e.name()])
+                            .with_label_values(&[hostname.as_str(), e.name()])
                             .inc();
                     }
                     Err(_) => {
@@ -509,7 +523,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             .metrics
                             .node_metrics
                             .commit_sync_fetch_once_errors
-                            .with_label_values(&[&hostname, "FetchTimeout"])
+                            .with_label_values(&[hostname.as_str(), "FetchTimeout"])
                             .inc();
                     }
                 }
@@ -523,7 +537,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
     // fetched and verified. After that, blocks referenced in the certified commits are fetched
     // and sent to Core for processing.
     async fn fetch_once(
-        inner: Arc<Inner<C>>,
+        inner: Arc<Inner<VC, OC>>,
         target_authority: AuthorityIndex,
         commit_range: CommitRange,
         timeout: Duration,
@@ -538,7 +552,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // 1. Fetch commits in the commit range from the target authority.
         let (serialized_commits, serialized_blocks) = inner
             .network_client
-            .fetch_commits(target_authority, commit_range.clone(), timeout)
+            .fetch_commits(
+                crate::network::PeerId::Validator(target_authority),
+                commit_range.clone(),
+                timeout,
+            )
             .await?;
 
         // 2. Verify the response contains blocks that can certify the last returned commit,
@@ -578,7 +596,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     let serialized_blocks = inner
                         .network_client
                         .fetch_blocks(
-                            target_authority,
+                            crate::network::PeerId::Validator(target_authority),
                             request_block_refs.to_vec(),
                             vec![],
                             false,
@@ -650,7 +668,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 .metrics
                 .node_metrics
                 .block_timestamp_drift_ms
-                .with_label_values(&[peer_hostname, "commit_syncer"])
+                .with_label_values(&[peer_hostname.as_str(), "commit_syncer"])
                 .inc_by(forward_drift);
         }
 
@@ -680,6 +698,38 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         .transaction_certifier
                         .add_voted_blocks(vec![(block.clone(), vec![])]);
                 }
+            }
+        }
+
+        // 11. Record commit votes from the fetched blocks.
+        for commit in &certified_commits {
+            for block in commit.blocks() {
+                inner.commit_vote_monitor.observe_block(block);
+            }
+        }
+        for block in &vote_blocks {
+            inner.commit_vote_monitor.observe_block(block);
+        }
+
+        // 12. Update round tracker from the fetched blocks. For fetched blocks,
+        // excluded_ancestors are not available so we use an empty vector.
+        {
+            let mut tracker = inner.round_tracker.write();
+            // Update from commit blocks
+            for commit in &certified_commits {
+                for block in commit.blocks() {
+                    tracker.update_from_verified_block(&ExtendedBlock {
+                        block: block.clone(),
+                        excluded_ancestors: vec![],
+                    });
+                }
+            }
+            // Update from vote blocks
+            for block in &vote_blocks {
+                tracker.update_from_verified_block(&ExtendedBlock {
+                    block: block.clone(),
+                    excluded_ancestors: vec![],
+                });
             }
         }
 
@@ -717,18 +767,19 @@ impl<C: NetworkClient> CommitSyncer<C> {
     }
 }
 
-struct Inner<C: NetworkClient> {
+struct Inner<VC: ValidatorNetworkClient, OC: ObserverNetworkClient> {
     context: Arc<Context>,
     core_thread_dispatcher: Arc<dyn CoreThreadDispatcher>,
     commit_vote_monitor: Arc<CommitVoteMonitor>,
     commit_consumer_monitor: Arc<CommitConsumerMonitor>,
     block_verifier: Arc<dyn BlockVerifier>,
     transaction_certifier: TransactionCertifier,
-    network_client: Arc<C>,
+    round_tracker: Arc<RwLock<RoundTracker>>,
+    network_client: Arc<CommitSyncerClient<VC, OC>>,
     dag_state: Arc<RwLock<DagState>>,
 }
 
-impl<C: NetworkClient> Inner<C> {
+impl<VC: ValidatorNetworkClient, OC: ObserverNetworkClient> Inner<VC, OC> {
     /// Verifies the commits and also certifies them using the provided vote blocks for the last commit. The
     /// method returns the trusted commits and the votes as verified blocks.
     fn verify_commits(
@@ -829,6 +880,7 @@ mod tests {
     use parking_lot::RwLock;
 
     use crate::{
+        CommitConsumerMonitor, CommitDigest, CommitRef,
         block::{TestBlock, VerifiedBlock},
         block_verifier::NoopBlockVerifier,
         commit::CommitRange,
@@ -838,28 +890,17 @@ mod tests {
         core_thread::MockCoreThreadDispatcher,
         dag_state::DagState,
         error::ConsensusResult,
-        network::{BlockStream, NetworkClient},
+        network::{BlockStream, CommitSyncerClient, ObserverNetworkClient, ValidatorNetworkClient},
+        round_tracker::RoundTracker,
         storage::mem_store::MemStore,
         transaction_certifier::TransactionCertifier,
-        CommitConsumerMonitor, CommitDigest, CommitRef,
     };
 
     #[derive(Default)]
     struct FakeNetworkClient {}
 
     #[async_trait::async_trait]
-    impl NetworkClient for FakeNetworkClient {
-        const SUPPORT_STREAMING: bool = true;
-
-        async fn send_block(
-            &self,
-            _peer: AuthorityIndex,
-            _serialized_block: &VerifiedBlock,
-            _timeout: Duration,
-        ) -> ConsensusResult<()> {
-            unimplemented!("Unimplemented")
-        }
-
+    impl ValidatorNetworkClient for FakeNetworkClient {
         async fn subscribe_blocks(
             &self,
             _peer: AuthorityIndex,
@@ -905,6 +946,46 @@ mod tests {
         ) -> ConsensusResult<(Vec<Round>, Vec<Round>)> {
             unimplemented!("Unimplemented")
         }
+
+        #[cfg(test)]
+        async fn send_block(
+            &self,
+            _peer: AuthorityIndex,
+            _block: &VerifiedBlock,
+            _timeout: Duration,
+        ) -> ConsensusResult<()> {
+            unimplemented!("Unimplemented")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObserverNetworkClient for FakeNetworkClient {
+        async fn stream_blocks(
+            &self,
+            _peer: crate::network::PeerId,
+            _request_stream: crate::network::BlockRequestStream,
+            _timeout: Duration,
+        ) -> ConsensusResult<crate::network::ObserverBlockStream> {
+            unimplemented!("Unimplemented")
+        }
+
+        async fn fetch_blocks(
+            &self,
+            _peer: crate::network::PeerId,
+            _block_refs: Vec<BlockRef>,
+            _timeout: Duration,
+        ) -> ConsensusResult<Vec<Bytes>> {
+            unimplemented!("Unimplemented")
+        }
+
+        async fn fetch_commits(
+            &self,
+            _peer: crate::network::PeerId,
+            _commit_range: CommitRange,
+            _timeout: Duration,
+        ) -> ConsensusResult<(Vec<Bytes>, Vec<Bytes>)> {
+            unimplemented!("Unimplemented")
+        }
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -926,15 +1007,25 @@ mod tests {
         let context = Arc::new(context);
         let block_verifier = Arc::new(NoopBlockVerifier {});
         let core_thread_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
-        let network_client = Arc::new(FakeNetworkClient::default());
+        let mock_client = Arc::new(FakeNetworkClient::default());
+        let network_client = Arc::new(CommitSyncerClient::new(
+            context.clone(),
+            Some(mock_client.clone()),
+            Some(mock_client.clone()),
+        ));
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
         let (blocks_sender, _blocks_receiver) =
             monitored_mpsc::unbounded_channel("consensus_block_output");
-        let transaction_certifier =
-            TransactionCertifier::new(context.clone(), dag_state.clone(), blocks_sender);
+        let transaction_certifier = TransactionCertifier::new(
+            context.clone(),
+            block_verifier.clone(),
+            dag_state.clone(),
+            blocks_sender,
+        );
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
         let commit_consumer_monitor = Arc::new(CommitConsumerMonitor::new(0, 0));
+        let round_tracker = Arc::new(RwLock::new(RoundTracker::new(context.clone(), vec![])));
         let mut commit_syncer = CommitSyncer::new(
             context,
             core_thread_dispatcher,
@@ -942,6 +1033,7 @@ mod tests {
             commit_consumer_monitor.clone(),
             block_verifier,
             transaction_certifier,
+            round_tracker,
             network_client,
             dag_state,
         );

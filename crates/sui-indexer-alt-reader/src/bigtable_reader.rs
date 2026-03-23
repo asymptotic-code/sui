@@ -5,23 +5,39 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::time::Duration;
 
-use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::bail;
 use async_graphql::dataloader::DataLoader;
 use prometheus::Registry;
-use sui_kvstore::{BigTableClient, Checkpoint, KeyValueStoreReader, TransactionData};
+use sui_kvstore::BigTableClient;
+use sui_kvstore::CheckpointData;
+use sui_kvstore::KeyValueStoreReader;
+use sui_kvstore::TransactionData;
+use sui_kvstore::TransactionEventsData;
+use sui_kvstore::Watermark;
 use sui_types::digests::TransactionDigest;
-use sui_types::messages_checkpoint::{CheckpointSequenceNumber, CheckpointSummary};
+use sui_types::messages_checkpoint::CheckpointSequenceNumber;
 use sui_types::object::Object;
 use sui_types::storage::ObjectKey;
 use tracing::warn;
-
-use crate::error::Error;
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct BigtableArgs {
     /// Time spent waiting for a request to Bigtable to complete, in milliseconds.
     #[arg(long)]
     pub bigtable_statement_timeout_ms: Option<u64>,
+
+    /// GCP project ID for the BigTable instance (defaults to the token provider's project).
+    #[arg(long)]
+    pub bigtable_project: Option<String>,
+
+    /// App profile ID to use for Bigtable client. If not provided, the default profile will be used.
+    #[arg(long)]
+    pub bigtable_app_profile_id: Option<String>,
+
+    /// Maximum gRPC decoding message size for Bigtable responses, in bytes.
+    #[arg(long)]
+    pub bigtable_max_decoding_message_size: Option<usize>,
 }
 
 /// A reader backed by BigTable KV store.
@@ -50,24 +66,26 @@ impl BigtableReader {
         client_name: String,
         bigtable_args: BigtableArgs,
         registry: &Registry,
-    ) -> Result<Self, Error> {
+    ) -> anyhow::Result<Self> {
         if std::env::var("GOOGLE_APPLICATION_CREDENTIALS").is_err() {
-            return Err(Error::BigtableCreate(anyhow!(
-                "Environment variable GOOGLE_APPLICATION_CREDENTIALS is not set"
-            )));
+            bail!("Environment variable GOOGLE_APPLICATION_CREDENTIALS is not set");
         }
 
+        let timeout = bigtable_args.statement_timeout();
         Ok(Self(
             BigTableClient::new_remote(
                 instance_id,
+                bigtable_args.bigtable_project,
                 true,
-                bigtable_args.statement_timeout(),
+                timeout,
+                bigtable_args.bigtable_max_decoding_message_size,
                 client_name,
                 Some(registry),
-                None,
+                bigtable_args.bigtable_app_profile_id,
+                Default::default(),
             )
             .await
-            .map_err(Error::BigtableCreate)?,
+            .context("Failed to create BigTable client")?,
         ))
     }
 
@@ -76,12 +94,20 @@ impl BigtableReader {
         DataLoader::new(self.clone(), tokio::spawn)
     }
 
-    /// Get the summary for the latest checkpoint known to Bigtable.
-    pub async fn checkpoint_watermark(&self) -> Result<Option<CheckpointSummary>, Error> {
+    /// Get the watermark representing the minimum across all pipeline watermarks.
+    pub async fn watermark(&self) -> anyhow::Result<Option<Watermark>> {
+        measure("watermark", &(), self.0.clone().get_watermark()).await
+    }
+
+    /// Get the minimum watermark across the specified pipelines.
+    pub async fn watermark_for_pipeline(
+        &self,
+        pipelines: &[&str],
+    ) -> anyhow::Result<Option<Watermark>> {
         measure(
             "watermark",
             &(),
-            self.0.clone().get_latest_checkpoint_summary(),
+            self.0.clone().get_watermark_for_pipelines(pipelines),
         )
         .await
     }
@@ -90,7 +116,7 @@ impl BigtableReader {
     pub(crate) async fn checkpoints(
         &self,
         keys: &[CheckpointSequenceNumber],
-    ) -> Result<Vec<Checkpoint>, Error> {
+    ) -> anyhow::Result<Vec<CheckpointData>> {
         measure("checkpoints", &keys, self.0.clone().get_checkpoints(keys)).await
     }
 
@@ -98,13 +124,26 @@ impl BigtableReader {
     pub(crate) async fn transactions(
         &self,
         keys: &[TransactionDigest],
-    ) -> Result<Vec<TransactionData>, Error> {
+    ) -> anyhow::Result<Vec<TransactionData>> {
         measure("transactions", &keys, self.0.clone().get_transactions(keys)).await
     }
 
     /// Multi-get objects by object ID and version.
-    pub(crate) async fn objects(&self, keys: &[ObjectKey]) -> Result<Vec<Object>, Error> {
+    pub(crate) async fn objects(&self, keys: &[ObjectKey]) -> anyhow::Result<Vec<Object>> {
         measure("objects", &keys, self.0.clone().get_objects(keys)).await
+    }
+
+    // Multi-get events from transactions.
+    pub(crate) async fn transactions_events(
+        &self,
+        keys: &[TransactionDigest],
+    ) -> anyhow::Result<Vec<(TransactionDigest, TransactionEventsData)>> {
+        measure(
+            "events",
+            &keys,
+            self.0.clone().get_events_for_transactions(keys),
+        )
+        .await
     }
 }
 
@@ -114,14 +153,14 @@ async fn measure<T, A: Debug>(
     method: &str,
     args: &A,
     load: impl Future<Output = anyhow::Result<T>>,
-) -> Result<T, Error> {
+) -> anyhow::Result<T> {
     let result = load.await;
 
     if result.as_ref().is_err_and(is_timeout) {
         warn!(method, ?args, "Bigtable timeout");
     }
 
-    result.map_err(Error::BigtableRead)
+    result.with_context(|| format!("BigTable read error for method: {method}"))
 }
 
 /// Detect a tonic timeout error in the source chain.

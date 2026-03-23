@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::authority::authority_tests::{
-    call_move, call_move_, execute_programmable_transaction, init_state_with_ids,
-    send_and_confirm_transaction, TestCallArg,
+    TestCallArg, call_move, call_move_, execute_programmable_transaction, init_state_with_ids,
+    submit_and_execute,
 };
 use move_core_types::{
     account_address::AccountAddress,
@@ -15,24 +15,25 @@ use move_core_types::{
 };
 
 use sui_types::{
+    SUI_FRAMEWORK_PACKAGE_ID,
     base_types::{RESOLVED_ASCII_STR, RESOLVED_STD_OPTION, RESOLVED_UTF8_STR},
-    error::ExecutionErrorKind,
+    execution_status::ExecutionErrorKind,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
     utils::to_sender_signed_transaction,
-    SUI_FRAMEWORK_PACKAGE_ID,
 };
 
 use move_core_types::language_storage::TypeTag;
 
-use sui_move_build::{BuildConfig, SuiPackageHooks};
+use sui_move_build::BuildConfig;
 use sui_types::{
-    crypto::{get_key_pair, AccountKeyPair},
+    crypto::{AccountKeyPair, get_key_pair},
     error::SuiError,
+    executable_transaction::VerifiedExecutableTransaction,
 };
 
 use std::{collections::HashSet, path::PathBuf};
 use std::{env, str::FromStr};
-use sui_types::execution_status::{CommandArgumentError, ExecutionFailureStatus, ExecutionStatus};
+use sui_types::execution_status::{CommandArgumentError, ExecutionFailure, ExecutionStatus};
 use sui_types::move_package::UpgradeCap;
 
 #[tokio::test]
@@ -71,7 +72,7 @@ async fn test_object_wrapping_unwrapping() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -79,7 +80,7 @@ async fn test_object_wrapping_unwrapping() {
     assert_eq!(child_object_ref.1, create_child_version);
 
     let wrapped_version =
-        SequenceNumber::lamport_increment([child_object_ref.1, effects.gas_object().0 .1]);
+        SequenceNumber::lamport_increment([child_object_ref.1, effects.gas_object().0.1]);
 
     // Create a Parent object, by wrapping the child object.
     let effects = call_move(
@@ -96,7 +97,7 @@ async fn test_object_wrapping_unwrapping() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -124,7 +125,7 @@ async fn test_object_wrapping_unwrapping() {
     assert_eq!(parent_object_ref.1, wrapped_version);
 
     let unwrapped_version =
-        SequenceNumber::lamport_increment([parent_object_ref.1, effects.gas_object().0 .1]);
+        SequenceNumber::lamport_increment([parent_object_ref.1, effects.gas_object().0.1]);
 
     // Extract the child out of the parent.
     let effects = call_move(
@@ -141,7 +142,7 @@ async fn test_object_wrapping_unwrapping() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -156,14 +157,14 @@ async fn test_object_wrapping_unwrapping() {
         (2, 0, 1)
     );
     // Make sure that version increments again when unwrapped.
-    assert_eq!(effects.unwrapped()[0].0 .1, unwrapped_version);
+    assert_eq!(effects.unwrapped()[0].0.1, unwrapped_version);
     check_latest_object_ref(&authority, &effects.unwrapped()[0].0, false).await;
     let child_object_ref = effects.unwrapped()[0].0;
 
     let rewrap_version = SequenceNumber::lamport_increment([
         parent_object_ref.1,
         child_object_ref.1,
-        effects.gas_object().0 .1,
+        effects.gas_object().0.1,
     ]);
 
     // Wrap the child to the parent again.
@@ -184,7 +185,7 @@ async fn test_object_wrapping_unwrapping() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -202,7 +203,7 @@ async fn test_object_wrapping_unwrapping() {
     let parent_object_ref = effects.mutated_excluding_gas().first().unwrap().0;
 
     let deleted_version =
-        SequenceNumber::lamport_increment([parent_object_ref.1, effects.gas_object().0 .1]);
+        SequenceNumber::lamport_increment([parent_object_ref.1, effects.gas_object().0.1]);
 
     // Now delete the parent object, which will in turn delete the child object.
     let effects = call_move(
@@ -219,7 +220,7 @@ async fn test_object_wrapping_unwrapping() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -231,9 +232,11 @@ async fn test_object_wrapping_unwrapping() {
         deleted_version,
         ObjectDigest::OBJECT_DIGEST_DELETED,
     );
-    assert!(effects
-        .unwrapped_then_deleted()
-        .contains(&expected_child_object_ref));
+    assert!(
+        effects
+            .unwrapped_then_deleted()
+            .contains(&expected_child_object_ref)
+    );
     check_latest_object_ref(&authority, &expected_child_object_ref, true).await;
     let expected_parent_object_ref = (
         parent_object_ref.0,
@@ -814,7 +817,7 @@ async fn test_entry_point_vector_empty() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -844,7 +847,7 @@ async fn test_entry_point_vector_empty() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -875,7 +878,7 @@ async fn test_entry_point_vector_empty() {
     .unwrap_err();
     assert_eq!(
         err,
-        SuiError::UserInputError {
+        SuiErrorKind::UserInputError {
             error: UserInputError::EmptyCommandInput
         }
     );
@@ -905,7 +908,7 @@ async fn test_entry_point_vector_empty() {
     .unwrap_err();
     assert_eq!(
         err,
-        SuiError::UserInputError {
+        SuiErrorKind::UserInputError {
             error: UserInputError::EmptyCommandInput
         }
     );
@@ -945,7 +948,7 @@ async fn test_entry_point_vector_primitive() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -983,7 +986,7 @@ async fn test_entry_point_vector() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1003,7 +1006,7 @@ async fn test_entry_point_vector() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1024,7 +1027,7 @@ async fn test_entry_point_vector() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1046,7 +1049,7 @@ async fn test_entry_point_vector() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1104,7 +1107,7 @@ async fn test_entry_point_vector_error() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1125,7 +1128,10 @@ async fn test_entry_point_vector_error() {
     .unwrap();
     // should fail as we passed object of the wrong type
     assert!(
-        matches!(effects.status(), ExecutionStatus::Failure { .. }),
+        matches!(
+            effects.status(),
+            ExecutionStatus::Failure(ExecutionFailure { .. })
+        ),
         "{:?}",
         effects.status()
     );
@@ -1145,7 +1151,7 @@ async fn test_entry_point_vector_error() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1164,7 +1170,7 @@ async fn test_entry_point_vector_error() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1185,7 +1191,10 @@ async fn test_entry_point_vector_error() {
     .unwrap();
     // should fail as we passed object of the wrong type as the first element of the vector
     assert!(
-        matches!(effects.status(), ExecutionStatus::Failure { .. }),
+        matches!(
+            effects.status(),
+            ExecutionStatus::Failure(ExecutionFailure { .. })
+        ),
         "{:?}",
         effects.status()
     );
@@ -1205,7 +1214,7 @@ async fn test_entry_point_vector_error() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1228,7 +1237,7 @@ async fn test_entry_point_vector_error() {
     .unwrap();
     // support shared objects in vectors
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1248,7 +1257,7 @@ async fn test_entry_point_vector_error() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1273,13 +1282,13 @@ async fn test_entry_point_vector_error() {
     // should fail as we have the same object passed in vector and as a separate by-value argument
     assert_eq!(
         result.unwrap().status(),
-        &ExecutionStatus::Failure {
+        &ExecutionStatus::Failure(ExecutionFailure {
             error: ExecutionErrorKind::CommandArgumentError {
                 arg_idx: 0,
-                kind: CommandArgumentError::InvalidValueUsage,
+                kind: CommandArgumentError::ArgumentWithoutValue,
             },
             command: Some(1)
-        }
+        })
     );
 
     // mint an owned object
@@ -1297,7 +1306,7 @@ async fn test_entry_point_vector_error() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1322,13 +1331,13 @@ async fn test_entry_point_vector_error() {
     // should fail as we have the same object passed in vector and as a separate by-reference argument
     assert_eq!(
         result.unwrap().status(),
-        &ExecutionStatus::Failure {
+        &ExecutionStatus::Failure(ExecutionFailure {
             error: ExecutionErrorKind::CommandArgumentError {
                 arg_idx: 0,
-                kind: CommandArgumentError::InvalidValueUsage,
+                kind: CommandArgumentError::ArgumentWithoutValue,
             },
             command: Some(1)
-        }
+        })
     );
 }
 
@@ -1367,7 +1376,7 @@ async fn test_entry_point_vector_any() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1387,7 +1396,7 @@ async fn test_entry_point_vector_any() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1408,7 +1417,7 @@ async fn test_entry_point_vector_any() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1430,7 +1439,7 @@ async fn test_entry_point_vector_any() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1491,7 +1500,7 @@ async fn test_entry_point_vector_any_error() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1512,7 +1521,10 @@ async fn test_entry_point_vector_any_error() {
     .unwrap();
     // should fail as we passed object of the wrong type
     assert!(
-        matches!(effects.status(), ExecutionStatus::Failure { .. }),
+        matches!(
+            effects.status(),
+            ExecutionStatus::Failure(ExecutionFailure { .. })
+        ),
         "{:?}",
         effects.status()
     );
@@ -1532,7 +1544,7 @@ async fn test_entry_point_vector_any_error() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1551,7 +1563,7 @@ async fn test_entry_point_vector_any_error() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1572,7 +1584,10 @@ async fn test_entry_point_vector_any_error() {
     .unwrap();
     // should fail as we passed object of the wrong type as the first element of the vector
     assert!(
-        matches!(effects.status(), ExecutionStatus::Failure { .. }),
+        matches!(
+            effects.status(),
+            ExecutionStatus::Failure(ExecutionFailure { .. })
+        ),
         "{:?}",
         effects.status()
     );
@@ -1592,7 +1607,7 @@ async fn test_entry_point_vector_any_error() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1615,7 +1630,7 @@ async fn test_entry_point_vector_any_error() {
     .unwrap();
     // support shared objects in vectors
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1635,7 +1650,7 @@ async fn test_entry_point_vector_any_error() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1660,13 +1675,13 @@ async fn test_entry_point_vector_any_error() {
     // should fail as we have the same object passed in vector and as a separate by-value argument
     assert_eq!(
         result.unwrap().status(),
-        &ExecutionStatus::Failure {
+        &ExecutionStatus::Failure(ExecutionFailure {
             error: ExecutionErrorKind::CommandArgumentError {
                 arg_idx: 0,
-                kind: CommandArgumentError::InvalidValueUsage,
+                kind: CommandArgumentError::ArgumentWithoutValue,
             },
             command: Some(1)
-        }
+        })
     );
 
     // mint an owned object
@@ -1684,7 +1699,7 @@ async fn test_entry_point_vector_any_error() {
     .await
     .unwrap();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -1708,13 +1723,13 @@ async fn test_entry_point_vector_any_error() {
     .await;
     assert_eq!(
         result.unwrap().status(),
-        &ExecutionStatus::Failure {
+        &ExecutionStatus::Failure(ExecutionFailure {
             error: ExecutionErrorKind::CommandArgumentError {
                 arg_idx: 0,
-                kind: CommandArgumentError::InvalidValueUsage,
+                kind: CommandArgumentError::ArgumentWithoutValue,
             },
             command: Some(1)
-        }
+        })
     );
 }
 
@@ -2026,13 +2041,13 @@ async fn test_entry_point_string_error() {
     .unwrap();
     assert_eq!(
         effects.status(),
-        &ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::CommandArgumentError {
+        &ExecutionStatus::Failure(ExecutionFailure {
+            error: ExecutionErrorKind::CommandArgumentError {
                 arg_idx: 0,
                 kind: CommandArgumentError::InvalidBCSBytes
             },
             command: Some(0)
-        }
+        })
     );
 
     // pass a invalid ascii string
@@ -2061,13 +2076,13 @@ async fn test_entry_point_string_error() {
     .unwrap();
     assert_eq!(
         effects.status(),
-        &ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::CommandArgumentError {
+        &ExecutionStatus::Failure(ExecutionFailure {
+            error: ExecutionErrorKind::CommandArgumentError {
                 arg_idx: 0,
                 kind: CommandArgumentError::InvalidBCSBytes
             },
             command: Some(0)
-        }
+        })
     );
 
     // pass a invalid utf8 string
@@ -2096,13 +2111,13 @@ async fn test_entry_point_string_error() {
     .unwrap();
     assert_eq!(
         effects.status(),
-        &ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::CommandArgumentError {
+        &ExecutionStatus::Failure(ExecutionFailure {
+            error: ExecutionErrorKind::CommandArgumentError {
                 arg_idx: 0,
                 kind: CommandArgumentError::InvalidBCSBytes
             },
             command: Some(0)
-        }
+        })
     );
 }
 
@@ -2151,13 +2166,13 @@ async fn test_entry_point_string_vec_error() {
     .unwrap();
     assert_eq!(
         effects.status(),
-        &ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::CommandArgumentError {
+        &ExecutionStatus::Failure(ExecutionFailure {
+            error: ExecutionErrorKind::CommandArgumentError {
                 arg_idx: 0,
                 kind: CommandArgumentError::InvalidBCSBytes
             },
             command: Some(0)
-        }
+        })
     );
 }
 
@@ -2196,13 +2211,13 @@ async fn test_entry_point_string_option_error() {
     .unwrap();
     assert_eq!(
         effects.status(),
-        &ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::CommandArgumentError {
+        &ExecutionStatus::Failure(ExecutionFailure {
+            error: ExecutionErrorKind::CommandArgumentError {
                 arg_idx: 0,
                 kind: CommandArgumentError::InvalidBCSBytes
             },
             command: Some(0)
-        }
+        })
     );
 
     // pass an utf8 string option with an invalid string
@@ -2226,13 +2241,13 @@ async fn test_entry_point_string_option_error() {
     .unwrap();
     assert_eq!(
         effects.status(),
-        &ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::CommandArgumentError {
+        &ExecutionStatus::Failure(ExecutionFailure {
+            error: ExecutionErrorKind::CommandArgumentError {
                 arg_idx: 0,
                 kind: CommandArgumentError::InvalidBCSBytes
             },
             command: Some(0)
-        }
+        })
     );
 
     // pass a vector as an option
@@ -2254,13 +2269,13 @@ async fn test_entry_point_string_option_error() {
     .unwrap();
     assert_eq!(
         effects.status(),
-        &ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::CommandArgumentError {
+        &ExecutionStatus::Failure(ExecutionFailure {
+            error: ExecutionErrorKind::CommandArgumentError {
                 arg_idx: 0,
                 kind: CommandArgumentError::InvalidBCSBytes
             },
             command: Some(0)
-        }
+        })
     );
 }
 
@@ -2562,13 +2577,13 @@ async fn error_test_make_move_vec_for_type<T: Clone + Serialize>(
     .unwrap();
     assert_eq!(
         effects.status(),
-        &ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::command_argument_error(
-                CommandArgumentError::TypeMismatch,
+        &ExecutionStatus::Failure(ExecutionFailure {
+            error: ExecutionErrorKind::command_argument_error(
+                CommandArgumentError::InvalidMakeMoveVecNonObjectArgument,
                 0
             ),
             command: Some(0)
-        }
+        })
     );
 
     // invalid BCS for any Move value
@@ -2591,13 +2606,13 @@ async fn error_test_make_move_vec_for_type<T: Clone + Serialize>(
     .unwrap();
     assert_eq!(
         effects.status(),
-        &ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::command_argument_error(
+        &ExecutionStatus::Failure(ExecutionFailure {
+            error: ExecutionErrorKind::command_argument_error(
                 CommandArgumentError::InvalidBCSBytes,
                 0
             ),
             command: Some(0)
-        }
+        })
     );
 
     // invalid bcs bytes at end
@@ -2622,13 +2637,13 @@ async fn error_test_make_move_vec_for_type<T: Clone + Serialize>(
     .unwrap();
     assert_eq!(
         effects.status(),
-        &ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::command_argument_error(
+        &ExecutionStatus::Failure(ExecutionFailure {
+            error: ExecutionErrorKind::command_argument_error(
                 CommandArgumentError::InvalidBCSBytes,
                 3,
             ),
             command: Some(0)
-        }
+        })
     );
 }
 
@@ -2745,7 +2760,7 @@ async fn test_make_move_vec_empty() {
     .unwrap_err();
     assert_eq!(
         result,
-        SuiError::UserInputError {
+        SuiErrorKind::UserInputError {
             error: UserInputError::EmptyCommandInput
         }
     );
@@ -2775,23 +2790,6 @@ fn ascii_tag() -> TypeTag {
     resolved_struct(RESOLVED_ASCII_STR, vec![])
 }
 
-#[tokio::test]
-#[cfg_attr(msim, ignore)]
-async fn test_object_no_id_error() {
-    let mut build_config = BuildConfig::new_for_testing();
-    build_config.config.test_mode = true;
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // in this package object struct (NotObject) is defined incorrectly and publishing should
-    // fail (it's defined in test-only code hence cannot be checked by transactional testing
-    // framework which goes through "normal" publishing path which excludes tests).
-    path.extend(["src", "unit_tests", "data", "object_no_id"]);
-    let res = build_config.build(&path);
-
-    matches!(res.err(), Some(SuiError::ExecutionError(err_str)) if
-                 err_str.contains("SuiMoveVerificationError")
-                 && err_str.contains("First field of struct NotObject must be 'id'"));
-}
-
 pub fn build_test_package(test_dir: &str, with_unpublished_deps: bool) -> Vec<Vec<u8>> {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.extend(["src", "unit_tests", "data", test_dir]);
@@ -2805,7 +2803,6 @@ pub fn build_package(
     code_dir: &str,
     with_unpublished_deps: bool,
 ) -> (Vec<u8>, Vec<Vec<u8>>, Vec<ObjectID>) {
-    move_package::package_hooks::register_package_hooks(Box::new(SuiPackageHooks));
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.extend(["src", "unit_tests", "data", code_dir]);
     let compiled_package = BuildConfig::new_for_testing().build(&path).unwrap();
@@ -2825,11 +2822,13 @@ pub async fn build_and_try_publish_test_package(
     gas_price: u64,
     with_unpublished_deps: bool,
 ) -> (Transaction, SignedTransactionEffects) {
-    move_package::package_hooks::register_package_hooks(Box::new(SuiPackageHooks));
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.extend(["src", "unit_tests", "data", test_dir]);
 
-    let compiled_package = BuildConfig::new_for_testing().build(&path).unwrap();
+    let mut config = BuildConfig::new_for_testing();
+    config.config.set_unpublished_deps_to_zero = with_unpublished_deps;
+
+    let compiled_package = config.build_async(&path).await.unwrap();
     let all_module_bytes = compiled_package.get_package_bytes(with_unpublished_deps);
     let dependencies = compiled_package.get_dependency_storage_package_ids();
 
@@ -2848,10 +2847,7 @@ pub async fn build_and_try_publish_test_package(
 
     (
         transaction.clone(),
-        send_and_confirm_transaction(authority, transaction)
-            .await
-            .unwrap()
-            .1,
+        submit_and_execute(authority, transaction).await.unwrap().1,
     )
 }
 
@@ -2873,6 +2869,57 @@ pub async fn build_and_publish_test_package(
     )
     .await
     .0
+}
+
+pub async fn build_and_publish_package_with_upgrade_cap(
+    authority: &AuthorityState,
+    sender: &SuiAddress,
+    sender_key: &AccountKeyPair,
+    gas_object_id: &ObjectID,
+    modules: Vec<Vec<u8>>,
+    dep_ids: Vec<ObjectID>,
+) -> (ObjectRef, ObjectRef) {
+    let gas_price = authority.reference_gas_price_for_testing().unwrap();
+    let gas_budget = TEST_ONLY_GAS_UNIT_FOR_PUBLISH * gas_price;
+    let effects = {
+        let gas_object = authority.get_object(gas_object_id).await;
+        let gas_object_ref = gas_object.unwrap().compute_object_reference();
+
+        let data = TransactionData::new_module(
+            *sender,
+            gas_object_ref,
+            modules,
+            dep_ids,
+            gas_budget,
+            gas_price,
+        );
+        let transaction = to_sender_signed_transaction(data, sender_key);
+
+        submit_and_execute(authority, transaction)
+            .await
+            .unwrap()
+            .1
+            .into_data()
+    };
+
+    assert!(
+        matches!(effects.status(), ExecutionStatus::Success),
+        "{:?}",
+        effects.status()
+    );
+
+    let package = effects
+        .created()
+        .into_iter()
+        .find(|(_, owner)| matches!(owner, Owner::Immutable))
+        .unwrap();
+    let upgrade_cap = effects
+        .created()
+        .into_iter()
+        .find(|(_, owner)| matches!(owner, Owner::AddressOwner(_)))
+        .unwrap();
+
+    (package.0, upgrade_cap.0)
 }
 
 pub async fn build_and_publish_test_package_with_upgrade_cap(
@@ -2899,7 +2946,7 @@ pub async fn build_and_publish_test_package_with_upgrade_cap(
     .1
     .into_data();
     assert!(
-        matches!(effects.status(), ExecutionStatus::Success { .. }),
+        matches!(effects.status(), ExecutionStatus::Success),
         "{:?}",
         effects.status()
     );
@@ -2948,7 +2995,7 @@ pub async fn run_multi_txns(
     sender_key: &AccountKeyPair,
     gas_object_id: &ObjectID,
     builder: ProgrammableTransactionBuilder,
-) -> Result<(CertifiedTransaction, SignedTransactionEffects), SuiError> {
+) -> Result<(VerifiedExecutableTransaction, SignedTransactionEffects), SuiError> {
     // build the transaction data
     let pt = builder.finish();
     let gas_object = authority.get_object(gas_object_id).await;
@@ -2961,7 +3008,7 @@ pub async fn run_multi_txns(
         TransactionData::new_programmable(sender, vec![gas_object_ref], pt, gas_budget, gas_price);
     // run the transaction
     let transaction = to_sender_signed_transaction(data, sender_key);
-    send_and_confirm_transaction(authority, transaction).await
+    submit_and_execute(authority, transaction).await
 }
 
 pub fn build_multi_publish_txns(

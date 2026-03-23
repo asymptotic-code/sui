@@ -4,7 +4,8 @@
 use super::{ast as T, env::Env};
 use crate::{
     execution_mode::ExecutionMode,
-    programmable_transactions::context::EitherError,
+    gas_charger::GasPayment,
+    static_programmable_transactions::execution::context::EitherError,
     static_programmable_transactions::{
         loading::ast::{self as L, Type},
         spanned::sp,
@@ -12,15 +13,19 @@ use crate::{
     },
 };
 use indexmap::{IndexMap, IndexSet};
+use move_binary_format::file_format::{Ability, AbilitySet};
+use move_core_types::account_address::AccountAddress;
 use std::rc::Rc;
 use sui_types::{
+    balance::RESOLVED_BALANCE_STRUCT,
     base_types::{ObjectRef, TxContextKind},
-    coin::RESOLVED_COIN_STRUCT,
-    error::{ExecutionError, ExecutionErrorKind, command_argument_error},
-    execution_status::CommandArgumentError,
+    coin::{COIN_MODULE_NAME, REDEEM_FUNDS_FUNC_NAME, RESOLVED_COIN_STRUCT},
+    error::{ExecutionError, SafeIndex, command_argument_error},
+    execution_status::{CommandArgumentError, ExecutionErrorKind},
+    funds_accumulator::RESOLVED_WITHDRAWAL_STRUCT,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SplatLocation {
     GasCoin,
     Input(T::InputIndex),
@@ -30,12 +35,14 @@ enum SplatLocation {
 #[derive(Debug, Clone, Copy)]
 enum InputKind {
     Object,
+    Withdrawal,
     Pure,
     Receiving,
 }
 
 struct Context {
     current_command: u16,
+    gas_payment: Option<GasPayment>,
     /// What kind of input is at each original index
     input_resolution: Vec<InputKind>,
     bytes: IndexSet<Vec<u8>>,
@@ -43,23 +50,29 @@ struct Context {
     bytes_idx_remapping: IndexMap<T::InputIndex, T::ByteIndex>,
     receiving_refs: IndexMap<T::InputIndex, ObjectRef>,
     objects: IndexMap<T::InputIndex, T::ObjectInput>,
+    withdrawals: IndexMap<T::InputIndex, T::WithdrawalInput>,
     pure: IndexMap<(T::InputIndex, Type), T::PureInput>,
     receiving: IndexMap<(T::InputIndex, Type), T::ReceivingInput>,
-    results: Vec<T::ResultType>,
+    withdrawal_compatibility_conversions:
+        IndexMap<T::Location, T::WithdrawalCompatibilityConversion>,
+    commands: Vec<T::Command>,
 }
 
 impl Context {
-    fn new(linputs: L::Inputs) -> Result<Self, ExecutionError> {
+    fn new(gas_payment: Option<GasPayment>, linputs: L::Inputs) -> Result<Self, ExecutionError> {
         let mut context = Context {
             current_command: 0,
+            gas_payment,
             input_resolution: vec![],
             bytes: IndexSet::new(),
             bytes_idx_remapping: IndexMap::new(),
             receiving_refs: IndexMap::new(),
             objects: IndexMap::new(),
+            withdrawals: IndexMap::new(),
             pure: IndexMap::new(),
+            withdrawal_compatibility_conversions: IndexMap::new(),
             receiving: IndexMap::new(),
-            results: vec![],
+            commands: vec![],
         };
         // clone inputs for debug assertions
         #[cfg(debug_assertions)]
@@ -70,7 +83,7 @@ impl Context {
         // - intern the bytes
         // - build maps for object, pure, and receiving inputs
         for (i, (arg, ty)) in linputs.into_iter().enumerate() {
-            let idx = T::InputIndex(i as u16);
+            let idx = T::InputIndex(checked_as!(i, u16)?);
             let kind = match (arg, ty) {
                 (L::InputArg::Pure(bytes), L::InputType::Bytes) => {
                     let (byte_index, _) = context.bytes.insert_full(bytes);
@@ -90,6 +103,23 @@ impl Context {
                     context.objects.insert(idx, o);
                     InputKind::Object
                 }
+                (L::InputArg::FundsWithdrawal(withdrawal), L::InputType::Fixed(input_ty)) => {
+                    let L::FundsWithdrawalArg {
+                        from_compatibility_object: _,
+                        ty,
+                        owner,
+                        amount,
+                    } = withdrawal;
+                    debug_assert!(ty == input_ty);
+                    let withdrawal = T::WithdrawalInput {
+                        original_input_index: idx,
+                        ty,
+                        owner,
+                        amount,
+                    };
+                    context.withdrawals.insert(idx, withdrawal);
+                    InputKind::Withdrawal
+                }
                 (arg, ty) => invariant_violation!(
                     "Input arg, type mismatch. Unexpected {arg:?} with type {ty:?}"
                 ),
@@ -101,7 +131,7 @@ impl Context {
             // iterate to check the correctness of bytes interning
             for (i, arg) in cloned_inputs.iter().enumerate() {
                 if let L::InputArg::Pure(bytes) = &arg {
-                    let idx = T::InputIndex(i as u16);
+                    let idx = T::InputIndex(checked_as!(i, u16)?);
                     let Some(byte_index) = context.bytes_idx_remapping.get(&idx) else {
                         invariant_violation!("Unbound pure input {}", idx.0);
                     };
@@ -120,68 +150,127 @@ impl Context {
         Ok(context)
     }
 
-    fn finish(self, commands: T::Commands) -> T::Transaction {
+    fn finish(self) -> T::Transaction {
         let Self {
+            gas_payment,
             bytes,
             objects,
-            pure,
-            receiving,
-            ..
-        } = self;
-        let objects = objects.into_iter().map(|(_, o)| o).collect();
-        let pure = pure.into_iter().map(|(_, p)| p).collect();
-        let receiving = receiving.into_iter().map(|(_, r)| r).collect();
-        T::Transaction {
-            bytes,
-            objects,
+            withdrawals,
             pure,
             receiving,
             commands,
+            withdrawal_compatibility_conversions,
+            ..
+        } = self;
+        let objects = objects.into_iter().map(|(_, o)| o).collect();
+        let withdrawals = withdrawals.into_iter().map(|(_, w)| w).collect();
+        let pure = pure.into_iter().map(|(_, p)| p).collect();
+        let receiving = receiving.into_iter().map(|(_, r)| r).collect();
+        T::Transaction {
+            gas_payment,
+            bytes,
+            objects,
+            withdrawals,
+            pure,
+            receiving,
+            withdrawal_compatibility_conversions,
+            commands,
         }
+    }
+
+    fn push_result(&mut self, command: T::Command_) -> Result<(), ExecutionError> {
+        self.commands.push(sp(self.current_command, command));
+        Ok(())
+    }
+
+    fn result_type(&self, i: u16) -> Option<&T::ResultType> {
+        self.commands.get(i as usize).map(|c| &c.value.result_type)
+    }
+
+    fn fixed_location_type(
+        &mut self,
+        env: &Env,
+        location: T::Location,
+    ) -> Result<Option<Type>, ExecutionError> {
+        Ok(Some(match location {
+            T::Location::TxContext => env.tx_context_type()?,
+            T::Location::GasCoin => env.gas_coin_type()?,
+            T::Location::Result(i, j) => {
+                let Some(tys) = self.result_type(i) else {
+                    invariant_violation!("Result index {i} is out of bounds")
+                };
+                tys.safe_get(j as usize)?.clone()
+            }
+            T::Location::ObjectInput(i) => {
+                let Some((_, object_input)) = self.objects.get_index(i as usize) else {
+                    invariant_violation!("Unbound object input {}", i)
+                };
+                object_input.ty.clone()
+            }
+            T::Location::WithdrawalInput(i) => {
+                let Some((_, withdrawal_input)) = self.withdrawals.get_index(i as usize) else {
+                    invariant_violation!("Unbound withdrawal input {}", i)
+                };
+                withdrawal_input.ty.clone()
+            }
+            T::Location::PureInput(_) | T::Location::ReceivingInput(_) => return Ok(None),
+        }))
     }
 
     // Get the fixed type of a location. Returns `None` for Pure and Receiving inputs,
     fn fixed_type(
         &mut self,
         env: &Env,
-        location: SplatLocation,
+        splat_location: SplatLocation,
     ) -> Result<Option<(T::Location, Type)>, ExecutionError> {
-        Ok(Some(match location {
-            SplatLocation::GasCoin => (T::Location::GasCoin, env.gas_coin_type()?),
-            SplatLocation::Result(i, j) => (
-                T::Location::Result(i, j),
-                self.results[i as usize][j as usize].clone(),
-            ),
-            SplatLocation::Input(i) => match &self.input_resolution[i.0 as usize] {
+        let location = match splat_location {
+            SplatLocation::GasCoin => T::Location::GasCoin,
+            SplatLocation::Result(i, j) => T::Location::Result(i, j),
+            SplatLocation::Input(i) => match self.input_resolution.safe_get(i.0 as usize)? {
                 InputKind::Object => {
-                    let Some((object_index, _, object_input)) = self.objects.get_full(&i) else {
+                    let Some(index) = self.objects.get_index_of(&i) else {
                         invariant_violation!("Unbound object input {}", i.0)
                     };
-                    (
-                        T::Location::ObjectInput(object_index as u16),
-                        object_input.ty.clone(),
-                    )
+                    T::Location::ObjectInput(checked_as!(index, u16)?)
+                }
+                InputKind::Withdrawal => {
+                    let Some(withdrawal_index) = self.withdrawals.get_index_of(&i) else {
+                        invariant_violation!("Unbound withdrawal input {}", i.0)
+                    };
+                    T::Location::WithdrawalInput(checked_as!(withdrawal_index, u16)?)
                 }
                 InputKind::Pure | InputKind::Receiving => return Ok(None),
             },
-        }))
+        };
+        let Some(ty) = self.fixed_location_type(env, location)? else {
+            invariant_violation!("Location {location:?} does not have a fixed type")
+        };
+        Ok(Some((location, ty)))
     }
 
     fn resolve_location(
         &mut self,
         env: &Env,
-        location: SplatLocation,
+        splat_location: SplatLocation,
         expected_ty: &Type,
         bytes_constraint: BytesConstraint,
     ) -> Result<(T::Location, Type), ExecutionError> {
-        Ok(match location {
-            SplatLocation::GasCoin | SplatLocation::Result(_, _) => self
-                .fixed_type(env, location)?
-                .ok_or_else(|| make_invariant_violation!("Expected fixed type for {location:?}"))?,
-            SplatLocation::Input(i) => match &self.input_resolution[i.0 as usize] {
-                InputKind::Object => self.fixed_type(env, location)?.ok_or_else(|| {
-                    make_invariant_violation!("Expected fixed type for {location:?}")
-                })?,
+        let location = match splat_location {
+            SplatLocation::GasCoin => T::Location::GasCoin,
+            SplatLocation::Result(i, j) => T::Location::Result(i, j),
+            SplatLocation::Input(i) => match self.input_resolution.safe_get(i.0 as usize)? {
+                InputKind::Object => {
+                    let Some(index) = self.objects.get_index_of(&i) else {
+                        invariant_violation!("Unbound object input {}", i.0)
+                    };
+                    T::Location::ObjectInput(checked_as!(index, u16)?)
+                }
+                InputKind::Withdrawal => {
+                    let Some(index) = self.withdrawals.get_index_of(&i) else {
+                        invariant_violation!("Unbound withdrawal input {}", i.0)
+                    };
+                    T::Location::WithdrawalInput(checked_as!(index, u16)?)
+                }
                 InputKind::Pure => {
                     let ty = match expected_ty {
                         Type::Reference(_, inner) => (**inner).clone(),
@@ -201,7 +290,7 @@ impl Context {
                         self.pure.insert(k.clone(), pure);
                     }
                     let byte_index = self.pure.get_index_of(&k).unwrap();
-                    (T::Location::PureInput(byte_index as u16), ty)
+                    return Ok((T::Location::PureInput(checked_as!(byte_index, u16)?), ty));
                 }
                 InputKind::Receiving => {
                     let ty = match expected_ty {
@@ -222,10 +311,17 @@ impl Context {
                         self.receiving.insert(k.clone(), receiving);
                     }
                     let byte_index = self.receiving.get_index_of(&k).unwrap();
-                    (T::Location::ReceivingInput(byte_index as u16), ty)
+                    return Ok((
+                        T::Location::ReceivingInput(checked_as!(byte_index, u16)?),
+                        ty,
+                    ));
                 }
             },
-        })
+        };
+        let Some(ty) = self.fixed_location_type(env, location)? else {
+            invariant_violation!("Location {location:?} does not have a fixed type")
+        };
+        Ok((location, ty))
     }
 }
 
@@ -233,23 +329,42 @@ pub fn transaction<Mode: ExecutionMode>(
     env: &Env,
     lt: L::Transaction,
 ) -> Result<T::Transaction, ExecutionError> {
-    let L::Transaction { inputs, commands } = lt;
-    let mut context = Context::new(inputs)?;
-    let commands = commands
-        .into_iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let idx = i as u16;
-            context.current_command = idx;
-            let (c, tys) =
-                command::<Mode>(env, &mut context, c).map_err(|e| e.with_command_index(i))?;
-            context.results.push(tys.clone());
-            Ok((sp(idx, c), tys))
-        })
-        .collect::<Result<Vec<_>, ExecutionError>>()?;
-    let mut ast = context.finish(commands);
+    let L::Transaction {
+        gas_payment,
+        mut inputs,
+        mut commands,
+    } = lt;
+    let withdrawal_compatability_inputs =
+        determine_withdrawal_compatibility_inputs(env, &mut inputs)?;
+    let mut context = Context::new(gas_payment, inputs)?;
+    withdrawal_compatibility_conversion(
+        env,
+        &mut context,
+        withdrawal_compatability_inputs,
+        &mut commands,
+    )?;
+    for (i, c) in commands.into_iter().enumerate() {
+        let idx = checked_as!(i, u16)?;
+        context.current_command = idx;
+        let (c_, tys) =
+            command::<Mode>(env, &mut context, c).map_err(|e| e.with_command_index(i))?;
+        let c = T::Command_ {
+            command: c_,
+            result_type: tys,
+            // computed later
+            drop_values: vec![],
+            // computed later
+            consumed_shared_objects: vec![],
+        };
+        context.push_result(c)?
+    }
+    let mut ast = context.finish();
     // mark the last usage of references as Move instead of Copy
     scope_references::transaction(&mut ast);
+    // mark unused results to be dropped
+    unused_results::transaction(&mut ast)?;
+    // track shared object IDs
+    consumed_shared_objects::transaction(&mut ast)?;
     Ok(ast)
 }
 
@@ -257,7 +372,7 @@ fn command<Mode: ExecutionMode>(
     env: &Env,
     context: &mut Context,
     command: L::Command,
-) -> Result<(T::Command_, T::ResultType), ExecutionError> {
+) -> Result<(T::Command__, T::ResultType), ExecutionError> {
     Ok(match command {
         L::Command::MoveCall(lmc) => {
             let L::MoveCall {
@@ -265,49 +380,10 @@ fn command<Mode: ExecutionMode>(
                 arguments: largs,
             } = *lmc;
             let arg_locs = locations(context, 0, largs)?;
-            let tx_context_kind = tx_context_kind(&function);
-            let parameter_tys = match tx_context_kind {
-                TxContextKind::None => &function.signature.parameters,
-                TxContextKind::Mutable | TxContextKind::Immutable => {
-                    let n = function.signature.parameters.len();
-                    &function.signature.parameters[0..n - 1]
-                }
-            };
-            let num_args = arg_locs.len();
-            let num_parameters = parameter_tys.len();
-            if num_args != num_parameters {
-                return Err(ExecutionError::new_with_source(
-                    ExecutionErrorKind::ArityMismatch,
-                    format!(
-                        "Expected {} argument{} calling function '{}::{}', but found {}",
-                        num_parameters,
-                        if num_parameters == 1 { "" } else { "s" },
-                        function.storage_id,
-                        function.name,
-                        num_args,
-                    ),
-                ));
-            }
-            let mut args = arguments(env, context, 0, arg_locs, parameter_tys.iter().cloned())?;
-            match tx_context_kind {
-                TxContextKind::None => (),
-                TxContextKind::Mutable | TxContextKind::Immutable => {
-                    let is_mut = match tx_context_kind {
-                        TxContextKind::Mutable => true,
-                        TxContextKind::Immutable => false,
-                        TxContextKind::None => unreachable!(),
-                    };
-                    // TODO this is out of bounds of the original PTB arguments... what do we
-                    // do here?
-                    let idx = args.len() as u16;
-                    let arg__ = T::Argument__::Borrow(is_mut, T::Location::TxContext);
-                    let ty = Type::Reference(is_mut, Rc::new(env.tx_context_type()?));
-                    args.push(sp(idx, (arg__, ty)));
-                }
-            }
+            let args = move_call_arguments(env, context, &function, arg_locs)?;
             let result = function.signature.return_.clone();
             (
-                T::Command_::MoveCall(Box::new(T::MoveCall {
+                T::Command__::MoveCall(Box::new(T::MoveCall {
                     function,
                     arguments: args,
                 })),
@@ -315,6 +391,8 @@ fn command<Mode: ExecutionMode>(
             )
         }
         L::Command::TransferObjects(lobjects, laddress) => {
+            const TRANSFER_OBJECTS_CONSTRAINT: AbilitySet =
+                AbilitySet::singleton(Ability::Store).union(AbilitySet::singleton(Ability::Key));
             let object_locs = locations(context, 0, lobjects)?;
             let address_loc = one_location(context, object_locs.len(), laddress)?;
             let objects = constrained_arguments(
@@ -322,14 +400,11 @@ fn command<Mode: ExecutionMode>(
                 context,
                 0,
                 object_locs,
-                |ty| {
-                    let abilities = ty.abilities();
-                    Ok(abilities.has_store() && abilities.has_key())
-                },
+                TRANSFER_OBJECTS_CONSTRAINT,
                 CommandArgumentError::InvalidTransferObject,
             )?;
             let address = argument(env, context, objects.len(), address_loc, Type::Address)?;
-            (T::Command_::TransferObjects(objects, address), vec![])
+            (T::Command__::TransferObjects(objects, address), vec![])
         }
         L::Command::SplitCoins(lcoin, lamounts) => {
             let coin_loc = one_location(context, 0, lcoin)?;
@@ -347,7 +422,7 @@ fn command<Mode: ExecutionMode>(
                 std::iter::repeat_with(|| Type::U64),
             )?;
             let result = vec![coin_type.clone(); amounts.len()];
-            (T::Command_::SplitCoins(coin_type, coin, amounts), result)
+            (T::Command__::SplitCoins(coin_type, coin, amounts), result)
         }
         L::Command::MergeCoins(ltarget, lcoins) => {
             let target_loc = one_location(context, 0, ltarget)?;
@@ -364,7 +439,7 @@ fn command<Mode: ExecutionMode>(
                 coin_locs,
                 std::iter::repeat_with(|| coin_type.clone()),
             )?;
-            (T::Command_::MergeCoins(coin_type, target, coins), vec![])
+            (T::Command__::MergeCoins(coin_type, target, coins), vec![])
         }
         L::Command::MakeMoveVec(Some(ty), lelems) => {
             let elem_locs = locations(context, 0, lelems)?;
@@ -376,11 +451,12 @@ fn command<Mode: ExecutionMode>(
                 std::iter::repeat_with(|| ty.clone()),
             )?;
             (
-                T::Command_::MakeMoveVec(ty.clone(), elems),
+                T::Command__::MakeMoveVec(ty.clone(), elems),
                 vec![env.vector_type(ty)?],
             )
         }
         L::Command::MakeMoveVec(None, lelems) => {
+            const MAKE_MOVE_VEC_OBJECT_CONSTRAINT: AbilitySet = AbilitySet::singleton(Ability::Key);
             let mut lelems = lelems.into_iter();
             let Some(lfirst) = lelems.next() else {
                 // TODO maybe this should be a different errors for CLI usage
@@ -394,7 +470,7 @@ fn command<Mode: ExecutionMode>(
                 context,
                 0,
                 first_loc,
-                |ty| Ok(ty.abilities().has_key()),
+                MAKE_MOVE_VEC_OBJECT_CONSTRAINT,
                 CommandArgumentError::InvalidMakeMoveVecNonObjectArgument,
             )?;
             let first_ty = first_arg.value.1.clone();
@@ -408,7 +484,7 @@ fn command<Mode: ExecutionMode>(
             )?;
             elems.insert(0, first_arg);
             (
-                T::Command_::MakeMoveVec(first_ty.clone(), elems),
+                T::Command__::MakeMoveVec(first_ty.clone(), elems),
                 vec![env.vector_type(first_ty)?],
             )
         }
@@ -419,7 +495,7 @@ fn command<Mode: ExecutionMode>(
             } else {
                 vec![env.upgrade_cap_type()?.clone()]
             };
-            (T::Command_::Publish(items, object_ids, linkage), result)
+            (T::Command__::Publish(items, object_ids, linkage), result)
         }
         L::Command::Upgrade(items, object_ids, object_id, la, linkage) => {
             let location = one_location(context, 0, la)?;
@@ -427,18 +503,94 @@ fn command<Mode: ExecutionMode>(
             let a = argument(env, context, 0, location, expected_ty)?;
             let res = env.upgrade_receipt_type()?;
             (
-                T::Command_::Upgrade(items, object_ids, object_id, a, linkage),
+                T::Command__::Upgrade(items, object_ids, object_id, a, linkage),
                 vec![res.clone()],
             )
         }
     })
 }
 
-fn tx_context_kind(function: &L::LoadedFunction) -> TxContextKind {
-    match function.signature.parameters.last() {
-        Some(ty) => ty.is_tx_context(),
-        None => TxContextKind::None,
+fn move_call_parameters<'a>(
+    _env: &Env,
+    function: &'a L::LoadedFunction,
+) -> Vec<(&'a Type, TxContextKind)> {
+    function
+        .signature
+        .parameters
+        .iter()
+        .map(|ty| (ty, ty.is_tx_context()))
+        .collect()
+}
+
+fn move_call_arguments(
+    env: &Env,
+    context: &mut Context,
+    function: &L::LoadedFunction,
+    args: Vec<SplatLocation>,
+) -> Result<Vec<T::Argument>, ExecutionError> {
+    let params = move_call_parameters(env, function);
+    assert_invariant!(
+        params.len() == function.signature.parameters.len(),
+        "Generated parameter types does not match the function signature"
+    );
+    // check arity
+    let num_tx_contexts = params
+        .iter()
+        .filter(|(_, k)| matches!(k, TxContextKind::Mutable | TxContextKind::Immutable))
+        .count();
+    let num_user_args = args.len();
+    let Some(num_args) = num_user_args.checked_add(num_tx_contexts) else {
+        invariant_violation!("usize overflow when calculating number of arguments");
+    };
+    let num_parameters = params.len();
+    if num_args != num_parameters {
+        return Err(ExecutionError::new_with_source(
+            ExecutionErrorKind::ArityMismatch,
+            format!(
+                "Expected {} argument{} calling function '{}::{}', but found {}",
+                num_parameters,
+                if num_parameters == 1 { "" } else { "s" },
+                function.version_mid,
+                function.name,
+                num_args,
+            ),
+        ));
     }
+    // construct arguments, injecting tx context args as needed
+    let mut args = args.into_iter().enumerate();
+    let res = params
+        .into_iter()
+        .enumerate()
+        .map(|(param_idx, (expected_ty, tx_context_kind))| {
+            Ok(match tx_context_kind {
+                TxContextKind::None => {
+                    let Some((arg_idx, location)) = args.next() else {
+                        invariant_violation!("arguments are empty but arity was already checked");
+                    };
+                    argument(env, context, arg_idx, location, expected_ty.clone())?
+                }
+                TxContextKind::Mutable | TxContextKind::Immutable => {
+                    let is_mut = match tx_context_kind {
+                        TxContextKind::Mutable => true,
+                        TxContextKind::Immutable => false,
+                        TxContextKind::None => unreachable!(),
+                    };
+                    // TODO this might overlap or be  out of bounds of the original PTB arguments...
+                    // what do we do here?
+                    let idx = checked_as!(param_idx, u16)?;
+                    let arg__ = T::Argument__::Borrow(is_mut, T::Location::TxContext);
+                    let ty = Type::Reference(is_mut, Rc::new(env.tx_context_type()?));
+                    sp(idx, (arg__, ty))
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, ExecutionError>>()?;
+
+    assert_invariant!(
+        args.next().is_none(),
+        "some arguments went unused but arity was already checked"
+    );
+    Ok(res)
 }
 
 fn one_location(
@@ -478,7 +630,7 @@ where
                 res.push(SplatLocation::Input(T::InputIndex(i)))
             }
             L::Argument::NestedResult(i, j) => {
-                let Some(command_result) = context.results.get(i as usize) else {
+                let Some(command_result) = context.result_type(i) else {
                     return Err(CommandArgumentError::IndexOutOfBounds { idx: i }.into());
                 };
                 if j as usize >= command_result.len() {
@@ -491,7 +643,7 @@ where
                 res.push(SplatLocation::Result(i, j))
             }
             L::Argument::Result(i) => {
-                let Some(result) = context.results.get(i as usize) else {
+                let Some(result) = context.result_type(i) else {
                     return Err(CommandArgumentError::IndexOutOfBounds { idx: i }.into());
                 };
                 let Ok(len): Result<u16, _> = result.len().try_into() else {
@@ -511,8 +663,12 @@ where
     let _args_len = args.len();
     let mut res = vec![];
     for (arg_idx, arg) in args.enumerate() {
-        splat_arg(context, &mut res, arg)
-            .map_err(|e| e.into_execution_error(start_idx + arg_idx))?;
+        splat_arg(context, &mut res, arg).map_err(|e| {
+            let Some(idx) = start_idx.checked_add(arg_idx) else {
+                return make_invariant_violation!("usize overflow when calculating argument index");
+            };
+            e.into_execution_error(idx)
+        })?
     }
     debug_assert_eq!(res.len(), _args_len);
     Ok(res)
@@ -530,7 +686,10 @@ fn arguments(
         .zip(expected_tys)
         .enumerate()
         .map(|(i, (location, expected_ty))| {
-            argument(env, context, start_idx + i, location, expected_ty)
+            let Some(idx) = start_idx.checked_add(i) else {
+                invariant_violation!("usize overflow when calculating argument index");
+            };
+            argument(env, context, idx, location, expected_ty)
         })
         .collect()
 }
@@ -545,7 +704,7 @@ fn argument(
     let arg__ = argument_(env, context, command_arg_idx, location, &expected_ty)
         .map_err(|e| e.into_execution_error(command_arg_idx))?;
     let arg_ = (arg__, expected_ty);
-    Ok(sp(command_arg_idx as u16, arg_))
+    Ok(sp(checked_as!(command_arg_idx, u16)?, arg_))
 }
 
 fn argument_(
@@ -558,9 +717,9 @@ fn argument_(
     let current_command = context.current_command;
     let bytes_constraint = BytesConstraint {
         command: current_command,
-        argument: command_arg_idx as u16,
+        argument: checked_as!(command_arg_idx, u16)?,
     };
-    let (location, actual_ty): (T::Location, Type) =
+    let (location, actual_ty) =
         context.resolve_location(env, location, expected_ty, bytes_constraint)?;
     Ok(match (actual_ty, expected_ty) {
         // Reference location types
@@ -615,63 +774,57 @@ fn check_type(actual_ty: &Type, expected_ty: &Type) -> Result<(), CommandArgumen
     }
 }
 
-fn constrained_arguments<P: FnMut(&Type) -> Result<bool, ExecutionError>>(
+fn constrained_arguments(
     env: &Env,
     context: &mut Context,
     start_idx: usize,
     locations: Vec<SplatLocation>,
-    mut is_valid: P,
+    constraint: AbilitySet,
     err_case: CommandArgumentError,
 ) -> Result<Vec<T::Argument>, ExecutionError> {
-    let is_valid = &mut is_valid;
     locations
         .into_iter()
         .enumerate()
         .map(|(i, location)| {
-            constrained_argument_(env, context, start_idx + i, location, is_valid, err_case)
+            let Some(idx) = start_idx.checked_add(i) else {
+                invariant_violation!("usize overflow when calculating argument index");
+            };
+            constrained_argument(env, context, idx, location, constraint, err_case)
         })
         .collect()
 }
 
-fn constrained_argument<P: FnMut(&Type) -> Result<bool, ExecutionError>>(
+fn constrained_argument(
     env: &Env,
     context: &mut Context,
     command_arg_idx: usize,
     location: SplatLocation,
-    mut is_valid: P,
+    constraint: AbilitySet,
     err_case: CommandArgumentError,
 ) -> Result<T::Argument, ExecutionError> {
-    constrained_argument_(
+    let arg_ = constrained_argument_(
         env,
         context,
         command_arg_idx,
         location,
-        &mut is_valid,
+        constraint,
         err_case,
     )
+    .map_err(|e| e.into_execution_error(command_arg_idx))?;
+    Ok(sp(checked_as!(command_arg_idx, u16)?, arg_))
 }
 
-fn constrained_argument_<P: FnMut(&Type) -> Result<bool, ExecutionError>>(
+fn constrained_argument_(
     env: &Env,
     context: &mut Context,
     command_arg_idx: usize,
     location: SplatLocation,
-    is_valid: &mut P,
-    err_case: CommandArgumentError,
-) -> Result<T::Argument, ExecutionError> {
-    let arg_ = constrained_argument__(env, context, location, is_valid, err_case)
-        .map_err(|e| e.into_execution_error(command_arg_idx))?;
-    Ok(sp(command_arg_idx as u16, arg_))
-}
-
-fn constrained_argument__<P: FnMut(&Type) -> Result<bool, ExecutionError>>(
-    env: &Env,
-    context: &mut Context,
-    location: SplatLocation,
-    is_valid: &mut P,
+    constraint: AbilitySet,
     err_case: CommandArgumentError,
 ) -> Result<T::Argument_, EitherError> {
-    if let Some((location, ty)) = constrained_type(env, context, location, is_valid)? {
+    if let Some((location, ty)) =
+        constrained_type(env, context, command_arg_idx, location, constraint)?
+    {
         if ty.abilities().has_copy() {
             Ok((T::Argument__::new_copy(location), ty))
         } else {
@@ -682,16 +835,17 @@ fn constrained_argument__<P: FnMut(&Type) -> Result<bool, ExecutionError>>(
     }
 }
 
-fn constrained_type<'a, P: FnMut(&Type) -> Result<bool, ExecutionError>>(
+fn constrained_type<'a>(
     env: &'a Env,
     context: &'a mut Context,
+    _command_arg_idx: usize,
     location: SplatLocation,
-    mut is_valid: P,
+    constraint: AbilitySet,
 ) -> Result<Option<(T::Location, Type)>, ExecutionError> {
     let Some((location, ty)) = context.fixed_type(env, location)? else {
         return Ok(None);
     };
-    Ok(if is_valid(&ty)? {
+    Ok(if constraint.is_subset(ty.abilities()) {
         Some((location, ty))
     } else {
         None
@@ -704,14 +858,15 @@ fn coin_mut_ref_argument(
     command_arg_idx: usize,
     location: SplatLocation,
 ) -> Result<T::Argument, ExecutionError> {
-    let arg_ = coin_mut_ref_argument_(env, context, location)
+    let arg_ = coin_mut_ref_argument_(env, context, command_arg_idx, location)
         .map_err(|e| e.into_execution_error(command_arg_idx))?;
-    Ok(sp(command_arg_idx as u16, arg_))
+    Ok(sp(checked_as!(command_arg_idx, u16)?, arg_))
 }
 
 fn coin_mut_ref_argument_(
     env: &Env,
     context: &mut Context,
+    _command_arg_idx: usize,
     location: SplatLocation,
 ) -> Result<T::Argument_, EitherError> {
     let Some((location, actual_ty)) = context.fixed_type(env, location)? else {
@@ -738,15 +893,214 @@ fn coin_mut_ref_argument_(
 }
 
 fn check_coin_type(ty: &Type) -> Result<(), EitherError> {
-    let Type::Datatype(dt) = ty else {
-        return Err(CommandArgumentError::TypeMismatch.into());
-    };
-    let resolved = dt.qualified_ident();
-    let is_coin = resolved == RESOLVED_COIN_STRUCT;
-    if is_coin {
+    if coin_inner_type(ty).is_some() {
         Ok(())
     } else {
         Err(CommandArgumentError::TypeMismatch.into())
+    }
+}
+
+//**************************************************************************************************
+// Withdrawal compatibility conversion
+//**************************************************************************************************
+
+/// Determines which withdrawal inputs need to be converted for compatibility, and appends the
+/// owner address of each such withdrawal as a new pure input.
+fn determine_withdrawal_compatibility_inputs(
+    _env: &Env,
+    inputs: &mut L::Inputs,
+) -> Result<IndexMap</* input withdrawal */ u16, /* owner address input */ u16>, ExecutionError> {
+    let withdrawal_compatibility_owners: IndexMap<u16, AccountAddress> = inputs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (input_arg, _))| {
+            if let L::InputArg::FundsWithdrawal(withdrawal) = input_arg
+                && withdrawal.from_compatibility_object
+            {
+                Some((i, withdrawal.owner))
+            } else {
+                None
+            }
+        })
+        .map(|(i, owner)| Ok((checked_as!(i, u16)?, owner)))
+        .collect::<Result<_, ExecutionError>>()?;
+    withdrawal_compatibility_owners
+        .into_iter()
+        .map(|(i, owner)| {
+            let owner_idx = checked_as!(inputs.len(), u16)?;
+            let bytes: Vec<u8> = bcs::to_bytes(&owner).map_err(|_| {
+                make_invariant_violation!(
+                    "Failed to serialize owner address for withdrawal compatibility input",
+                )
+            })?;
+            inputs.push((L::InputArg::Pure(bytes), L::InputType::Bytes));
+            Ok((i, owner_idx))
+        })
+        .collect()
+}
+
+struct WithdrawalCompatibilityRemap {
+    // mapping from original withdrawal input index to new coin result index
+    remap: IndexMap<u16, u16>,
+    // increment for all subsequent result indices
+    lift: u16,
+}
+
+/// For each withdrawal input that needs conversion, insert a conversion command to a
+/// `sui::coin::Coin<T>` and swaps references to that input to the conversion result.
+/// Adjusts result indices in subsequent commands accordingly.
+fn withdrawal_compatibility_conversion(
+    env: &Env,
+    context: &mut Context,
+    withdrawal_compatability_inputs: IndexMap<
+        /* input withdrawal */ u16,
+        /* owner address input */ u16,
+    >,
+    commands: &mut [L::Command],
+) -> Result<(), ExecutionError> {
+    let mut compatibility_remap = WithdrawalCompatibilityRemap {
+        remap: IndexMap::new(),
+        lift: 0,
+    };
+    for (input, owner_idx) in withdrawal_compatability_inputs {
+        let result_idx = convert_withdrawal_to_coin(env, context, input, owner_idx)?;
+        compatibility_remap.remap.insert(input, result_idx);
+    }
+    compatibility_remap.lift = checked_as!(context.commands.len(), u16)?;
+    lift_result_indices(&compatibility_remap, commands)
+}
+
+fn convert_withdrawal_to_coin(
+    env: &Env,
+    context: &mut Context,
+    withdrawal_input: u16,
+    owner_input: u16,
+) -> Result</* Result index */ u16, ExecutionError> {
+    assert_invariant!(
+        env.protocol_config
+            .convert_withdrawal_compatibility_ptb_arguments(),
+        "convert_withdrawal_to_coin called when conversion is disabled"
+    );
+    // Grab the owner `address`
+    let (owner_location, _owner_ty) = context.resolve_location(
+        env,
+        SplatLocation::Input(T::InputIndex(owner_input)),
+        &Type::Address,
+        BytesConstraint {
+            command: 0,
+            argument: 0,
+        },
+    )?;
+    let Some((location, withdrawal_ty)) =
+        context.fixed_type(env, SplatLocation::Input(T::InputIndex(withdrawal_input)))?
+    else {
+        invariant_violation!(
+            "Expected fixed type for withdrawal compatibility input {}",
+            withdrawal_input
+        )
+    };
+    let Some(inner_ty) = withdrawal_inner_type(&withdrawal_ty)
+        .and_then(balance_inner_type)
+        .cloned()
+    else {
+        invariant_violation!("convert_withdrawal_to_coin called with non-withdrawal type");
+    };
+    let idx = 0u16;
+    // insert a conversion command
+    let withdrawal_arg_ = T::Argument__::new_move(location);
+    let withdrawal_arg = sp(idx, (withdrawal_arg_, withdrawal_ty));
+    let ctx_arg_ = T::Argument__::Borrow(true, T::Location::TxContext);
+    let ctx_ty = Type::Reference(true, Rc::new(env.tx_context_type()?));
+    let ctx_arg = sp(idx, (ctx_arg_, ctx_ty));
+    let conversion_command__ = T::Command__::MoveCall(Box::new(T::MoveCall {
+        function: env.load_framework_function(
+            COIN_MODULE_NAME,
+            REDEEM_FUNDS_FUNC_NAME,
+            vec![inner_ty.clone()],
+        )?,
+        arguments: vec![withdrawal_arg, ctx_arg],
+    }));
+    let conversion_command_ = T::Command_ {
+        command: conversion_command__,
+        result_type: vec![env.coin_type(inner_ty.clone())?],
+        drop_values: vec![],
+        consumed_shared_objects: vec![],
+    };
+    let conversion_idx = checked_as!(context.commands.len(), u16)?;
+    context.push_result(conversion_command_)?;
+    // manage metadata
+    context.withdrawal_compatibility_conversions.insert(
+        location,
+        T::WithdrawalCompatibilityConversion {
+            owner: owner_location,
+            conversion_result: conversion_idx,
+        },
+    );
+    // the result of the conversion is at (conversion_idx, 0)
+    Ok(conversion_idx)
+}
+
+/// Increments all result major indices by the lift amount.
+/// Remaps any converted withdrawal inputs to the new coin result
+fn lift_result_indices(
+    remap: &WithdrawalCompatibilityRemap,
+    commands: &mut [L::Command],
+) -> Result<(), ExecutionError> {
+    for command in commands {
+        for arg in command.arguments_mut() {
+            match arg {
+                L::Argument::NestedResult(result, _) | L::Argument::Result(result) => {
+                    *result = remap.lift.checked_add(*result).ok_or_else(|| {
+                        make_invariant_violation!(
+                            "u16 overflow when lifting result index during withdrawal compatibility",
+                        )
+                    })?;
+                }
+                L::Argument::Input(i) => {
+                    if let Some(converted_withdrawal) = remap.remap.get(i).copied() {
+                        *arg = L::Argument::NestedResult(converted_withdrawal, 0);
+                    }
+                }
+                L::Argument::GasCoin => (),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns the inner type `T` if the type is `sui::coin::Coin<T>`, else `None`
+pub(crate) fn coin_inner_type(ty: &Type) -> Option<&Type> {
+    if let Type::Datatype(dt) = ty
+        && dt.type_arguments.len() == 1
+        && dt.qualified_ident() == RESOLVED_COIN_STRUCT
+    {
+        Some(dt.type_arguments.first().unwrap())
+    } else {
+        None
+    }
+}
+
+/// Returns the inner type `T` if the type is `sui::balance::Balance<T>`, else `None`
+pub(crate) fn balance_inner_type(ty: &Type) -> Option<&Type> {
+    if let Type::Datatype(dt) = ty
+        && dt.type_arguments.len() == 1
+        && dt.qualified_ident() == RESOLVED_BALANCE_STRUCT
+    {
+        Some(dt.type_arguments.first().unwrap())
+    } else {
+        None
+    }
+}
+
+/// Returns the inner type `T` if the type is `sui::funds_accumulator::Withdrawal<T>`, else `None`
+pub(crate) fn withdrawal_inner_type(ty: &Type) -> Option<&Type> {
+    if let Type::Datatype(dt) = ty
+        && dt.type_arguments.len() == 1
+        && dt.qualified_ident() == RESOLVED_WITHDRAWAL_STRUCT
+    {
+        Some(dt.type_arguments.first().unwrap())
+    } else {
+        None
     }
 }
 
@@ -765,29 +1119,29 @@ mod scope_references {
     /// of a Copy.
     pub fn transaction(ast: &mut T::Transaction) {
         let mut used: BTreeSet<(u16, u16)> = BTreeSet::new();
-        for (c, _tys) in ast.commands.iter_mut().rev() {
+        for c in ast.commands.iter_mut().rev() {
             command(&mut used, c);
         }
     }
 
-    fn command(used: &mut BTreeSet<(u16, u16)>, sp!(_, command): &mut T::Command) {
-        match command {
-            T::Command_::MoveCall(mc) => arguments(used, &mut mc.arguments),
-            T::Command_::TransferObjects(objects, recipient) => {
+    fn command(used: &mut BTreeSet<(u16, u16)>, sp!(_, c): &mut T::Command) {
+        match &mut c.command {
+            T::Command__::MoveCall(mc) => arguments(used, &mut mc.arguments),
+            T::Command__::TransferObjects(objects, recipient) => {
                 argument(used, recipient);
                 arguments(used, objects);
             }
-            T::Command_::SplitCoins(_, coin, amounts) => {
+            T::Command__::SplitCoins(_, coin, amounts) => {
                 arguments(used, amounts);
                 argument(used, coin);
             }
-            T::Command_::MergeCoins(_, target, coins) => {
+            T::Command__::MergeCoins(_, target, coins) => {
                 arguments(used, coins);
                 argument(used, target);
             }
-            T::Command_::MakeMoveVec(_, xs) => arguments(used, xs),
-            T::Command_::Publish(_, _, _) => (),
-            T::Command_::Upgrade(_, _, _, x, _) => argument(used, x),
+            T::Command__::MakeMoveVec(_, xs) => arguments(used, xs),
+            T::Command__::Publish(_, _, _) => (),
+            T::Command__::Upgrade(_, _, _, x, _) => argument(used, x),
         }
     }
 
@@ -824,5 +1178,239 @@ mod scope_references {
             }
             _ => (),
         }
+    }
+}
+
+//**************************************************************************************************
+// Unused results
+//**************************************************************************************************
+
+mod unused_results {
+    use indexmap::IndexSet;
+    use sui_types::error::ExecutionError;
+
+    use crate::{sp, static_programmable_transactions::typing::ast as T};
+
+    /// Finds what `Result` indexes are never used in the transaction.
+    /// For each command, marks the indexes of result values with `drop` that are never referred to
+    /// via `Result`.
+    pub fn transaction(ast: &mut T::Transaction) -> Result<(), ExecutionError> {
+        // Collect all used result locations (i, j) across all commands
+        let mut used: IndexSet<(u16, u16)> = IndexSet::new();
+        for c in &ast.commands {
+            command(&mut used, c);
+        }
+
+        // For each command, mark unused result indexes with `drop`
+        for (i, sp!(_, c)) in ast.commands.iter_mut().enumerate() {
+            debug_assert!(c.drop_values.is_empty());
+            let i = checked_as!(i, u16)?;
+            c.drop_values = c
+                .result_type
+                .iter()
+                .enumerate()
+                .map(|(j, ty)| {
+                    Ok(ty.abilities().has_drop() && !used.contains(&(i, checked_as!(j, u16)?)))
+                })
+                .collect::<Result<_, ExecutionError>>()?;
+        }
+        Ok(())
+    }
+
+    fn command(used: &mut IndexSet<(u16, u16)>, sp!(_, c): &T::Command) {
+        match &c.command {
+            T::Command__::MoveCall(mc) => arguments(used, &mc.arguments),
+            T::Command__::TransferObjects(objects, recipient) => {
+                argument(used, recipient);
+                arguments(used, objects);
+            }
+            T::Command__::SplitCoins(_, coin, amounts) => {
+                arguments(used, amounts);
+                argument(used, coin);
+            }
+            T::Command__::MergeCoins(_, target, coins) => {
+                arguments(used, coins);
+                argument(used, target);
+            }
+            T::Command__::MakeMoveVec(_, elements) => arguments(used, elements),
+            T::Command__::Publish(_, _, _) => (),
+            T::Command__::Upgrade(_, _, _, x, _) => argument(used, x),
+        }
+    }
+
+    fn arguments(used: &mut IndexSet<(u16, u16)>, args: &[T::Argument]) {
+        for arg in args {
+            argument(used, arg)
+        }
+    }
+
+    fn argument(used: &mut IndexSet<(u16, u16)>, sp!(_, (arg_, _)): &T::Argument) {
+        if let T::Location::Result(i, j) = arg_.location() {
+            used.insert((i, j));
+        }
+    }
+}
+
+//**************************************************************************************************
+// consumed shared object IDs
+//**************************************************************************************************
+
+mod consumed_shared_objects {
+
+    use crate::{
+        sp, static_programmable_transactions::loading::ast as L,
+        static_programmable_transactions::typing::ast as T,
+    };
+    use sui_types::{
+        base_types::ObjectID,
+        error::{ExecutionError, SafeIndex},
+    };
+
+    // Shared object (non-party) IDs contained in each location
+    struct Context {
+        // (legacy) shared object IDs that are used as inputs
+        inputs: Vec<Option<ObjectID>>,
+        results: Vec<Vec<Option<Vec<ObjectID>>>>,
+    }
+
+    impl Context {
+        pub fn new(ast: &T::Transaction) -> Self {
+            let T::Transaction {
+                gas_payment: _,
+                bytes: _,
+                objects,
+                withdrawals: _,
+                pure: _,
+                receiving: _,
+                withdrawal_compatibility_conversions: _,
+                commands: _,
+            } = ast;
+            let inputs = objects
+                .iter()
+                .map(|o| match &o.arg {
+                    L::ObjectArg::SharedObject {
+                        id,
+                        kind: L::SharedObjectKind::Legacy,
+                        ..
+                    } => Some(*id),
+                    L::ObjectArg::ImmObject(_)
+                    | L::ObjectArg::OwnedObject(_)
+                    | L::ObjectArg::SharedObject {
+                        kind: L::SharedObjectKind::Party,
+                        ..
+                    } => None,
+                })
+                .collect::<Vec<_>>();
+            Self {
+                inputs,
+                results: vec![],
+            }
+        }
+    }
+
+    /// Finds what shared objects are taken by-value by each command and must be either
+    /// deleted or re-shared.
+    /// MakeMoveVec is the only command that can take shared objects by-value and propagate them
+    /// for another command.
+    pub fn transaction(ast: &mut T::Transaction) -> Result<(), ExecutionError> {
+        let mut context = Context::new(ast);
+
+        // For each command, find what shared objects are taken by-value and mark them as being
+        // consumed
+        for c in &mut ast.commands {
+            debug_assert!(c.value.consumed_shared_objects.is_empty());
+            command(&mut context, c)?;
+            debug_assert!(context.results.last().unwrap().len() == c.value.result_type.len());
+        }
+        Ok(())
+    }
+
+    fn command(context: &mut Context, sp!(_, c): &mut T::Command) -> Result<(), ExecutionError> {
+        let mut acc = vec![];
+        match &c.command {
+            T::Command__::MoveCall(mc) => arguments(context, &mut acc, &mc.arguments)?,
+            T::Command__::TransferObjects(objects, recipient) => {
+                argument(context, &mut acc, recipient)?;
+                arguments(context, &mut acc, objects)?;
+            }
+            T::Command__::SplitCoins(_, coin, amounts) => {
+                arguments(context, &mut acc, amounts)?;
+                argument(context, &mut acc, coin)?;
+            }
+            T::Command__::MergeCoins(_, target, coins) => {
+                arguments(context, &mut acc, coins)?;
+                argument(context, &mut acc, target)?;
+            }
+            T::Command__::MakeMoveVec(_, elements) => arguments(context, &mut acc, elements)?,
+            T::Command__::Publish(_, _, _) => (),
+            T::Command__::Upgrade(_, _, _, x, _) => argument(context, &mut acc, x)?,
+        }
+        let (consumed, result) = match &c.command {
+            // make move vec does not "consume" any by-value shared objects, and can propagate
+            // them to a later command
+            T::Command__::MakeMoveVec(_, _) => {
+                assert_invariant!(
+                    c.result_type.len() == 1,
+                    "MakeMoveVec must return a single value"
+                );
+                (vec![], vec![Some(acc)])
+            }
+            // these commands do not propagate shared objects, and consume any in the acc
+            T::Command__::MoveCall(_)
+            | T::Command__::TransferObjects(_, _)
+            | T::Command__::SplitCoins(_, _, _)
+            | T::Command__::MergeCoins(_, _, _)
+            | T::Command__::Publish(_, _, _)
+            | T::Command__::Upgrade(_, _, _, _, _) => (acc, vec![None; c.result_type.len()]),
+        };
+        c.consumed_shared_objects = consumed;
+        context.results.push(result);
+        Ok(())
+    }
+
+    fn arguments(
+        context: &mut Context,
+        acc: &mut Vec<ObjectID>,
+        args: &[T::Argument],
+    ) -> Result<(), ExecutionError> {
+        for arg in args {
+            argument(context, acc, arg)?
+        }
+        Ok(())
+    }
+
+    fn argument(
+        context: &mut Context,
+        acc: &mut Vec<ObjectID>,
+        sp!(_, (arg_, _)): &T::Argument,
+    ) -> Result<(), ExecutionError> {
+        let T::Argument__::Use(T::Usage::Move(loc)) = arg_ else {
+            // only Move usage can take shared objects by-value since they cannot be copied
+            return Ok(());
+        };
+        match loc {
+            // no shared objects in these locations
+            T::Location::TxContext
+            | T::Location::GasCoin
+            | T::Location::WithdrawalInput(_)
+            | T::Location::PureInput(_)
+            | T::Location::ReceivingInput(_) => (),
+            T::Location::ObjectInput(i) => {
+                if let Some(id) = *context.inputs.safe_get(*i as usize)? {
+                    acc.push(id);
+                }
+            }
+
+            T::Location::Result(i, j) => {
+                if let Some(ids) = context
+                    .results
+                    .safe_get(*i as usize)?
+                    .safe_get(*j as usize)?
+                {
+                    acc.extend(ids.iter().copied());
+                }
+            }
+        };
+        Ok(())
     }
 }

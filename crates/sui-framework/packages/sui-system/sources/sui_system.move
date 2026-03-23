@@ -37,7 +37,6 @@
 /// And when we only upgrade SuiSystemStateInner, the version of Validator in the wrapper will not be updated, and hence may become
 /// inconsistent with the version of SuiSystemStateInner. This is fine as long as we don't use the Validator version to determine
 /// the SuiSystemStateInner version, or vice versa.
-
 module sui_system::sui_system;
 
 use sui::balance::Balance;
@@ -540,12 +539,22 @@ public fun pool_exchange_rates(
     wrapper: &mut SuiSystemState,
     pool_id: &ID,
 ): &Table<u64, PoolTokenExchangeRate> {
-    wrapper.load_system_state_mut().pool_exchange_rates(pool_id)
+    wrapper.load_system_state_mut().pool_exchange_rates(*pool_id)
 }
 
 /// Getter returning addresses of the currently active validators.
 public fun active_validator_addresses(wrapper: &mut SuiSystemState): vector<address> {
     wrapper.load_system_state_mut().active_validator_addresses()
+}
+
+/// Getter returning addresses of the currently active validators by reference.
+public fun active_validator_addresses_ref(wrapper: &SuiSystemState): vector<address> {
+    wrapper.load_system_state_ref().active_validator_addresses()
+}
+
+/// Getter returns the voting power of the active validators, values are voting power in the scale of 10000.
+public fun active_validator_voting_powers(wrapper: &SuiSystemState): VecMap<address, u64> {
+    wrapper.load_system_state_ref().active_validator_voting_powers()
 }
 
 /// Calculate the rewards for a given staked SUI object.
@@ -559,7 +568,7 @@ public(package) fun calculate_rewards(
 
     system_state
         .validators_mut()
-        .validator_by_pool_id(&staked_sui.pool_id())
+        .validator_by_pool_id(staked_sui.pool_id())
         .get_staking_pool_ref()
         .calculate_rewards(staked_sui, ctx.epoch())
 }
@@ -588,6 +597,7 @@ fun advance_epoch(
 ): Balance<SUI> {
     // Validator will make a special system call with sender set as 0x0.
     assert!(ctx.sender() == @0x0, ENotSystemAddress);
+    let accumulator_storage_fund_amount = get_accumulator_storage_fund_amount(wrapper);
     let storage_rebate = wrapper
         .load_system_state_mut()
         .advance_epoch(
@@ -600,6 +610,7 @@ fun advance_epoch(
             storage_fund_reinvest_rate,
             reward_slashing_rate,
             epoch_start_timestamp_ms,
+            accumulator_storage_fund_amount,
             ctx,
         );
 
@@ -612,6 +623,15 @@ fun load_system_state(self: &mut SuiSystemState): &SuiSystemStateInnerV2 {
 
 fun load_system_state_mut(self: &mut SuiSystemState): &mut SuiSystemStateInnerV2 {
     load_inner_maybe_upgrade(self)
+}
+
+fun load_system_state_ref(self: &SuiSystemState): &SuiSystemStateInnerV2 {
+    let inner: &SuiSystemStateInnerV2 = dynamic_field::borrow(
+        &self.id,
+        self.version,
+    );
+    assert!(inner.system_state_version() == self.version, EWrongInnerVersion);
+    inner
 }
 
 fun load_inner_maybe_upgrade(self: &mut SuiSystemState): &mut SuiSystemStateInnerV2 {
@@ -641,6 +661,51 @@ fun validator_voting_powers(wrapper: &mut SuiSystemState): VecMap<address, u64> 
 /// at the start of the next epoch.
 fun store_execution_time_estimates(wrapper: &mut SuiSystemState, estimates_bytes: vector<u8>) {
     wrapper.load_system_state_mut().store_execution_time_estimates(estimates_bytes)
+}
+
+#[allow(unused_function)]
+/// Saves the given execution time estimate chunks to the SuiSystemState object, for system use
+/// at the start of the next epoch.
+fun store_execution_time_estimates_v2(
+    wrapper: &mut SuiSystemState,
+    estimate_chunks: vector<vector<u8>>,
+) {
+    wrapper.load_system_state_mut().store_execution_time_estimates_v2(estimate_chunks)
+}
+
+/// Key for storing the storage cost for accumulator objects, computed at end of epoch.
+public struct AccumulatorStorageCostKey() has copy, drop, store;
+
+/// Returns the storage fund amount for accumulator objects stored in extra_fields.
+/// Returns 0 if no value has been stored.
+fun get_accumulator_storage_fund_amount(wrapper: &mut SuiSystemState): u64 {
+    let extra_fields = wrapper.load_system_state().extra_fields();
+    let key = AccumulatorStorageCostKey();
+    if (extra_fields.contains(key)) {
+        *extra_fields.borrow(key)
+    } else {
+        0
+    }
+}
+
+#[allow(unused_function)]
+/// Stores the computed storage cost for accumulator objects.
+/// This is called by an end-of-epoch transaction to record the storage cost
+/// that will be used by advance_epoch.
+fun write_accumulator_storage_cost(
+    wrapper: &mut SuiSystemState,
+    storage_cost: u64,
+    ctx: &TxContext,
+) {
+    assert!(ctx.sender() == @0x0, ENotSystemAddress);
+    let extra_fields = wrapper.load_system_state_mut().extra_fields_mut();
+    let key = AccumulatorStorageCostKey();
+    if (extra_fields.contains(key)) {
+        let existing: &mut u64 = extra_fields.borrow_mut(key);
+        *existing = storage_cost;
+    } else {
+        extra_fields.add(key, storage_cost);
+    };
 }
 
 #[test_only]
@@ -705,7 +770,7 @@ public fun active_validator_by_address(
     self: &mut SuiSystemState,
     validator_address: address,
 ): &Validator {
-    self.validators().get_active_validator_ref(validator_address)
+    self.validators().active_validator(validator_address)
 }
 
 #[test_only]
@@ -714,7 +779,7 @@ public fun pending_validator_by_address(
     self: &mut SuiSystemState,
     validator_address: address,
 ): &Validator {
-    self.validators().get_pending_validator_ref(validator_address)
+    self.validators().pending_validator(validator_address)
 }
 
 #[test_only]
@@ -723,7 +788,7 @@ public fun candidate_validator_by_address(
     self: &mut SuiSystemState,
     validator_address: address,
 ): &Validator {
-    self.validators().get_candidate_validator_ref(validator_address)
+    self.validators_mut().candidate_validator(validator_address)
 }
 
 #[test_only]

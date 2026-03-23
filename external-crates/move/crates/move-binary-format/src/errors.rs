@@ -7,10 +7,25 @@ use crate::{
     file_format::{CodeOffset, FunctionDefinitionIndex, TableIndex},
 };
 use move_core_types::{
+    account_address::AccountAddress,
     language_storage::ModuleId,
     vm_status::{StatusCode, StatusType},
 };
 use std::fmt;
+
+// Controls whether to capture backtraces on error construction in debug builds.
+// We don't want to do this unconditionally in debug builds even if `RUST_BACKTRACE` is set
+// because we may also (and do) use the debug format of the VM errors in the expected values.
+//
+// Instead we condition the backtrace capture on the presence of a dedicated env var along with
+// `RUST_BACKTRACE` being set.
+#[cfg(debug_assertions)]
+static BACKTRACE_ON_ERROR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+#[cfg(debug_assertions)]
+fn backtrace_on_error() -> bool {
+    *BACKTRACE_ON_ERROR.get_or_init(|| std::env::var("MOVE_VM_ERROR_LOCATION").is_ok())
+}
 
 pub type VMResult<T> = ::std::result::Result<T, VMError>;
 pub type BinaryLoaderResult<T> = ::std::result::Result<T, PartialVMError>;
@@ -19,7 +34,10 @@ pub type PartialVMResult<T> = ::std::result::Result<T, PartialVMError>;
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Location {
     Undefined,
+    // The `AccountAddress` inside of the `Module`'s `ModuleId` is the original id
     Module(ModuleId),
+    // The `AccountAddress` inside of the `Package` is the version id of the package
+    Package(AccountAddress),
 }
 
 /// A representation of the execution state (e.g., stack trace) at an
@@ -47,11 +65,13 @@ pub struct VMError(Box<VMError_>);
 struct VMError_ {
     major_status: StatusCode,
     sub_status: Option<u64>,
-    message: Option<String>,
+    message: Option<Box<str>>,
     exec_state: Option<ExecutionState>,
     location: Location,
     indices: Vec<(IndexKind, TableIndex)>,
     offsets: Vec<(FunctionDefinitionIndex, CodeOffset)>,
+    #[cfg(debug_assertions)]
+    backtrace: Option<String>,
 }
 
 impl VMError {
@@ -63,8 +83,8 @@ impl VMError {
         self.0.sub_status
     }
 
-    pub fn message(&self) -> Option<&String> {
-        self.0.message.as_ref()
+    pub fn message(&self) -> Option<&str> {
+        self.0.message.as_ref().map(|s| s.as_ref())
     }
 
     pub fn exec_state(&self) -> Option<&ExecutionState> {
@@ -97,7 +117,7 @@ impl VMError {
     ) -> (
         StatusCode,
         Option<u64>,
-        Option<String>,
+        Option<Box<str>>,
         Option<ExecutionState>,
         Location,
         Vec<(IndexKind, TableIndex)>,
@@ -111,6 +131,8 @@ impl VMError {
             location,
             indices,
             offsets,
+            #[cfg(debug_assertions)]
+                backtrace: _,
         } = *self.0;
         (
             major_status,
@@ -121,26 +143,6 @@ impl VMError {
             indices,
             offsets,
         )
-    }
-
-    pub fn to_partial(self) -> PartialVMError {
-        let VMError_ {
-            major_status,
-            sub_status,
-            message,
-            exec_state,
-            indices,
-            offsets,
-            ..
-        } = *self.0;
-        PartialVMError(Box::new(PartialVMError_ {
-            major_status,
-            sub_status,
-            message,
-            exec_state,
-            indices,
-            offsets,
-        }))
     }
 }
 
@@ -160,6 +162,8 @@ impl fmt::Debug for VMError_ {
             location,
             indices,
             offsets,
+            #[cfg(debug_assertions)]
+            backtrace,
         } = self;
         f.debug_struct("VMError")
             .field("major_status", major_status)
@@ -169,7 +173,15 @@ impl fmt::Debug for VMError_ {
             .field("location", location)
             .field("indices", indices)
             .field("offsets", offsets)
-            .finish()
+            .finish()?;
+
+        #[cfg(debug_assertions)]
+        if let Some(backtrace) = backtrace {
+            writeln!(f, "\nError construction location backtrace:")?;
+            writeln!(f, "{}", backtrace)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -182,10 +194,12 @@ pub struct PartialVMError(Box<PartialVMError_>);
 struct PartialVMError_ {
     major_status: StatusCode,
     sub_status: Option<u64>,
-    message: Option<String>,
+    message: Option<Box<str>>,
     exec_state: Option<ExecutionState>,
     indices: Vec<(IndexKind, TableIndex)>,
     offsets: Vec<(FunctionDefinitionIndex, CodeOffset)>,
+    #[cfg(debug_assertions)]
+    backtrace: Option<String>,
 }
 
 impl PartialVMError {
@@ -195,7 +209,7 @@ impl PartialVMError {
     ) -> (
         StatusCode,
         Option<u64>,
-        Option<String>,
+        Option<Box<str>>,
         Option<ExecutionState>,
         Vec<(IndexKind, TableIndex)>,
         Vec<(FunctionDefinitionIndex, CodeOffset)>,
@@ -207,6 +221,8 @@ impl PartialVMError {
             exec_state,
             indices,
             offsets,
+            #[cfg(debug_assertions)]
+                backtrace: _,
         } = *self.0;
         (
             major_status,
@@ -226,6 +242,8 @@ impl PartialVMError {
             exec_state,
             indices,
             offsets,
+            #[cfg(debug_assertions)]
+            backtrace,
         } = *self.0;
         VMError(Box::new(VMError_ {
             major_status,
@@ -235,10 +253,25 @@ impl PartialVMError {
             location,
             indices,
             offsets,
+            #[cfg(debug_assertions)]
+            backtrace,
         }))
     }
 
     pub fn new(major_status: StatusCode) -> Self {
+        #[cfg(debug_assertions)]
+        let backtrace = {
+            if !backtrace_on_error() {
+                None
+            } else {
+                let bt = std::backtrace::Backtrace::capture();
+                if bt.status() == std::backtrace::BacktraceStatus::Captured {
+                    Some(format!("{}", bt))
+                } else {
+                    None
+                }
+            }
+        };
         Self(Box::new(PartialVMError_ {
             major_status,
             sub_status: None,
@@ -246,6 +279,8 @@ impl PartialVMError {
             exec_state: None,
             indices: vec![],
             offsets: vec![],
+            #[cfg(debug_assertions)]
+            backtrace,
         }))
     }
 
@@ -259,9 +294,9 @@ impl PartialVMError {
         self
     }
 
-    pub fn with_message(mut self, message: String) -> Self {
+    pub fn with_message(mut self, message: impl Into<Box<str>>) -> Self {
         debug_assert!(self.0.message.is_none());
-        self.0.message = Some(message);
+        self.0.message = Some(message.into());
         self
     }
 
@@ -299,14 +334,16 @@ impl PartialVMError {
     pub fn append_message_with_separator(
         mut self,
         separator: char,
-        additional_message: String,
+        additional_message: impl Into<Box<str>>,
     ) -> Self {
+        let additional_message = additional_message.into();
         match self.0.message.as_mut() {
             Some(msg) => {
                 if !msg.is_empty() {
-                    msg.push(separator);
+                    *msg = format!("{msg}{separator}{additional_message}").into();
+                } else {
+                    *msg = additional_message;
                 }
-                msg.push_str(&additional_message);
             }
             None => self.0.message = Some(additional_message),
         };
@@ -319,6 +356,7 @@ impl fmt::Display for Location {
         match self {
             Location::Undefined => write!(f, "UNDEFINED"),
             Location::Module(id) => write!(f, "Module {:?}", id),
+            Location::Package(addr) => write!(f, "Package {:?}", addr),
         }
     }
 }
@@ -432,6 +470,8 @@ impl fmt::Debug for PartialVMError_ {
             exec_state,
             indices,
             offsets,
+            #[cfg(debug_assertions)]
+            backtrace,
         } = self;
         f.debug_struct("PartialVMError")
             .field("major_status", major_status)
@@ -440,7 +480,15 @@ impl fmt::Debug for PartialVMError_ {
             .field("exec_state", exec_state)
             .field("indices", indices)
             .field("offsets", offsets)
-            .finish()
+            .finish()?;
+
+        #[cfg(debug_assertions)]
+        if let Some(backtrace) = backtrace {
+            writeln!(f, "\nError construction location backtrace:")?;
+            writeln!(f, "{}", backtrace)?;
+        }
+
+        Ok(())
     }
 }
 

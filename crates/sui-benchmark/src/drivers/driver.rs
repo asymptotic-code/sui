@@ -4,9 +4,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::ValidatorProxy;
 use crate::drivers::Interval;
 use crate::system_state_observer::SystemStateObserver;
-use crate::ValidatorProxy;
 use async_trait::async_trait;
 use prometheus::Registry;
 
@@ -16,7 +16,8 @@ use crate::workloads::{GroupID, WorkloadInfo};
 pub trait Driver<T> {
     async fn run(
         &self,
-        proxies: Vec<Arc<dyn ValidatorProxy + Send + Sync>>,
+        execution_proxies: Vec<Arc<dyn ValidatorProxy + Send + Sync>>,
+        fullnode_proxies: Vec<Arc<dyn ValidatorProxy + Send + Sync>>,
         workloads_by_group_id: BTreeMap<GroupID, Vec<WorkloadInfo>>,
         system_state_observer: Arc<SystemStateObserver>,
         registry: &Registry,

@@ -6,18 +6,22 @@ pub use checked::*;
 #[sui_macros::with_checked_arithmetic]
 mod checked {
 
+    use crate::adapter::new_move_runtime;
     use crate::execution_mode::{self, ExecutionMode};
     use crate::execution_value::SuiResolver;
+    use crate::gas_charger::{PaymentKind, PaymentMethod};
     use move_binary_format::CompiledModule;
     use move_trace_format::format::MoveTraceBuilder;
-    use move_vm_runtime::move_vm::MoveVM;
+    use move_vm_runtime::runtime::MoveRuntime;
     use mysten_common::debug_fatal;
+    use std::collections::BTreeMap;
     use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::Arc};
     use sui_types::accumulator_root::{ACCUMULATOR_ROOT_CREATE_FUNC, ACCUMULATOR_ROOT_MODULE};
     use sui_types::balance::{
         BALANCE_CREATE_REWARDS_FUNCTION_NAME, BALANCE_DESTROY_REBATES_FUNCTION_NAME,
         BALANCE_MODULE_NAME,
     };
+    use sui_types::coin_reservation::ParsedDigest;
     use sui_types::execution_params::ExecutionOrEarlyError;
     use sui_types::gas_coin::GAS;
     use sui_types::messages_checkpoint::CheckpointTimestamp;
@@ -31,8 +35,7 @@ mod checked {
     use sui_types::{BRIDGE_ADDRESS, SUI_BRIDGE_OBJECT_ID, SUI_RANDOMNESS_STATE_OBJECT_ID};
     use tracing::{info, instrument, trace, warn};
 
-    use crate::adapter::new_move_vm;
-    use crate::programmable_transactions;
+    use crate::static_programmable_transactions as SPT;
     use crate::sui_types::gas::SuiGasStatusAPI;
     use crate::type_layout_resolver::TypeLayoutResolver;
     use crate::{gas_charger::GasCharger, temporary_store::TemporaryStore};
@@ -58,10 +61,9 @@ mod checked {
         ChainIdentifier, get_mainnet_chain_identifier, get_testnet_chain_identifier,
     };
     use sui_types::effects::TransactionEffects;
-    use sui_types::error::{ExecutionError, ExecutionErrorKind};
+    use sui_types::error::ExecutionError;
     use sui_types::execution::{ExecutionTiming, ResultWithTimings};
-    use sui_types::execution_config_utils::to_binary_config;
-    use sui_types::execution_status::ExecutionStatus;
+    use sui_types::execution_status::{ExecutionErrorKind, ExecutionStatus};
     use sui_types::gas::GasCostSummary;
     use sui_types::gas::SuiGasStatus;
     use sui_types::id::UID;
@@ -74,6 +76,7 @@ mod checked {
         Argument, AuthenticatorStateExpire, AuthenticatorStateUpdate, CallArg, ChangeEpoch,
         Command, EndOfEpochTransactionKind, GasData, GenesisTransaction, ObjectArg,
         ProgrammableTransaction, StoredExecutionTimeObservations, TransactionKind,
+        WriteAccumulatorStorageCost,
     };
     use sui_types::transaction::{CheckedInputObjects, RandomnessStateUpdate};
     use sui_types::{
@@ -84,6 +87,34 @@ mod checked {
         sui_system_state::{ADVANCE_EPOCH_FUNCTION_NAME, SUI_SYSTEM_MODULE_NAME},
     };
 
+    fn payment_kind(gas_data: &GasData, transaction_kind: &TransactionKind) -> PaymentKind {
+        if gas_data.is_unmetered() || transaction_kind.is_system_tx() {
+            PaymentKind::unmetered()
+        } else if gas_data.payment.is_empty() {
+            PaymentKind::smash(vec![PaymentMethod::AddressBalance(
+                gas_data.owner,
+                gas_data.budget,
+            )])
+            .expect("unable to create a payment kind with a single address balance")
+        } else {
+            let payment_methods = gas_data
+                .payment
+                .iter()
+                .map(|entry| {
+                    if let Ok(parsed) = ParsedDigest::try_from(entry.2) {
+                        PaymentMethod::AddressBalance(gas_data.owner, parsed.reservation_amount())
+                    } else {
+                        PaymentMethod::Coin(*entry)
+                    }
+                })
+                .collect();
+            PaymentKind::smash(payment_methods).expect(
+                "unable to create a payment kind from payment methods. \
+                 Should not be possible wit ha non-empty vector",
+            )
+        }
+    }
+
     #[instrument(name = "tx_execute_to_effects", level = "debug", skip_all)]
     pub fn execute_transaction_to_effects<Mode: ExecutionMode>(
         store: &dyn BackingStore,
@@ -93,7 +124,7 @@ mod checked {
         transaction_kind: TransactionKind,
         transaction_signer: SuiAddress,
         transaction_digest: TransactionDigest,
-        move_vm: &Arc<MoveVM>,
+        move_vm: &Arc<MoveRuntime>,
         epoch_id: &EpochId,
         epoch_timestamp_ms: u64,
         protocol_config: &ProtocolConfig,
@@ -110,7 +141,7 @@ mod checked {
     ) {
         let input_objects = input_objects.into_inner();
         let mutable_inputs = if enable_expensive_checks {
-            input_objects.mutable_inputs().keys().copied().collect()
+            input_objects.all_mutable_inputs().keys().copied().collect()
         } else {
             HashSet::new()
         };
@@ -137,10 +168,12 @@ mod checked {
         };
         let gas_price = gas_status.gas_price();
         let rgp = gas_status.reference_gas_price();
+
         let mut gas_charger = GasCharger::new(
             transaction_digest,
-            gas_data.payment,
+            payment_kind(&gas_data, &transaction_kind),
             gas_status,
+            &mut temporary_store,
             protocol_config,
         );
 
@@ -178,21 +211,11 @@ mod checked {
             use ExecutionErrorKind as K;
             match error.kind() {
                 K::InvariantViolation | K::VMInvariantViolation => {
-                    if protocol_config.debug_fatal_on_move_invariant_violation() {
-                        debug_fatal!(
-                            "INVARIANT VIOLATION! Txn Digest: {}, Source: {:?}",
-                            transaction_digest,
-                            error.source(),
-                        );
-                    } else {
-                        #[skip_checked_arithmetic]
-                        tracing::error!(
-                            kind = ?error.kind(),
-                            tx_digest = ?transaction_digest,
-                            "INVARIANT VIOLATION! Source: {:?}",
-                            error.source(),
-                        );
-                    }
+                    debug_fatal!(
+                        "INVARIANT VIOLATION! Txn Digest: {}, Source: {:?}",
+                        transaction_digest,
+                        error.source(),
+                    );
                 }
 
                 K::SuiMoveVerificationError | K::VMVerificationOrDeserializationError => {
@@ -243,6 +266,7 @@ mod checked {
             temporary_store
                 .check_ownership_invariants(
                     &transaction_signer,
+                    &sponsor,
                     &mut gas_charger,
                     &mutable_inputs,
                     is_epoch_change,
@@ -273,7 +297,7 @@ mod checked {
         store: &dyn BackingStore,
         protocol_config: &ProtocolConfig,
         metrics: Arc<LimitsMetrics>,
-        move_vm: &Arc<MoveVM>,
+        move_vm: &Arc<MoveRuntime>,
         tx_context: Rc<RefCell<TxContext>>,
         input_objects: CheckedInputObjects,
         pt: ProgrammableTransaction,
@@ -288,7 +312,7 @@ mod checked {
             0,
         );
         let mut gas_charger = GasCharger::new_unmetered(tx_context.borrow().digest());
-        programmable_transactions::execution::execute::<execution_mode::Genesis>(
+        SPT::execute::<execution_mode::Genesis>(
             protocol_config,
             metrics,
             move_vm,
@@ -296,12 +320,13 @@ mod checked {
             store.as_backing_package_store(),
             tx_context,
             &mut gas_charger,
+            None,
             pt,
             &mut None,
         )
         .map_err(|(e, _)| e)?;
         temporary_store.update_object_version_and_prev_tx();
-        Ok(temporary_store.into_inner())
+        Ok(temporary_store.into_inner(BTreeMap::new()))
     }
 
     #[instrument(name = "tx_execute", level = "debug", skip_all)]
@@ -311,7 +336,7 @@ mod checked {
         transaction_kind: TransactionKind,
         gas_charger: &mut GasCharger,
         tx_ctx: Rc<RefCell<TxContext>>,
-        move_vm: &Arc<MoveVM>,
+        move_vm: &Arc<MoveRuntime>,
         protocol_config: &ProtocolConfig,
         metrics: Arc<LimitsMetrics>,
         enable_expensive_checks: bool,
@@ -322,8 +347,6 @@ mod checked {
         Result<Mode::ExecutionResults, ExecutionError>,
         Vec<ExecutionTiming>,
     ) {
-        gas_charger.smash_gas(temporary_store);
-
         // At this point no charges have been applied yet
         debug_assert!(
             gas_charger.no_charges(),
@@ -372,7 +395,7 @@ mod checked {
                     }
 
                     if execution_result.is_ok() {
-                        let gas_check = check_written_objects_limit::<Mode>(
+                        let gas_check = check_written_objects_limit(
                             temporary_store,
                             gas_charger,
                             protocol_config,
@@ -425,7 +448,7 @@ mod checked {
         temporary_store: &mut TemporaryStore<'_>,
         gas_charger: &mut GasCharger,
         tx_digest: TransactionDigest,
-        move_vm: &Arc<MoveVM>,
+        move_vm: &Arc<MoveRuntime>,
         simple_conservation_checks: bool,
         enable_expensive_checks: bool,
         cost_summary: &GasCostSummary,
@@ -459,7 +482,7 @@ mod checked {
                 result = Err(conservation_err);
                 gas_charger.reset(temporary_store);
                 gas_charger.charge_gas(temporary_store, &mut result);
-                // check conservation once more more
+                // check conservation once more
                 if let Err(recovery_err) = {
                     temporary_store
                         .check_sui_conserved(simple_conservation_checks, cost_summary)
@@ -533,7 +556,7 @@ mod checked {
     }
 
     #[instrument(name = "check_written_objects_limit", level = "debug", skip_all)]
-    fn check_written_objects_limit<Mode: ExecutionMode>(
+    fn check_written_objects_limit(
         temporary_store: &mut TemporaryStore<'_>,
         gas_charger: &mut GasCharger,
         protocol_config: &ProtocolConfig,
@@ -581,7 +604,7 @@ mod checked {
         temporary_store: &mut TemporaryStore<'_>,
         transaction_kind: TransactionKind,
         tx_ctx: Rc<RefCell<TxContext>>,
-        move_vm: &Arc<MoveVM>,
+        move_vm: &Arc<MoveRuntime>,
         gas_charger: &mut GasCharger,
         protocol_config: &ProtocolConfig,
         metrics: Arc<LimitsMetrics>,
@@ -685,21 +708,20 @@ mod checked {
                 .expect("ConsensusCommitPrologue cannot fail");
                 Ok((Mode::empty_results(), vec![]))
             }
-            TransactionKind::ProgrammableTransaction(pt) => {
-                programmable_transactions::execution::execute::<Mode>(
-                    protocol_config,
-                    metrics,
-                    move_vm,
-                    temporary_store,
-                    store.as_backing_package_store(),
-                    tx_ctx,
-                    gas_charger,
-                    pt,
-                    trace_builder_opt,
-                )
-            }
+            TransactionKind::ProgrammableTransaction(pt) => SPT::execute::<Mode>(
+                protocol_config,
+                metrics,
+                move_vm,
+                temporary_store,
+                store.as_backing_package_store(),
+                tx_ctx,
+                gas_charger,
+                None,
+                pt,
+                trace_builder_opt,
+            ),
             TransactionKind::ProgrammableSystemTransaction(pt) => {
-                programmable_transactions::execution::execute::<execution_mode::System>(
+                SPT::execute::<execution_mode::System>(
                     protocol_config,
                     metrics,
                     move_vm,
@@ -707,6 +729,7 @@ mod checked {
                     store.as_backing_package_store(),
                     tx_ctx,
                     gas_charger,
+                    None,
                     pt,
                     trace_builder_opt,
                 )?;
@@ -763,15 +786,43 @@ mod checked {
                             builder = setup_bridge_committee_update(builder, bridge_shared_version)
                         }
                         EndOfEpochTransactionKind::StoreExecutionTimeObservations(estimates) => {
-                            assert!(matches!(
-                                protocol_config.per_object_congestion_control_mode(),
-                                PerObjectCongestionControlMode::ExecutionTimeEstimate(_)
-                            ));
-                            builder = setup_store_execution_time_estimates(builder, estimates);
+                            if let PerObjectCongestionControlMode::ExecutionTimeEstimate(params) =
+                                protocol_config.per_object_congestion_control_mode()
+                            {
+                                if let Some(chunk_size) = params.observations_chunk_size {
+                                    builder = setup_store_execution_time_estimates_v2(
+                                        builder,
+                                        estimates,
+                                        chunk_size as usize,
+                                    );
+                                } else {
+                                    builder =
+                                        setup_store_execution_time_estimates(builder, estimates);
+                                }
+                            }
                         }
                         EndOfEpochTransactionKind::AccumulatorRootCreate => {
-                            assert!(protocol_config.enable_accumulators());
+                            assert!(protocol_config.create_root_accumulator_object());
                             builder = setup_accumulator_root_create(builder);
+                        }
+                        EndOfEpochTransactionKind::WriteAccumulatorStorageCost(
+                            write_storage_cost,
+                        ) => {
+                            assert!(protocol_config.enable_accumulators());
+                            builder =
+                                setup_write_accumulator_storage_cost(builder, &write_storage_cost);
+                        }
+                        EndOfEpochTransactionKind::CoinRegistryCreate => {
+                            assert!(protocol_config.enable_coin_registry());
+                            builder = setup_coin_registry_create(builder);
+                        }
+                        EndOfEpochTransactionKind::DisplayRegistryCreate => {
+                            assert!(protocol_config.enable_display_registry());
+                            builder = setup_display_registry_create(builder);
+                        }
+                        EndOfEpochTransactionKind::AddressAliasStateCreate => {
+                            assert!(protocol_config.address_aliases());
+                            builder = setup_address_alias_state_create(builder);
                         }
                     }
                 }
@@ -903,7 +954,6 @@ mod checked {
 
     pub fn construct_advance_epoch_safe_mode_pt(
         params: &AdvanceEpochParams,
-        protocol_config: &ProtocolConfig,
     ) -> Result<ProgrammableTransaction, ExecutionError> {
         let mut builder = ProgrammableTransactionBuilder::new();
         // Step 1: Create storage and computation rewards.
@@ -920,11 +970,9 @@ mod checked {
             CallArg::Pure(bcs::to_bytes(&params.non_refundable_storage_fee).unwrap()),
         ];
 
-        if protocol_config.get_advance_epoch_start_time_in_safe_mode() {
-            args.push(CallArg::Pure(
-                bcs::to_bytes(&params.epoch_start_timestamp_ms).unwrap(),
-            ));
-        }
+        args.push(CallArg::Pure(
+            bcs::to_bytes(&params.epoch_start_timestamp_ms).unwrap(),
+        ));
 
         let call_arg_arguments = args
             .into_iter()
@@ -957,7 +1005,7 @@ mod checked {
         temporary_store: &mut TemporaryStore<'_>,
         store: &dyn BackingStore,
         tx_ctx: Rc<RefCell<TxContext>>,
-        move_vm: &Arc<MoveVM>,
+        move_vm: &Arc<MoveRuntime>,
         gas_charger: &mut GasCharger,
         protocol_config: &ProtocolConfig,
         metrics: Arc<LimitsMetrics>,
@@ -975,7 +1023,7 @@ mod checked {
             epoch_start_timestamp_ms: change_epoch.epoch_start_timestamp_ms,
         };
         let advance_epoch_pt = construct_advance_epoch_pt(builder, &params)?;
-        let result = programmable_transactions::execution::execute::<execution_mode::System>(
+        let result = SPT::execute::<execution_mode::System>(
             protocol_config,
             metrics.clone(),
             move_vm,
@@ -983,6 +1031,7 @@ mod checked {
             store.as_backing_package_store(),
             tx_ctx.clone(),
             gas_charger,
+            None,
             advance_epoch_pt,
             trace_builder_opt,
         );
@@ -1001,58 +1050,25 @@ mod checked {
             // Must reset the storage rebate since we are re-executing.
             gas_charger.reset_storage_cost_and_rebate();
 
-            if protocol_config.get_advance_epoch_start_time_in_safe_mode() {
-                temporary_store.advance_epoch_safe_mode(&params, protocol_config);
-            } else {
-                let advance_epoch_safe_mode_pt =
-                    construct_advance_epoch_safe_mode_pt(&params, protocol_config)?;
-                programmable_transactions::execution::execute::<execution_mode::System>(
-                    protocol_config,
-                    metrics.clone(),
-                    move_vm,
-                    temporary_store,
-                    store.as_backing_package_store(),
-                    tx_ctx.clone(),
-                    gas_charger,
-                    advance_epoch_safe_mode_pt,
-                    trace_builder_opt,
-                )
-                .map_err(|(e, _)| e)
-                .expect("Advance epoch with safe mode must succeed");
-            }
+            temporary_store.advance_epoch_safe_mode(&params, protocol_config);
         }
 
-        if protocol_config.fresh_vm_on_framework_upgrade() {
-            let new_vm = new_move_vm(
-                all_natives(/* silent */ true, protocol_config),
-                protocol_config,
-                /* enable_profiler */ None,
-            )
-            .expect("Failed to create new MoveVM");
-            process_system_packages(
-                change_epoch,
-                temporary_store,
-                store,
-                tx_ctx,
-                &new_vm,
-                gas_charger,
-                protocol_config,
-                metrics,
-                trace_builder_opt,
-            );
-        } else {
-            process_system_packages(
-                change_epoch,
-                temporary_store,
-                store,
-                tx_ctx,
-                move_vm,
-                gas_charger,
-                protocol_config,
-                metrics,
-                trace_builder_opt,
-            );
-        }
+        let new_vm = new_move_runtime(
+            all_natives(/* silent */ true, protocol_config),
+            protocol_config,
+        )
+        .expect("Failed to create new MoveRuntime");
+        process_system_packages(
+            change_epoch,
+            temporary_store,
+            store,
+            tx_ctx,
+            &new_vm,
+            gas_charger,
+            protocol_config,
+            metrics,
+            trace_builder_opt,
+        );
         Ok(())
     }
 
@@ -1061,14 +1077,14 @@ mod checked {
         temporary_store: &mut TemporaryStore<'_>,
         store: &dyn BackingStore,
         tx_ctx: Rc<RefCell<TxContext>>,
-        move_vm: &MoveVM,
+        move_vm: &MoveRuntime,
         gas_charger: &mut GasCharger,
         protocol_config: &ProtocolConfig,
         metrics: Arc<LimitsMetrics>,
         trace_builder_opt: &mut Option<MoveTraceBuilder>,
     ) {
         let digest = tx_ctx.borrow().digest();
-        let binary_config = to_binary_config(protocol_config);
+        let binary_config = protocol_config.binary_config(None);
         for (version, modules, dependencies) in change_epoch.system_packages.into_iter() {
             let deserialized_modules: Vec<_> = modules
                 .iter()
@@ -1085,7 +1101,7 @@ mod checked {
                     b.finish()
                 };
 
-                programmable_transactions::execution::execute::<execution_mode::System>(
+                SPT::execute::<execution_mode::System>(
                     protocol_config,
                     metrics.clone(),
                     move_vm,
@@ -1093,6 +1109,7 @@ mod checked {
                     store.as_backing_package_store(),
                     tx_ctx.clone(),
                     gas_charger,
+                    None,
                     publish_pt,
                     trace_builder_opt,
                 )
@@ -1134,7 +1151,7 @@ mod checked {
         temporary_store: &mut TemporaryStore<'_>,
         store: &dyn BackingStore,
         tx_ctx: Rc<RefCell<TxContext>>,
-        move_vm: &Arc<MoveVM>,
+        move_vm: &Arc<MoveRuntime>,
         gas_charger: &mut GasCharger,
         protocol_config: &ProtocolConfig,
         metrics: Arc<LimitsMetrics>,
@@ -1158,7 +1175,7 @@ mod checked {
             );
             builder.finish()
         };
-        programmable_transactions::execution::execute::<execution_mode::System>(
+        SPT::execute::<execution_mode::System>(
             protocol_config,
             metrics,
             move_vm,
@@ -1166,6 +1183,7 @@ mod checked {
             store.as_backing_package_store(),
             tx_ctx,
             gas_charger,
+            None,
             pt,
             trace_builder_opt,
         )
@@ -1239,7 +1257,7 @@ mod checked {
             .obj(ObjectArg::SharedObject {
                 id: SUI_BRIDGE_OBJECT_ID,
                 initial_shared_version: bridge_shared_version,
-                mutable: true,
+                mutability: sui_types::transaction::SharedObjectMutability::Mutable,
             })
             .expect("Unable to create Bridge object arg!");
         let system_state = builder
@@ -1277,7 +1295,7 @@ mod checked {
         temporary_store: &mut TemporaryStore<'_>,
         store: &dyn BackingStore,
         tx_ctx: Rc<RefCell<TxContext>>,
-        move_vm: &Arc<MoveVM>,
+        move_vm: &Arc<MoveRuntime>,
         gas_charger: &mut GasCharger,
         protocol_config: &ProtocolConfig,
         metrics: Arc<LimitsMetrics>,
@@ -1294,7 +1312,7 @@ mod checked {
                     CallArg::Object(ObjectArg::SharedObject {
                         id: SUI_AUTHENTICATOR_STATE_OBJECT_ID,
                         initial_shared_version: update.authenticator_obj_initial_shared_version,
-                        mutable: true,
+                        mutability: sui_types::transaction::SharedObjectMutability::Mutable,
                     }),
                     CallArg::Pure(bcs::to_bytes(&update.new_active_jwks).unwrap()),
                 ],
@@ -1305,7 +1323,7 @@ mod checked {
             );
             builder.finish()
         };
-        programmable_transactions::execution::execute::<execution_mode::System>(
+        SPT::execute::<execution_mode::System>(
             protocol_config,
             metrics,
             move_vm,
@@ -1313,6 +1331,7 @@ mod checked {
             store.as_backing_package_store(),
             tx_ctx,
             gas_charger,
+            None,
             pt,
             trace_builder_opt,
         )
@@ -1334,7 +1353,7 @@ mod checked {
                     CallArg::Object(ObjectArg::SharedObject {
                         id: SUI_AUTHENTICATOR_STATE_OBJECT_ID,
                         initial_shared_version: expire.authenticator_obj_initial_shared_version,
-                        mutable: true,
+                        mutability: sui_types::transaction::SharedObjectMutability::Mutable,
                     }),
                     CallArg::Pure(bcs::to_bytes(&expire.min_epoch).unwrap()),
                 ],
@@ -1348,7 +1367,7 @@ mod checked {
         temporary_store: &mut TemporaryStore<'_>,
         store: &dyn BackingStore,
         tx_ctx: Rc<RefCell<TxContext>>,
-        move_vm: &Arc<MoveVM>,
+        move_vm: &Arc<MoveRuntime>,
         gas_charger: &mut GasCharger,
         protocol_config: &ProtocolConfig,
         metrics: Arc<LimitsMetrics>,
@@ -1365,7 +1384,7 @@ mod checked {
                     CallArg::Object(ObjectArg::SharedObject {
                         id: SUI_RANDOMNESS_STATE_OBJECT_ID,
                         initial_shared_version: update.randomness_obj_initial_shared_version,
-                        mutable: true,
+                        mutability: sui_types::transaction::SharedObjectMutability::Mutable,
                     }),
                     CallArg::Pure(bcs::to_bytes(&update.randomness_round).unwrap()),
                     CallArg::Pure(bcs::to_bytes(&update.random_bytes).unwrap()),
@@ -1377,7 +1396,7 @@ mod checked {
             );
             builder.finish()
         };
-        programmable_transactions::execution::execute::<execution_mode::System>(
+        SPT::execute::<execution_mode::System>(
             protocol_config,
             metrics,
             move_vm,
@@ -1385,6 +1404,7 @@ mod checked {
             store.as_backing_package_store(),
             tx_ctx,
             gas_charger,
+            None,
             pt,
             trace_builder_opt,
         )
@@ -1426,6 +1446,32 @@ mod checked {
         builder
     }
 
+    fn setup_store_execution_time_estimates_v2(
+        mut builder: ProgrammableTransactionBuilder,
+        estimates: StoredExecutionTimeObservations,
+        chunk_size: usize,
+    ) -> ProgrammableTransactionBuilder {
+        let system_state = builder.obj(ObjectArg::SUI_SYSTEM_MUT).unwrap();
+
+        let estimate_chunks = estimates.chunk_observations(chunk_size);
+
+        let chunk_bytes: Vec<Vec<u8>> = estimate_chunks
+            .into_iter()
+            .map(|chunk| bcs::to_bytes(&chunk).unwrap())
+            .collect();
+
+        let chunks_arg = builder.pure(chunk_bytes).unwrap();
+
+        builder.programmable_move_call(
+            SUI_SYSTEM_PACKAGE_ID,
+            SUI_SYSTEM_MODULE_NAME.to_owned(),
+            ident_str!("store_execution_time_estimates_v2").to_owned(),
+            vec![],
+            vec![system_state, chunks_arg],
+        );
+        builder
+    }
+
     fn setup_accumulator_root_create(
         mut builder: ProgrammableTransactionBuilder,
     ) -> ProgrammableTransactionBuilder {
@@ -1438,6 +1484,67 @@ mod checked {
                 vec![],
             )
             .expect("Unable to generate accumulator_root_create transaction!");
+        builder
+    }
+
+    fn setup_write_accumulator_storage_cost(
+        mut builder: ProgrammableTransactionBuilder,
+        write_storage_cost: &WriteAccumulatorStorageCost,
+    ) -> ProgrammableTransactionBuilder {
+        let system_state = builder.obj(ObjectArg::SUI_SYSTEM_MUT).unwrap();
+        let storage_cost_arg = builder.pure(write_storage_cost.storage_cost).unwrap();
+        builder.programmable_move_call(
+            SUI_SYSTEM_PACKAGE_ID,
+            SUI_SYSTEM_MODULE_NAME.to_owned(),
+            ident_str!("write_accumulator_storage_cost").to_owned(),
+            vec![],
+            vec![system_state, storage_cost_arg],
+        );
+        builder
+    }
+
+    fn setup_coin_registry_create(
+        mut builder: ProgrammableTransactionBuilder,
+    ) -> ProgrammableTransactionBuilder {
+        builder
+            .move_call(
+                SUI_FRAMEWORK_ADDRESS.into(),
+                ident_str!("coin_registry").to_owned(),
+                ident_str!("create").to_owned(),
+                vec![],
+                vec![],
+            )
+            .expect("Unable to generate coin_registry_create transaction!");
+        builder
+    }
+
+    fn setup_display_registry_create(
+        mut builder: ProgrammableTransactionBuilder,
+    ) -> ProgrammableTransactionBuilder {
+        builder
+            .move_call(
+                SUI_FRAMEWORK_ADDRESS.into(),
+                ident_str!("display_registry").to_owned(),
+                ident_str!("create").to_owned(),
+                vec![],
+                vec![],
+            )
+            .expect("Unable to generate display_registry_create transaction!");
+        builder
+    }
+
+    fn setup_address_alias_state_create(
+        mut builder: ProgrammableTransactionBuilder,
+    ) -> ProgrammableTransactionBuilder {
+        builder
+            .move_call(
+                SUI_FRAMEWORK_ADDRESS.into(),
+                ident_str!("address_alias").to_owned(),
+                ident_str!("create").to_owned(),
+                vec![],
+                vec![],
+            )
+            .expect("Unable to generate address_alias_state_create transaction!");
         builder
     }
 }

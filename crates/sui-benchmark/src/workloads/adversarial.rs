@@ -2,34 +2,35 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    workload::{Workload, WorkloadBuilder, MAX_GAS_FOR_TESTING},
     WorkloadBuilderInfo, WorkloadParams,
+    workload::{MAX_GAS_FOR_TESTING, Workload, WorkloadBuilder},
 };
+use crate::ProgrammableTransactionBuilder;
 use crate::drivers::Interval;
-use crate::in_memory_wallet::move_call_pt_impl;
 use crate::in_memory_wallet::InMemoryWallet;
+use crate::in_memory_wallet::move_call_pt_impl;
 use crate::system_state_observer::{SystemState, SystemStateObserver};
 use crate::workloads::benchmark_move_base_dir;
 use crate::workloads::payload::Payload;
-use crate::workloads::{workload::ExpectedFailureType, Gas, GasCoinConfig};
-use crate::ProgrammableTransactionBuilder;
-use crate::{convert_move_call_args, BenchMoveCallArg, ExecutionEffects, ValidatorProxy};
+use crate::workloads::{Gas, GasCoinConfig, workload::ExpectedFailureType};
+use crate::{BenchMoveCallArg, ExecutionEffects, ValidatorProxy, convert_move_call_args};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use move_core_types::identifier::Identifier;
-use rand::distributions::{Distribution, Standard};
 use rand::Rng;
+use rand::distributions::{Distribution, Standard};
 use regex::Regex;
 use std::str::FromStr;
 use std::sync::Arc;
 use strum::{EnumCount, IntoEnumIterator};
 use strum_macros::{EnumCount as EnumCountMacro, EnumIter};
+use sui_move_build::{BuildConfig, CompiledPackage};
 use sui_protocol_config::ProtocolConfig;
-use sui_test_transaction_builder::TestTransactionBuilder;
-use sui_types::base_types::{random_object_ref, ObjectRef};
+use sui_test_transaction_builder::{PublishData, TestTransactionBuilder};
+use sui_types::base_types::{ObjectRef, random_object_ref};
 use sui_types::effects::TransactionEffectsAPI;
 use sui_types::transaction::Command;
-use sui_types::transaction::{CallArg, ObjectArg};
+use sui_types::transaction::{CallArg, ObjectArg, SharedObjectMutability};
 use sui_types::{base_types::ObjectID, object::Owner};
 use sui_types::{base_types::SuiAddress, crypto::get_key_pair, transaction::Transaction};
 use sui_types::{transaction::TransactionData, utils::to_sender_signed_transaction};
@@ -116,6 +117,8 @@ pub struct AdversarialTestPayload {
     state: InMemoryWallet,
     system_state_observer: Arc<SystemStateObserver>,
     adversarial_payload_cfg: AdversarialPayloadCfg,
+    /// The really big package used for MaxPackagePublish workload.
+    max_package_published_compiled: CompiledPackage,
 }
 
 impl std::fmt::Display for AdversarialTestPayload {
@@ -164,7 +167,7 @@ impl Payload for AdversarialTestPayload {
         // Sometimes useful when figuring out why things failed
         let stat = match effects {
             ExecutionEffects::FinalizedTransactionEffects(e, _) => e.data().status(),
-            ExecutionEffects::SuiTransactionBlockEffects(_) => unimplemented!("Not impl"),
+            ExecutionEffects::ExecutedTransaction(txn) => txn.effects.status(),
         };
 
         debug_assert!(
@@ -243,10 +246,10 @@ impl AdversarialTestPayload {
                 to_sender_signed_transaction(data, account.key())
             }
             AdversarialPayloadType::MaxPackagePublish => {
-                let mut path = benchmark_move_base_dir();
-                path.push("src/workloads/data/max_package");
                 TestTransactionBuilder::new(self.sender, account.gas, gas_price)
-                    .publish(path)
+                    .publish_with_data(PublishData::CompiledPackage(
+                        self.max_package_published_compiled.clone(),
+                    ))
                     .build_and_sign(account.key())
             }
             _ => self.state.move_call_pt(
@@ -294,7 +297,7 @@ impl AdversarialTestPayload {
                     CallArg::Object(ObjectArg::SharedObject {
                         id: self.df_parent_obj_ref.0,
                         initial_shared_version: self.df_parent_obj_ref.1,
-                        mutable: true,
+                        mutability: SharedObjectMutability::Mutable,
                     })
                     .into(),
                     self.get_pct_of(protocol_config.object_runtime_max_num_store_entries())
@@ -457,7 +460,8 @@ pub struct AdversarialWorkload {
 impl Workload<dyn Payload> for AdversarialWorkload {
     async fn init(
         &mut self,
-        proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        execution_proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        _fullnode_proxies: Vec<Arc<dyn ValidatorProxy + Sync + Send>>,
         system_state_observer: Arc<SystemStateObserver>,
     ) {
         let gas = &self.init_gas;
@@ -466,14 +470,16 @@ impl Workload<dyn Payload> for AdversarialWorkload {
         let SystemState {
             reference_gas_price,
             protocol_config,
+            ..
         } = system_state_observer.state.borrow().clone();
         let protocol_config = protocol_config.unwrap();
         let gas_budget = protocol_config.max_tx_gas();
         let transaction = TestTransactionBuilder::new(gas.1, gas.0, reference_gas_price)
-            .publish(path)
+            .publish_async(path)
+            .await
             .build_and_sign(gas.2.as_ref());
 
-        let (_, execution_result) = proxy.execute_transaction_block(transaction).await;
+        let (_, execution_result) = execution_proxy.execute_transaction_block(transaction).await;
         let effects = execution_result.unwrap();
         let created = effects.created();
         // should only create the package object, upgrade cap, dynamic field top level obj, and NUM_DYNAMIC_FIELDS df objects. otherwise, there are some object initializers running and we will need to disambiguate
@@ -487,21 +493,21 @@ impl Workload<dyn Payload> for AdversarialWorkload {
             .unwrap();
 
         for o in &created {
-            let obj = proxy.get_object(o.0 .0).await.unwrap();
-            if let Some(tag) = obj.data.struct_tag() {
-                if tag.to_string().contains("::adversarial::Obj") {
-                    self.df_parent_obj_ref = o.0;
-                }
+            let obj = execution_proxy.get_object(o.0.0).await.unwrap();
+            if let Some(tag) = obj.data.struct_tag()
+                && tag.to_string().contains("::adversarial::Obj")
+            {
+                self.df_parent_obj_ref = o.0;
             }
         }
         assert!(
             self.df_parent_obj_ref.0 != ObjectID::ZERO,
             "Dynamic field parent must be created"
         );
-        self.package_id = package_obj.0 .0;
+        self.package_id = package_obj.0.0;
 
-        let gas_ref = proxy
-            .get_object(gas.0 .0)
+        let gas_ref = execution_proxy
+            .get_object(gas.0.0)
             .await
             .unwrap()
             .compute_object_reference();
@@ -511,7 +517,7 @@ impl Workload<dyn Payload> for AdversarialWorkload {
         let transaction = move_call_pt_impl(
             gas.1,
             &gas.2,
-            package_obj.0 .0,
+            package_obj.0.0,
             "adversarial",
             "create_min_size_shared_objects",
             vec![],
@@ -521,7 +527,7 @@ impl Workload<dyn Payload> for AdversarialWorkload {
             reference_gas_price,
         );
 
-        let (_, execution_result) = proxy.execute_transaction_block(transaction).await;
+        let (_, execution_result) = execution_proxy.execute_transaction_block(transaction).await;
         let effects = execution_result.unwrap();
 
         let created = effects.created();
@@ -530,13 +536,14 @@ impl Workload<dyn Payload> for AdversarialWorkload {
         // We've seen that the shared objects are indeed created,we store them so we can read them in MaxReads workload
         self.shared_objs = created
             .iter()
-            .map(|o| BenchMoveCallArg::Shared((o.0 .0, o.0 .1, false)))
+            .map(|o| BenchMoveCallArg::Shared((o.0.0, o.0.1, SharedObjectMutability::Immutable)))
             .collect();
     }
 
     async fn make_test_payloads(
         &self,
-        _proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        _execution_proxy: Arc<dyn ValidatorProxy + Sync + Send>,
+        _fullnode_proxies: Vec<Arc<dyn ValidatorProxy + Sync + Send>>,
         system_state_observer: Arc<SystemStateObserver>,
     ) -> Vec<Box<dyn Payload>> {
         let mut payloads = Vec::new();
@@ -550,6 +557,7 @@ impl Workload<dyn Payload> for AdversarialWorkload {
                 state: InMemoryWallet::new(gas),
                 system_state_observer: system_state_observer.clone(),
                 adversarial_payload_cfg: self.adversarial_payload_cfg,
+                max_package_published_compiled: get_max_package_published_compiled_package().await,
             })
         }
         payloads
@@ -566,4 +574,13 @@ impl Workload<dyn Payload> for AdversarialWorkload {
 struct AdversarialPayloadArgs {
     pub fn_name: String,
     pub args: Vec<BenchMoveCallArg>,
+}
+
+async fn get_max_package_published_compiled_package() -> CompiledPackage {
+    let mut path = benchmark_move_base_dir();
+    path.push("src/workloads/data/really_big_package");
+    BuildConfig::new_for_testing()
+        .build_async(&path)
+        .await
+        .unwrap()
 }

@@ -18,16 +18,15 @@ use sui_types::base_types::TransactionDigest;
 use sui_types::committee::Committee;
 use sui_types::committee::EpochId;
 use sui_types::effects::{TransactionEffects, TransactionEvents};
+use sui_types::full_checkpoint_content::ObjectSet;
 use sui_types::messages_checkpoint::CheckpointContentsDigest;
 use sui_types::messages_checkpoint::CheckpointDigest;
 use sui_types::messages_checkpoint::CheckpointSequenceNumber;
 use sui_types::messages_checkpoint::EndOfEpochData;
-use sui_types::messages_checkpoint::FullCheckpointContents;
 use sui_types::messages_checkpoint::VerifiedCheckpoint;
 use sui_types::messages_checkpoint::VerifiedCheckpointContents;
+use sui_types::messages_checkpoint::VersionedFullCheckpointContents;
 use sui_types::object::Object;
-use sui_types::storage::error::Error as StorageError;
-use sui_types::storage::error::Result;
 use sui_types::storage::BalanceInfo;
 use sui_types::storage::BalanceIterator;
 use sui_types::storage::CoinInfo;
@@ -36,9 +35,10 @@ use sui_types::storage::ObjectStore;
 use sui_types::storage::OwnedObjectInfo;
 use sui_types::storage::RpcIndexes;
 use sui_types::storage::RpcStateReader;
-use sui_types::storage::TransactionInfo;
 use sui_types::storage::WriteStore;
-use sui_types::storage::{ObjectKey, ReadStore};
+use sui_types::storage::error::Error as StorageError;
+use sui_types::storage::error::Result;
+use sui_types::storage::{ObjectKey, OverlayBackingPackageStore, ReadStore};
 use sui_types::transaction::VerifiedTransaction;
 use tap::Pipe;
 use tap::TapFallible;
@@ -136,7 +136,7 @@ impl ReadStore for RocksDbStore {
         &self,
         sequence_number: Option<CheckpointSequenceNumber>,
         digest: &CheckpointContentsDigest,
-    ) -> Option<FullCheckpointContents> {
+    ) -> Option<VersionedFullCheckpointContents> {
         #[cfg(debug_assertions)]
         if let Some(sequence_number) = sequence_number {
             // When sequence_number is provided as an optimization, we want to ensure that
@@ -201,10 +201,12 @@ impl ReadStore for RocksDbStore {
                         return None;
                     }
                 }
-                Some(FullCheckpointContents::from_contents_and_execution_data(
-                    contents,
-                    transactions.into_iter(),
-                ))
+                Some(
+                    VersionedFullCheckpointContents::from_contents_and_execution_data(
+                        contents,
+                        transactions.into_iter(),
+                    ),
+                )
             })
     }
 
@@ -228,6 +230,25 @@ impl ReadStore for RocksDbStore {
         self.cache_traits
             .transaction_cache_reader
             .get_events(digest)
+    }
+
+    fn get_unchanged_loaded_runtime_objects(
+        &self,
+        digest: &TransactionDigest,
+    ) -> Option<Vec<ObjectKey>> {
+        self.cache_traits
+            .transaction_cache_reader
+            .get_unchanged_loaded_runtime_objects(digest)
+    }
+
+    fn get_transaction_checkpoint(
+        &self,
+        digest: &TransactionDigest,
+    ) -> Option<CheckpointSequenceNumber> {
+        self.cache_traits
+            .checkpoint_cache
+            .deprecated_get_transaction_checkpoint(digest)
+            .map(|(_epoch, checkpoint)| checkpoint)
     }
 
     fn get_latest_checkpoint(&self) -> sui_types::storage::error::Result<VerifiedCheckpoint> {
@@ -452,9 +473,23 @@ impl ReadStore for RestReadStore {
         &self,
         sequence_number: Option<CheckpointSequenceNumber>,
         digest: &CheckpointContentsDigest,
-    ) -> Option<FullCheckpointContents> {
+    ) -> Option<VersionedFullCheckpointContents> {
         self.rocks
             .get_full_checkpoint_contents(sequence_number, digest)
+    }
+
+    fn get_unchanged_loaded_runtime_objects(
+        &self,
+        digest: &TransactionDigest,
+    ) -> Option<Vec<ObjectKey>> {
+        self.rocks.get_unchanged_loaded_runtime_objects(digest)
+    }
+
+    fn get_transaction_checkpoint(
+        &self,
+        digest: &TransactionDigest,
+    ) -> Option<CheckpointSequenceNumber> {
+        self.rocks.get_transaction_checkpoint(digest)
     }
 }
 
@@ -475,18 +510,21 @@ impl RpcStateReader for RestReadStore {
     }
 
     fn indexes(&self) -> Option<&dyn RpcIndexes> {
-        self.index().ok().map(|index| index as _)
+        Some(self)
     }
 
-    fn get_struct_layout(
+    fn get_struct_layout_with_overlay(
         &self,
         struct_tag: &move_core_types::language_storage::StructTag,
+        overlay: &ObjectSet,
     ) -> Result<Option<move_core_types::annotated_value::MoveTypeLayout>> {
+        let backing_store = self.state.get_backing_package_store();
+        let overlay_store = OverlayBackingPackageStore::new(overlay, backing_store.as_ref());
         self.state
             .load_epoch_store_one_call_per_task()
             .executor()
             // TODO(cache) - must read through cache
-            .type_layout_resolver(Box::new(self.state.get_backing_package_store().as_ref()))
+            .type_layout_resolver(Box::new(overlay_store))
             .get_annotated_layout(struct_tag)
             .map(|layout| layout.into_layout())
             .map(Some)
@@ -494,16 +532,68 @@ impl RpcStateReader for RestReadStore {
     }
 }
 
-impl RpcIndexes for RpcIndexStore {
-    fn get_epoch_info(&self, epoch: EpochId) -> Result<Option<sui_types::storage::EpochInfo>> {
-        self.get_epoch_info(epoch).map_err(StorageError::custom)
-    }
+struct BatchedEventIterator<'a, I>
+where
+    I: Iterator<Item = Result<crate::rpc_index::EventIndexKey, TypedStoreError>>,
+{
+    key_iter: I,
+    rocks: &'a RocksDbStore,
+    current_checkpoint: Option<u64>,
+    current_checkpoint_contents: Option<sui_types::messages_checkpoint::CheckpointContents>,
+    cached_tx_events: Option<TransactionEvents>,
+    cached_tx_digest: Option<TransactionDigest>,
+}
 
-    fn get_transaction_info(
-        &self,
-        digest: &TransactionDigest,
-    ) -> sui_types::storage::error::Result<Option<TransactionInfo>> {
-        self.get_transaction_info(digest)
+impl<I> Iterator for BatchedEventIterator<'_, I>
+where
+    I: Iterator<Item = Result<crate::rpc_index::EventIndexKey, TypedStoreError>>,
+{
+    type Item = Result<(u64, u64, u32, u32, sui_types::event::Event), TypedStoreError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let key = match self.key_iter.next()? {
+            Ok(k) => k,
+            Err(e) => return Some(Err(e)),
+        };
+
+        if self.current_checkpoint != Some(key.checkpoint_seq) {
+            self.current_checkpoint = Some(key.checkpoint_seq);
+            self.current_checkpoint_contents = self
+                .rocks
+                .get_checkpoint_contents_by_sequence_number(key.checkpoint_seq);
+            self.cached_tx_events = None;
+            self.cached_tx_digest = None;
+        }
+
+        let checkpoint_contents = self.current_checkpoint_contents.as_ref()?;
+
+        let exec_digest = checkpoint_contents
+            .iter()
+            .nth(key.transaction_idx as usize)?;
+        let tx_digest = exec_digest.transaction;
+
+        if self.cached_tx_digest != Some(tx_digest) {
+            self.cached_tx_digest = Some(tx_digest);
+            self.cached_tx_events = self.rocks.get_events(&tx_digest);
+        }
+
+        let tx_events = self.cached_tx_events.as_ref()?;
+        let event = tx_events.data.get(key.event_index as usize)?.clone();
+
+        Some(Ok((
+            key.checkpoint_seq,
+            key.accumulator_version,
+            key.transaction_idx,
+            key.event_index,
+            event,
+        )))
+    }
+}
+
+impl RpcIndexes for RestReadStore {
+    fn get_epoch_info(&self, epoch: EpochId) -> Result<Option<sui_types::storage::EpochInfo>> {
+        self.index()?
+            .get_epoch_info(epoch)
             .map_err(StorageError::custom)
     }
 
@@ -520,27 +610,30 @@ impl RpcIndexes for RpcIndexStore {
             object_id: cursor.object_id,
         });
 
-        let iter = self.owner_iter(owner, object_type, cursor)?.map(|result| {
-            result.map(
-                |(
-                    OwnerIndexKey {
-                        owner,
-                        object_id,
-                        object_type,
-                        inverted_balance,
+        let iter = self
+            .index()?
+            .owner_iter(owner, object_type, cursor)?
+            .map(|result| {
+                result.map(
+                    |(
+                        OwnerIndexKey {
+                            owner,
+                            object_id,
+                            object_type,
+                            inverted_balance,
+                        },
+                        OwnerIndexInfo { version },
+                    )| {
+                        OwnedObjectInfo {
+                            owner,
+                            object_type,
+                            balance: inverted_balance.map(std::ops::Not::not),
+                            object_id,
+                            version,
+                        }
                     },
-                    OwnerIndexInfo { version },
-                )| {
-                    OwnedObjectInfo {
-                        owner,
-                        object_type,
-                        balance: inverted_balance.map(std::ops::Not::not),
-                        object_id,
-                        version,
-                    }
-                },
-            )
-        });
+                )
+            });
 
         Ok(Box::new(iter) as _)
     }
@@ -552,7 +645,7 @@ impl RpcIndexes for RpcIndexStore {
     ) -> sui_types::storage::error::Result<
         Box<dyn Iterator<Item = Result<DynamicFieldKey, TypedStoreError>> + '_>,
     > {
-        let iter = self.dynamic_field_iter(parent, cursor)?;
+        let iter = self.index()?.dynamic_field_iter(parent, cursor)?;
         Ok(Box::new(iter) as _)
     }
 
@@ -560,7 +653,8 @@ impl RpcIndexes for RpcIndexStore {
         &self,
         coin_type: &StructTag,
     ) -> sui_types::storage::error::Result<Option<CoinInfo>> {
-        self.get_coin_info(coin_type)?
+        self.index()?
+            .get_coin_info(coin_type)?
             .map(
                 |CoinIndexInfo {
                      coin_metadata_object_id,
@@ -580,7 +674,8 @@ impl RpcIndexes for RpcIndexStore {
         owner: &SuiAddress,
         coin_type: &StructTag,
     ) -> sui_types::storage::error::Result<Option<BalanceInfo>> {
-        self.get_balance(owner, coin_type)?
+        self.index()?
+            .get_balance(owner, coin_type)?
             .map(|info| info.into())
             .pipe(Ok)
     }
@@ -593,13 +688,15 @@ impl RpcIndexes for RpcIndexStore {
         let cursor_key =
             cursor.map(|(owner, coin_type)| crate::rpc_index::BalanceKey { owner, coin_type });
 
-        Ok(Box::new(self.balance_iter(*owner, cursor_key)?.map(
-            |result| {
-                result
-                    .map(|(key, info)| (key.coin_type, info.into()))
-                    .map_err(Into::into)
-            },
-        )))
+        Ok(Box::new(
+            self.index()?
+                .balance_iter(*owner, cursor_key)?
+                .map(|result| {
+                    result
+                        .map(|(key, info)| (key.coin_type, info.into()))
+                        .map_err(Into::into)
+                }),
+        ))
     }
 
     fn package_versions_iter(
@@ -609,10 +706,58 @@ impl RpcIndexes for RpcIndexStore {
     ) -> sui_types::storage::error::Result<
         Box<dyn Iterator<Item = Result<(u64, ObjectID), TypedStoreError>> + '_>,
     > {
-        let iter = self.package_versions_iter(original_id, cursor)?;
+        let iter = self.index()?.package_versions_iter(original_id, cursor)?;
         Ok(
             Box::new(iter.map(|result| result.map(|(key, info)| (key.version, info.storage_id))))
                 as _,
         )
+    }
+
+    fn get_highest_indexed_checkpoint_seq_number(
+        &self,
+    ) -> sui_types::storage::error::Result<Option<CheckpointSequenceNumber>> {
+        self.index()?
+            .get_highest_indexed_checkpoint_seq_number()
+            .map_err(Into::into)
+    }
+
+    fn authenticated_event_iter(
+        &self,
+        stream_id: SuiAddress,
+        start_checkpoint: u64,
+        start_accumulator_version: Option<u64>,
+        start_transaction_idx: Option<u32>,
+        start_event_idx: Option<u32>,
+        end_checkpoint: u64,
+        limit: u32,
+    ) -> sui_types::storage::error::Result<
+        Box<
+            dyn Iterator<
+                    Item = Result<(u64, u64, u32, u32, sui_types::event::Event), TypedStoreError>,
+                > + '_,
+        >,
+    > {
+        let index = self.index()?;
+        let key_iter = index.event_iter(
+            stream_id,
+            start_checkpoint,
+            start_accumulator_version.unwrap_or(0),
+            start_transaction_idx.unwrap_or(0),
+            start_event_idx.unwrap_or(0),
+            end_checkpoint,
+            limit,
+        )?;
+
+        let rocks = &self.rocks;
+        let iter = BatchedEventIterator {
+            key_iter,
+            rocks,
+            current_checkpoint: None,
+            current_checkpoint_contents: None,
+            cached_tx_events: None,
+            cached_tx_digest: None,
+        };
+
+        Ok(Box::new(iter))
     }
 }

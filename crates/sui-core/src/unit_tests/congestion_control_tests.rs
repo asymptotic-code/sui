@@ -2,34 +2,37 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::authority::authority_test_utils::submit_to_consensus;
 use crate::authority::shared_object_congestion_tracker::SharedObjectCongestionTracker;
-use crate::authority::ExecutionEnv;
+use crate::authority::{AuthorityState, ExecutionEnv};
+use crate::consensus_test_utils;
+use crate::consensus_test_utils::TestConsensusCommit;
 use crate::{
     authority::{
-        authority_tests::{
-            build_programmable_transaction, certify_shared_obj_transaction_no_execution,
-            execute_programmable_transaction, send_and_confirm_transaction_,
-        },
+        authority_tests::{build_programmable_transaction, execute_programmable_transaction},
         move_integration_tests::build_and_publish_test_package,
         test_authority_builder::TestAuthorityBuilder,
-        AuthorityState,
     },
     move_call,
 };
 use move_core_types::ident_str;
 use std::sync::Arc;
 use sui_macros::{register_fail_point_arg, sim_test};
-use sui_protocol_config::{Chain, PerObjectCongestionControlMode, ProtocolConfig, ProtocolVersion};
-use sui_types::base_types::ConsensusObjectSequenceKey;
+use sui_protocol_config::{
+    Chain, ExecutionTimeEstimateParams, PerObjectCongestionControlMode, ProtocolConfig,
+    ProtocolVersion,
+};
 use sui_types::digests::TransactionDigest;
-use sui_types::effects::{InputSharedObject, TransactionEffectsAPI};
+use sui_types::effects::{InputConsensusObject, TransactionEffectsAPI};
 use sui_types::executable_transaction::VerifiedExecutableTransaction;
-use sui_types::transaction::{ObjectArg, Transaction};
+use sui_types::messages_consensus::ConsensusTransaction;
+use sui_types::transaction::PlainTransactionWithClaims;
+use sui_types::transaction::VerifiedTransaction;
+use sui_types::transaction::{ObjectArg, SharedObjectMutability};
 use sui_types::{
     base_types::{ObjectID, ObjectRef, SequenceNumber, SuiAddress},
-    crypto::{get_key_pair, AccountKeyPair},
-    effects::TransactionEffects,
-    execution_status::{CongestedObjects, ExecutionFailureStatus, ExecutionStatus},
+    crypto::{AccountKeyPair, get_key_pair},
+    execution_status::{CongestedObjects, ExecutionErrorKind},
     object::Object,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
 };
@@ -53,21 +56,22 @@ impl TestSetup {
 
         let mut protocol_config =
             ProtocolConfig::get_for_version(ProtocolVersion::max(), Chain::Unknown);
+        // Use ExecutionTimeEstimate mode with parameters that will cause congestion
         protocol_config.set_per_object_congestion_control_mode_for_testing(
-            PerObjectCongestionControlMode::TotalGasBudget,
+            PerObjectCongestionControlMode::ExecutionTimeEstimate(ExecutionTimeEstimateParams {
+                target_utilization: 0, // 0% utilization means budget of 0, so any cost will exceed it
+                allowed_txn_cost_overage_burst_limit_us: 0,
+                max_estimate_us: u64::MAX,
+                randomness_scalar: 100,
+                stored_observations_num_included_checkpoints: 10,
+                stored_observations_limit: u64::MAX,
+                stake_weighted_median_threshold: 0,
+                default_none_duration_for_new_keys: false,
+                observations_chunk_size: None,
+            }),
         );
 
-        // Set shared object congestion control such that it only allows 1 transaction to go through.
-        let max_accumulated_txn_cost_per_object_in_commit =
-            TEST_ONLY_GAS_PRICE * TEST_ONLY_GAS_UNIT;
-        protocol_config.set_max_accumulated_txn_cost_per_object_in_narwhal_commit_for_testing(
-            max_accumulated_txn_cost_per_object_in_commit,
-        );
-        protocol_config.set_max_accumulated_txn_cost_per_object_in_mysticeti_commit_for_testing(
-            max_accumulated_txn_cost_per_object_in_commit,
-        );
-
-        // Set max deferral rounds to 0 to testr cancellation. All deferred transactions will be cancelled.
+        // Set max deferral rounds to 0 to test cancellation. All deferred transactions will be cancelled.
         protocol_config.set_max_deferral_rounds_for_congestion_control_for_testing(0);
 
         let setup_authority_state = TestAuthorityBuilder::new()
@@ -194,61 +198,6 @@ impl TestSetup {
     }
 }
 
-// Creates a transaction that touchs the shared objects `shared_object_1` and `shared_object_2`, and `owned_object`,
-// and executes the transaction in `authority_state`. Returns the transaction and the effects of the execution.
-async fn update_objects(
-    authority_state: &AuthorityState,
-    package: &ObjectRef,
-    sender: &SuiAddress,
-    sender_key: &AccountKeyPair,
-    gas_object_id: &ObjectID,
-    shared_object_1: &ConsensusObjectSequenceKey,
-    shared_object_2: &ConsensusObjectSequenceKey,
-    owned_object: &ObjectRef,
-) -> (Transaction, TransactionEffects) {
-    let mut txn_builder = ProgrammableTransactionBuilder::new();
-    let arg1 = txn_builder
-        .obj(ObjectArg::SharedObject {
-            id: shared_object_1.0,
-            initial_shared_version: shared_object_1.1,
-            mutable: true,
-        })
-        .unwrap();
-    let arg2 = txn_builder
-        .obj(ObjectArg::SharedObject {
-            id: shared_object_2.0,
-            initial_shared_version: shared_object_2.1,
-            mutable: true,
-        })
-        .unwrap();
-    let arg3 = txn_builder
-        .obj(ObjectArg::ImmOrOwnedObject(*owned_object))
-        .unwrap();
-    move_call! {
-        txn_builder,
-        (package.0)::congestion_control::increment(arg1, arg2, arg3)
-    };
-    let pt = txn_builder.finish();
-    let transaction = build_programmable_transaction(
-        authority_state,
-        gas_object_id,
-        sender,
-        sender_key,
-        pt,
-        TEST_ONLY_GAS_UNIT,
-    )
-    .await
-    .unwrap();
-
-    let execution_effects =
-        send_and_confirm_transaction_(authority_state, None, transaction.clone(), true)
-            .await
-            .unwrap()
-            .1
-            .into_data();
-    (transaction, execution_effects)
-}
-
 // Tests execution aspect of cancelled transaction due to shared object congestion. Mainly tests that
 //   1. Cancelled transaction should return correct error status.
 //   2. Executing cancelled transaction with effects should result in the same transaction cancellation.
@@ -292,84 +241,166 @@ async fn test_congestion_control_execution_cancellation() {
         .await;
 
     // Initialize shared object queue so that any transaction touches shared_object_1 should result in congestion and cancellation.
+    // Set initial cost of 10 for shared_object_1, which with 0% target_utilization and 0 burst limit
+    // will exceed the budget and cause congestion.
     register_fail_point_arg("initial_congestion_tracker", move || {
         Some(SharedObjectCongestionTracker::new(
             [(shared_object_1.0, 10)],
-            PerObjectCongestionControlMode::TotalGasBudget,
+            ExecutionTimeEstimateParams {
+                target_utilization: 0,
+                allowed_txn_cost_overage_burst_limit_us: 0,
+                max_estimate_us: u64::MAX,
+                randomness_scalar: 100,
+                stored_observations_num_included_checkpoints: 10,
+                stored_observations_limit: u64::MAX,
+                stake_weighted_median_threshold: 0,
+                default_none_duration_for_new_keys: false,
+                observations_chunk_size: None,
+            },
             false,
-            Some(
-                test_setup
-                    .protocol_config
-                    .max_accumulated_txn_cost_per_object_in_mysticeti_commit(),
-            ),
-            Some(1000), // Not used.
-            None,       // Not used.
-            0,          // Disable overage.
-            0,
+            false,
         ))
     });
 
-    // Runs a transaction that touches shared_object_1, shared_object_2 and an owned object.
-    let (congested_tx, effects) = update_objects(
+    // Set up ConsensusHandler for the authority_state
+    let consensus_setup =
+        consensus_test_utils::setup_consensus_handler_for_testing(&authority_state).await;
+    let mut consensus_handler = consensus_setup.consensus_handler;
+    let captured_transactions = consensus_setup.captured_transactions;
+
+    // Create a transaction that touches shared_object_1, shared_object_2 and an owned object.
+    let mut txn_builder = ProgrammableTransactionBuilder::new();
+    let arg1 = txn_builder
+        .obj(ObjectArg::SharedObject {
+            id: shared_object_1.0,
+            initial_shared_version: shared_object_1.1,
+            mutability: SharedObjectMutability::Mutable,
+        })
+        .unwrap();
+    let arg2 = txn_builder
+        .obj(ObjectArg::SharedObject {
+            id: shared_object_2.0,
+            initial_shared_version: shared_object_2.1,
+            mutability: SharedObjectMutability::Mutable,
+        })
+        .unwrap();
+    let owned_object_ref = authority_state
+        .get_object(&owned_object.0)
+        .await
+        .unwrap()
+        .compute_object_reference();
+    let arg3 = txn_builder
+        .obj(ObjectArg::ImmOrOwnedObject(owned_object_ref))
+        .unwrap();
+    move_call! {
+        txn_builder,
+        (test_setup.package.0)::congestion_control::increment(arg1, arg2, arg3)
+    };
+    let pt = txn_builder.finish();
+    let congested_tx = build_programmable_transaction(
         &authority_state,
-        &test_setup.package,
+        &test_setup.gas_object_id,
         &test_setup.sender,
         &test_setup.sender_key,
-        &test_setup.gas_object_id,
-        &(shared_object_1.0, shared_object_1.1),
-        &(shared_object_2.0, shared_object_2.1),
-        &authority_state
-            .get_object(&owned_object.0)
-            .await
-            .unwrap()
-            .compute_object_reference(),
+        pt,
+        TEST_ONLY_GAS_UNIT,
     )
-    .await;
+    .await
+    .unwrap();
 
-    // Transaction should be cancelled with `shared_object_1` as the congested object.
+    let consensus_transactions = vec![ConsensusTransaction::new_user_transaction_v2_message(
+        &authority_state.name,
+        PlainTransactionWithClaims::no_aliases(congested_tx.clone()),
+    )];
+    let commit = TestConsensusCommit::new(consensus_transactions, 1, 0, 0);
+
+    consensus_handler.handle_consensus_commit(commit).await;
+
+    // Wait for captured transactions to be available
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Get the captured transactions
+    let scheduled_txns = {
+        let mut captured = captured_transactions.lock();
+        assert!(
+            !captured.is_empty(),
+            "Expected transactions to be scheduled"
+        );
+        let (scheduled_txns, _) = captured.remove(0);
+        scheduled_txns
+    };
+
+    // Both prologue and the cancelled transaction should be scheduled
+    // The cancelled transaction will abort during execution
     assert_eq!(
-        effects.status(),
-        &ExecutionStatus::Failure {
-            error: ExecutionFailureStatus::ExecutionCancelledDueToSharedObjectCongestion {
-                congested_objects: CongestedObjects(vec![shared_object_1.0]),
-            },
-            command: None
-        }
+        scheduled_txns.len(),
+        2,
+        "Expected prologue + cancelled transaction"
     );
 
-    // Tests shared object versions in effects are set correctly.
+    // Now execute the cancelled transaction to get the effects
+    let epoch_store = authority_state.load_epoch_store_one_call_per_task();
+    let executable = VerifiedExecutableTransaction::new_from_consensus(
+        VerifiedTransaction::new_unchecked(congested_tx.clone()),
+        epoch_store.epoch(),
+    );
+
+    // Find the assigned versions for our specific transaction
+    let tx_key = executable.key();
+    let assigned_versions = scheduled_txns
+        .iter()
+        .find(|(s, _)| s.key() == tx_key)
+        .map(|(_, v)| v.clone())
+        .expect("Transaction should have assigned versions");
+
+    let execution_env = ExecutionEnv::new().with_assigned_versions(assigned_versions);
+    let (effects, execution_error) = authority_state
+        .try_execute_executable_for_test(&executable, execution_env)
+        .await;
+
+    // Transaction should be cancelled with `shared_object_1` as the congested object.
+    assert!(execution_error.is_some());
     assert_eq!(
-        effects.input_shared_objects(),
+        execution_error.unwrap().to_execution_status().0,
+        ExecutionErrorKind::ExecutionCancelledDueToSharedObjectCongestion {
+            congested_objects: CongestedObjects(vec![shared_object_1.0]),
+        }
+    );
+    let effects = effects.data();
+
+    // Tests consensus object versions in effects are set correctly.
+    assert_eq!(
+        effects.input_consensus_objects(),
         vec![
-            InputSharedObject::Cancelled(shared_object_1.0, SequenceNumber::CONGESTED),
-            InputSharedObject::Cancelled(shared_object_2.0, SequenceNumber::CANCELLED_READ)
+            InputConsensusObject::Cancelled(shared_object_1.0, SequenceNumber::CONGESTED),
+            InputConsensusObject::Cancelled(shared_object_2.0, SequenceNumber::CANCELLED_READ)
         ]
     );
 
     // Run the same transaction in `authority_state_2`, but using the above effects for the execution.
-    let (cert, _) = certify_shared_obj_transaction_no_execution(&authority_state_2, congested_tx)
+    let (executable, _) = submit_to_consensus(&authority_state_2, congested_tx)
         .await
         .unwrap();
     let assigned_versions = authority_state_2
         .epoch_store_for_testing()
         .acquire_shared_version_assignments_from_effects(
-            &VerifiedExecutableTransaction::new_from_certificate(cert.clone()),
-            &effects,
+            &executable,
+            effects,
+            None,
             authority_state_2.get_object_cache_reader().as_ref(),
         )
         .unwrap();
     let execution_env = ExecutionEnv::new().with_assigned_versions(assigned_versions);
     let (effects_2, execution_error) = authority_state_2
-        .try_execute_for_test(&cert, execution_env)
-        .await
-        .unwrap();
+        .try_execute_executable_for_test(&executable, execution_env)
+        .await;
 
     // Should result in the same cancellation.
     assert_eq!(
         execution_error.unwrap().to_execution_status().0,
-        ExecutionFailureStatus::ExecutionCancelledDueToSharedObjectCongestion {
+        ExecutionErrorKind::ExecutionCancelledDueToSharedObjectCongestion {
             congested_objects: CongestedObjects(vec![shared_object_1.0]),
         }
     );
-    assert_eq!(&effects, effects_2.data())
+    assert_eq!(effects, effects_2.data());
 }

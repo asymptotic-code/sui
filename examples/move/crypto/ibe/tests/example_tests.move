@@ -5,19 +5,16 @@
 module ibe::tests;
 
 use ibe::example;
+use std::hash::sha2_256;
+use std::unit_test::assert_eq;
 use sui::bcs;
 use sui::bls12381;
-
-#[test_only]
-use std::hash::sha2_256;
-#[test_only]
-use sui::test_utils::assert_eq;
 
 // This test emulates drand based timelock encryption (using quicknet).
 #[test]
 fun test_ibe_decrypt_drand() {
     // Retrieved using 'curl https://api.drand.sh/52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971/info'
-    let round = 1234;
+    let round = 1234u64;
     let pk_bytes =
         x"83cf0f2896adee7eb8b5f01fcad3912212c437e0073e911fb90022d3e760183c8c4b450b6a0a6c3ac6a5776a2d1064510d1fec758c921cc22b0e17e63aaf4bcb5ed66304de9cf809bd274ca73bab4af5a6e9c76a4bc09e76eae8991ef5ece45a";
     let pk = bls12381::g2_from_bytes(&pk_bytes);
@@ -63,7 +60,7 @@ fun test_try_substract_and_modulo() {
     assert!(option::is_some(&res), 0);
     let bigger_minus_order = *option::borrow(&res);
     let expected: vector<u8> = x"1824b159acc5056f998c4fefecbc4ff55884b7fa0003480200000001fffffff4";
-    assert_eq(bigger_minus_order, expected);
+    assert_eq!(bigger_minus_order, expected);
 
     let larger: vector<u8> = x"fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff6";
     let expected: vector<u8> = x"1824b159acc5056f998c4fefecbc4ff55884b7fa0003480200000001fffffff4";

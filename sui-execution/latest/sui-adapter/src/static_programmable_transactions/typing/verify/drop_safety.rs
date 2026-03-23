@@ -14,78 +14,193 @@ pub fn refine_and_verify<Mode: ExecutionMode>(
     env: &Env,
     ast: &mut T::Transaction,
 ) -> Result<(), ExecutionError> {
-    refine::transaction(ast);
+    refine::transaction(env, ast)?;
     verify::transaction::<Mode>(env, ast)?;
     Ok(())
 }
 
 mod refine {
+    use sui_types::{
+        coin::{COIN_MODULE_NAME, SEND_FUNDS_FUNC_NAME},
+        error::ExecutionError,
+    };
+
     use crate::{
         sp,
-        static_programmable_transactions::typing::ast::{self as T},
+        static_programmable_transactions::{
+            env::Env,
+            spanned::sp,
+            typing::{
+                ast::{self as T, Type},
+                translate::coin_inner_type,
+            },
+        },
     };
     use std::collections::BTreeSet;
 
+    struct Context {
+        // All locations that were used
+        used: BTreeSet<T::Location>,
+        // All locations that were used via a Move. This is a subset of `used`, but `used` does
+        // not track how each value was used in each instance. For simplicity, this is kept as a
+        // separate set.
+        moved: BTreeSet<T::Location>,
+    }
+
+    impl Context {
+        fn new() -> Self {
+            Self {
+                used: BTreeSet::new(),
+                moved: BTreeSet::new(),
+            }
+        }
+    }
+
     /// After memory safety, we can switch the last usage of a `Copy` to a `Move` if it is not
     /// borrowed at the time of the last usage.
-    pub fn transaction(ast: &mut T::Transaction) {
-        let mut used: BTreeSet<T::Location> = BTreeSet::new();
-        for (c, _tys) in ast.commands.iter_mut().rev() {
-            command(&mut used, c);
+    pub fn transaction(env: &Env, ast: &mut T::Transaction) -> Result<(), ExecutionError> {
+        let mut context = Context::new();
+        for c in ast.commands.iter_mut().rev() {
+            command(&mut context, c);
+        }
+        return_unused_withdrawal_conversions(env, ast, &context.moved)
+    }
+
+    fn command(context: &mut Context, sp!(_, c): &mut T::Command) {
+        match &mut c.command {
+            T::Command__::MoveCall(mc) => arguments(context, &mut mc.arguments),
+            T::Command__::TransferObjects(objects, recipient) => {
+                argument(context, recipient);
+                arguments(context, objects);
+            }
+            T::Command__::SplitCoins(_, coin, amounts) => {
+                arguments(context, amounts);
+                argument(context, coin);
+            }
+            T::Command__::MergeCoins(_, target, coins) => {
+                arguments(context, coins);
+                argument(context, target);
+            }
+            T::Command__::MakeMoveVec(_, xs) => arguments(context, xs),
+            T::Command__::Publish(_, _, _) => (),
+            T::Command__::Upgrade(_, _, _, x, _) => argument(context, x),
         }
     }
 
-    fn command(used: &mut BTreeSet<T::Location>, sp!(_, command): &mut T::Command) {
-        match command {
-            T::Command_::MoveCall(mc) => arguments(used, &mut mc.arguments),
-            T::Command_::TransferObjects(objects, recipient) => {
-                argument(used, recipient);
-                arguments(used, objects);
-            }
-            T::Command_::SplitCoins(_, coin, amounts) => {
-                arguments(used, amounts);
-                argument(used, coin);
-            }
-            T::Command_::MergeCoins(_, target, coins) => {
-                arguments(used, coins);
-                argument(used, target);
-            }
-            T::Command_::MakeMoveVec(_, xs) => arguments(used, xs),
-            T::Command_::Publish(_, _, _) => (),
-            T::Command_::Upgrade(_, _, _, x, _) => argument(used, x),
-        }
-    }
-
-    fn arguments(used: &mut BTreeSet<T::Location>, args: &mut [T::Argument]) {
+    fn arguments(context: &mut Context, args: &mut [T::Argument]) {
         for arg in args.iter_mut().rev() {
-            argument(used, arg)
+            argument(context, arg)
         }
     }
 
-    fn argument(used: &mut BTreeSet<T::Location>, arg: &mut T::Argument) {
+    fn argument(context: &mut Context, arg: &mut T::Argument) {
         let usage = match &mut arg.value.0 {
             T::Argument__::Use(u) | T::Argument__::Read(u) | T::Argument__::Freeze(u) => u,
             T::Argument__::Borrow(_, loc) => {
                 // mark location as used
-                used.insert(*loc);
+                context.used.insert(*loc);
                 return;
             }
         };
         match &usage {
             T::Usage::Move(loc) => {
                 // mark location as used
-                used.insert(*loc);
+                context.used.insert(*loc);
+                context.moved.insert(*loc);
             }
             T::Usage::Copy { location, borrowed } => {
                 // we are at the last usage of a reference result if it was not yet added to the set
                 let location = *location;
-                let last_usage = used.insert(location);
+                let last_usage = context.used.insert(location);
                 if last_usage && !borrowed.get().unwrap() {
                     // if it was the last usage, we need to change the Copy to a Move
                     *usage = T::Usage::Move(location);
+                    context.moved.insert(location);
                 }
             }
         }
+    }
+
+    /// For any withdrawal conversion where the value was not moved, send it back to the original
+    /// owner
+    fn return_unused_withdrawal_conversions(
+        env: &Env,
+        ast: &mut T::Transaction,
+        moved_locations: &BTreeSet<T::Location>,
+    ) -> Result<(), ExecutionError> {
+        // withdrawal conversions not empty ==> accumulators enabled
+        assert_invariant!(
+            ast.withdrawal_compatibility_conversions.is_empty()
+                || env.protocol_config.enable_accumulators(),
+            "Withdrawal conversions should be empty if accumulators are not enabled"
+        );
+        for conversion_info in
+            ast.withdrawal_compatibility_conversions
+                .values()
+                .filter(|conversion| {
+                    // The conversion result is always a single return value, as such we can specify
+                    // a secondary index of `0` without worrying about other results.
+                    let conversion_location = T::Location::Result(conversion.conversion_result, 0);
+                    !moved_locations.contains(&conversion_location)
+                })
+        {
+            let Some(cur_command) = ast.commands.len().checked_sub(1) else {
+                invariant_violation!("cannot be zero commands with a conversion")
+            };
+            let cur_command = checked_as!(cur_command, u16)?;
+            let T::WithdrawalCompatibilityConversion {
+                owner,
+                conversion_result,
+            } = *conversion_info;
+            let Some(conversion_command) = ast.commands.get(conversion_result as usize) else {
+                invariant_violation!("conversion result should be a valid command index")
+            };
+            assert_invariant!(
+                conversion_command.value.result_type.len() == 1,
+                "conversion should have one result"
+            );
+            let T::Location::PureInput(owner_pure_idx) = owner else {
+                invariant_violation!("owner should be a pure input")
+            };
+            assert_invariant!(
+                ast.pure.len() > owner_pure_idx as usize,
+                "owner pure input index out of bounds"
+            );
+            assert_invariant!(
+                ast.pure.get(owner_pure_idx as usize).unwrap().ty == T::Type::Address,
+                "owner pure input should be an address"
+            );
+            let Some(conversion_ty) = conversion_command.value.result_type.first() else {
+                invariant_violation!("conversion should have a result type")
+            };
+            let Some(inner_ty) = coin_inner_type(conversion_ty) else {
+                invariant_violation!("conversion result should be a coin type")
+            };
+            let move_result_ = T::Argument__::new_move(T::Location::Result(conversion_result, 0));
+            let move_result = sp(cur_command, (move_result_, conversion_ty.clone()));
+            let owner_ty = Type::Address;
+            let owner_arg_ = T::Argument__::new_move(owner);
+            let owner_arg = sp(cur_command, (owner_arg_, owner_ty));
+            let return_command__ = T::Command__::MoveCall(Box::new(T::MoveCall {
+                function: env.load_framework_function(
+                    COIN_MODULE_NAME,
+                    SEND_FUNDS_FUNC_NAME,
+                    vec![inner_ty.clone()],
+                )?,
+                arguments: vec![move_result, owner_arg],
+            }));
+            let return_command = sp(
+                cur_command,
+                T::Command_ {
+                    command: return_command__,
+                    result_type: vec![],
+                    drop_values: vec![],
+                    consumed_shared_objects: vec![],
+                },
+            );
+            ast.commands.push(return_command);
+        }
+        Ok(())
     }
 }
 
@@ -98,7 +213,8 @@ mod verify {
             typing::ast::{self as T, Type},
         },
     };
-    use sui_types::error::{ExecutionError, ExecutionErrorKind};
+    use sui_types::error::{ExecutionError, SafeIndex};
+    use sui_types::execution_status::ExecutionErrorKind;
 
     #[must_use]
     struct Value;
@@ -107,61 +223,98 @@ mod verify {
         tx_context: Option<Value>,
         gas_coin: Option<Value>,
         objects: Vec<Option<Value>>,
+        withdrawals: Vec<Option<Value>>,
         pure: Vec<Option<Value>>,
         receiving: Vec<Option<Value>>,
         results: Vec<Vec<Option<Value>>>,
     }
 
     impl Context {
-        fn new(ast: &T::Transaction) -> Result<Self, ExecutionError> {
+        fn new(_env: &Env, ast: &T::Transaction) -> Result<Self, ExecutionError> {
             let objects = ast.objects.iter().map(|_| Some(Value)).collect::<Vec<_>>();
+            let withdrawals = ast
+                .withdrawals
+                .iter()
+                .map(|_| Some(Value))
+                .collect::<Vec<_>>();
             let pure = ast.pure.iter().map(|_| Some(Value)).collect::<Vec<_>>();
             let receiving = ast
                 .receiving
                 .iter()
                 .map(|_| Some(Value))
                 .collect::<Vec<_>>();
+            let gas_coin = if ast.gas_payment.is_none() {
+                None
+            } else {
+                Some(Value)
+            };
             Ok(Self {
                 tx_context: Some(Value),
-                gas_coin: Some(Value),
+                gas_coin,
                 objects,
+                withdrawals,
                 pure,
                 receiving,
                 results: Vec::with_capacity(ast.commands.len()),
             })
         }
 
-        fn location(&mut self, l: T::Location) -> &mut Option<Value> {
-            match l {
+        fn location(&mut self, l: T::Location) -> Result<&mut Option<Value>, ExecutionError> {
+            Ok(match l {
                 T::Location::TxContext => &mut self.tx_context,
                 T::Location::GasCoin => &mut self.gas_coin,
-                T::Location::ObjectInput(i) => &mut self.objects[i as usize],
-                T::Location::PureInput(i) => &mut self.pure[i as usize],
-                T::Location::ReceivingInput(i) => &mut self.receiving[i as usize],
-                T::Location::Result(i, j) => &mut self.results[i as usize][j as usize],
-            }
+                T::Location::ObjectInput(i) => self.objects.safe_get_mut(i as usize)?,
+                T::Location::WithdrawalInput(i) => self.withdrawals.safe_get_mut(i as usize)?,
+                T::Location::PureInput(i) => self.pure.safe_get_mut(i as usize)?,
+                T::Location::ReceivingInput(i) => self.receiving.safe_get_mut(i as usize)?,
+                T::Location::Result(i, j) => self
+                    .results
+                    .safe_get_mut(i as usize)?
+                    .safe_get_mut(j as usize)?,
+            })
         }
     }
 
     /// Checks the following
     /// - All unused result values have `drop`
     pub fn transaction<Mode: ExecutionMode>(
-        _env: &Env,
+        env: &Env,
         ast: &T::Transaction,
     ) -> Result<(), ExecutionError> {
-        let mut context = Context::new(ast)?;
+        let mut context = Context::new(env, ast)?;
         let commands = &ast.commands;
-        for (c, t) in commands {
+        for c in commands {
             let result =
-                command(&mut context, c, t).map_err(|e| e.with_command_index(c.idx as usize))?;
-            assert_invariant!(result.len() == t.len(), "result length mismatch");
-            context.results.push(result.into_iter().map(Some).collect());
+                command(&mut context, c).map_err(|e| e.with_command_index(c.idx as usize))?;
+            assert_invariant!(
+                result.len() == c.value.result_type.len(),
+                "result length mismatch"
+            );
+            // drop unused result values
+            assert_invariant!(
+                result.len() == c.value.drop_values.len(),
+                "drop values length mismatch"
+            );
+            let result_values = result
+                .into_iter()
+                .zip(c.value.drop_values.iter().copied())
+                .map(|(v, drop)| {
+                    if !drop {
+                        Some(v)
+                    } else {
+                        consume_value(v);
+                        None
+                    }
+                })
+                .collect();
+            context.results.push(result_values);
         }
 
         let Context {
             tx_context,
             gas_coin,
             objects,
+            withdrawals,
             pure,
             receiving,
             results,
@@ -169,10 +322,12 @@ mod verify {
         consume_value_opt(gas_coin);
         // TODO do we want to check inputs in the dev inspect case?
         consume_value_opts(objects);
+        consume_value_opts(withdrawals);
         consume_value_opts(pure);
         consume_value_opts(receiving);
         assert_invariant!(results.len() == commands.len(), "result length mismatch");
-        for (i, (result, (_, tys))) in results.into_iter().zip(&ast.commands).enumerate() {
+        for (i, (result, c)) in results.into_iter().zip(&ast.commands).enumerate() {
+            let tys = &c.value.result_type;
             assert_invariant!(result.len() == tys.len(), "result length mismatch");
             for (j, (vopt, ty)) in result.into_iter().zip(tys).enumerate() {
                 drop_value_opt::<Mode>((i, j), vopt, ty)?;
@@ -184,11 +339,11 @@ mod verify {
 
     fn command(
         context: &mut Context,
-        sp!(_, command): &T::Command,
-        result_tys: &[Type],
+        sp!(_, c): &T::Command,
     ) -> Result<Vec<Value>, ExecutionError> {
-        Ok(match command {
-            T::Command_::MoveCall(mc) => {
+        let result_tys = &c.result_type;
+        Ok(match &c.command {
+            T::Command__::MoveCall(mc) => {
                 let T::MoveCall {
                     function,
                     arguments: args,
@@ -198,34 +353,34 @@ mod verify {
                 consume_values(arg_values);
                 (0..return_.len()).map(|_| Value).collect()
             }
-            T::Command_::TransferObjects(objects, recipient) => {
+            T::Command__::TransferObjects(objects, recipient) => {
                 let object_values = arguments(context, objects)?;
                 let recipient_value = argument(context, recipient)?;
                 consume_values(object_values);
                 consume_value(recipient_value);
                 vec![]
             }
-            T::Command_::SplitCoins(_, coin, amounts) => {
+            T::Command__::SplitCoins(_, coin, amounts) => {
                 let coin_value = argument(context, coin)?;
                 let amount_values = arguments(context, amounts)?;
                 consume_values(amount_values);
                 consume_value(coin_value);
                 (0..amounts.len()).map(|_| Value).collect()
             }
-            T::Command_::MergeCoins(_, target, coins) => {
+            T::Command__::MergeCoins(_, target, coins) => {
                 let target_value = argument(context, target)?;
                 let coin_values = arguments(context, coins)?;
                 consume_values(coin_values);
                 consume_value(target_value);
                 vec![]
             }
-            T::Command_::MakeMoveVec(_, xs) => {
+            T::Command__::MakeMoveVec(_, xs) => {
                 let vs = arguments(context, xs)?;
                 consume_values(vs);
                 vec![Value]
             }
-            T::Command_::Publish(_, _, _) => result_tys.iter().map(|_| Value).collect(),
-            T::Command_::Upgrade(_, _, _, x, _) => {
+            T::Command__::Publish(_, _, _) => result_tys.iter().map(|_| Value).collect(),
+            T::Command__::Upgrade(_, _, _, x, _) => {
                 let v = argument(context, x)?;
                 consume_value(v);
                 vec![Value]
@@ -267,8 +422,8 @@ mod verify {
             };
             return Err(ExecutionError::new_with_source(
                 ExecutionErrorKind::UnusedValueWithoutDrop {
-                    result_idx: i as u16,
-                    secondary_idx: j as u16,
+                    result_idx: checked_as!(i, u16)?,
+                    secondary_idx: checked_as!(j, u16)?,
                 },
                 msg,
             ));
@@ -292,7 +447,7 @@ mod verify {
     }
 
     fn move_value(context: &mut Context, l: T::Location) -> Result<Value, ExecutionError> {
-        let Some(value) = context.location(l).take() else {
+        let Some(value) = context.location(l)?.take() else {
             invariant_violation!("memory safety should have failed")
         };
         Ok(value)
@@ -300,7 +455,7 @@ mod verify {
 
     fn copy_value(context: &mut Context, l: T::Location) -> Result<Value, ExecutionError> {
         assert_invariant!(
-            context.location(l).is_some(),
+            context.location(l)?.is_some(),
             "memory safety should have failed"
         );
         Ok(Value)
@@ -308,7 +463,7 @@ mod verify {
 
     fn borrow_location(context: &mut Context, l: T::Location) -> Result<Value, ExecutionError> {
         assert_invariant!(
-            context.location(l).is_some(),
+            context.location(l)?.is_some(),
             "memory safety should have failed"
         );
         Ok(Value)

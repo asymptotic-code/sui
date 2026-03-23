@@ -47,12 +47,19 @@ module A2::m {
 
     entry fun canary<T>(use_original: bool, ctx: &mut TxContext) {
         let type_ = if (use_original) {
-            type_name::get_with_original_ids<T>()
+            type_name::with_original_ids<T>()
         } else {
-            type_name::get<T>()
+            type_name::with_defining_ids<T>()
         };
 
-        let addr = ascii::into_bytes(type_name::get_address(&type_));
+        let addr = ascii::into_bytes(type_name::address_string(&type_));
+
+        let addr_via_native = if (use_original) {
+            type_name::original_id<T>()
+        } else {
+            type_name::defining_id<T>()
+        };
+        assert!(addr_via_native == sui::address::from_ascii_bytes(&addr));
 
         transfer::transfer(
             Canary { id: object::new(ctx), addr },
@@ -77,6 +84,22 @@ module A2::m {
 
 //# run A2::m::canary --type-args A1::m::EB --args false --sender A
 
+//# run A2::m::canary --type-args A2::m::A --args true --sender A
+
+//# run A2::m::canary --type-args A2::m::B --args true --sender A
+
+//# run A2::m::canary --type-args A2::m::A --args false --sender A
+
+//# run A2::m::canary --type-args A2::m::B --args false --sender A
+
+//# run A2::m::canary --type-args A2::m::EA --args true --sender A
+
+//# run A2::m::canary --type-args A2::m::EB --args true --sender A
+
+//# run A2::m::canary --type-args A2::m::EA --args false --sender A
+
+//# run A2::m::canary --type-args A2::m::EB --args false --sender A
+
 //# view-object 4,0
 
 //# view-object 5,0
@@ -92,3 +115,17 @@ module A2::m {
 //# view-object 10,0
 
 //# view-object 11,0
+
+//# view-object 12,0
+
+//# view-object 13,0
+
+//# view-object 14,0
+
+//# view-object 15,0
+
+//# view-object 17,0
+
+//# view-object 18,0
+
+//# view-object 19,0

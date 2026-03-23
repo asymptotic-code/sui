@@ -11,7 +11,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use consensus_config::{AuthorityIndex, DefaultHashFunction, DIGEST_LENGTH};
+use consensus_config::{AuthorityIndex, DIGEST_LENGTH, DefaultHashFunction};
 use consensus_types::block::{BlockRef, BlockTimestampMs, Round, TransactionIndex};
 use enum_dispatch::enum_dispatch;
 use fastcrypto::hash::{Digest, HashFunction as _};
@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     block::{BlockAPI, Slot, VerifiedBlock},
+    context::Context,
     leader_scoring::ReputationScores,
     storage::Store,
 };
@@ -112,7 +113,6 @@ pub struct CommitV1 {
     leader: BlockRef,
     /// Refs to committed blocks, in the commit order.
     blocks: Vec<BlockRef>,
-    // TODO(fastpath): record rejected transactions.
 }
 
 impl CommitAPI for CommitV1 {
@@ -357,12 +357,21 @@ pub struct CommittedSubDag {
 
     /// Set by CommitObserver.
     ///
-    /// Whether the local DAG has the blocks to commit the leader.
-    /// This must be true when the commit is produced from local DAG,
-    /// and is false when the commit is received through commit sync.
-    /// When this is false, CommitFinalizer will not assume there are enough blocks
-    /// to optimistically finalize transactions in the commit.
-    pub local_dag_has_finalization_blocks: bool,
+    /// Indicates whether the commit was decided locally based on the local DAG.
+    ///
+    /// If true, `CommitFinalizer` can then assume a quorum of certificates are available
+    /// for each transaction in the commit if there is no reject vote, and proceed with
+    /// optimistic finalization of transactions.
+    ///
+    /// If the commit was decided by `UniversalCommitter`, this must be true.
+    /// If the commit was received from a peer via `CommitSyncer`, this must be false.
+    /// There may not be enough blocks in local DAG to decide on the commit.
+    ///
+    /// For safety, a previously locally decided commit may be recovered after restarting as
+    /// non-local, if its finalization state was not persisted.
+    pub decided_with_local_blocks: bool,
+    /// Whether rejected transactions in this commit have been recovered from storage.
+    pub recovered_rejected_transactions: bool,
     /// Optional scores that are provided as part of the consensus output to Sui
     /// that can then be used by Sui for future submission to consensus.
     pub reputation_scores_desc: Vec<(AuthorityIndex, u64)>,
@@ -371,6 +380,8 @@ pub struct CommittedSubDag {
     ///
     /// Indices of rejected transactions in each block.
     pub rejected_transactions_by_block: BTreeMap<BlockRef, Vec<TransactionIndex>>,
+    /// Used by consensus to communicate whether to always accept system transactions in this commit.
+    pub always_accept_system_transactions: bool,
 }
 
 impl CommittedSubDag {
@@ -380,15 +391,18 @@ impl CommittedSubDag {
         blocks: Vec<VerifiedBlock>,
         timestamp_ms: BlockTimestampMs,
         commit_ref: CommitRef,
+        always_accept_system_transactions: bool,
     ) -> Self {
         Self {
             leader,
             blocks,
             timestamp_ms,
             commit_ref,
-            local_dag_has_finalization_blocks: true,
+            decided_with_local_blocks: true,
+            recovered_rejected_transactions: false,
             reputation_scores_desc: vec![],
             rejected_transactions_by_block: BTreeMap::new(),
+            always_accept_system_transactions,
         }
     }
 }
@@ -407,9 +421,9 @@ impl Display for CommittedSubDag {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "CommittedSubDag(leader={}, ref={}, blocks=[{}])",
-            self.leader,
+            "{}@{} [{}])",
             self.commit_ref,
+            self.leader,
             self.blocks
                 .iter()
                 .map(|b| b.reference().to_string())
@@ -420,20 +434,37 @@ impl Display for CommittedSubDag {
 
 impl fmt::Debug for CommittedSubDag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}@{} ([", self.leader, self.commit_ref)?;
-        for block in &self.blocks {
-            write!(f, "{}, ", block.reference())?;
-        }
         write!(
             f,
-            "];{}ms;rs{:?})",
-            self.timestamp_ms, self.reputation_scores_desc
+            "{}@{} [{}])",
+            self.commit_ref,
+            self.leader,
+            self.blocks
+                .iter()
+                .map(|b| b.reference().to_string())
+                .join(", ")
+        )?;
+        write!(
+            f,
+            ";{}ms;rs{:?};{};{};[{}]",
+            self.timestamp_ms,
+            self.reputation_scores_desc,
+            self.decided_with_local_blocks,
+            self.recovered_rejected_transactions,
+            self.rejected_transactions_by_block
+                .iter()
+                .map(|(block_ref, transactions)| {
+                    format!("{}: {}, ", block_ref, transactions.len())
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
         )
     }
 }
 
 // Recovers the full CommittedSubDag from block store, based on Commit.
 pub(crate) fn load_committed_subdag_from_store(
+    context: &Arc<Context>,
     store: &dyn Store,
     commit: TrustedCommit,
     reputation_scores_desc: Vec<(AuthorityIndex, u64)>,
@@ -456,13 +487,31 @@ pub(crate) fn load_committed_subdag_from_store(
         .collect::<Vec<_>>();
     let leader_block_idx = leader_block_idx.expect("Leader block must be in the sub-dag");
     let leader_block_ref = blocks[leader_block_idx].reference();
+
     let mut subdag = CommittedSubDag::new(
         leader_block_ref,
         blocks,
         commit.timestamp_ms(),
         commit.reference(),
+        context
+            .protocol_config
+            .consensus_always_accept_system_transactions(),
     );
+
     subdag.reputation_scores_desc = reputation_scores_desc;
+
+    let reject_votes = store
+        .read_rejected_transactions(commit.reference())
+        .unwrap();
+    if let Some(reject_votes) = reject_votes {
+        subdag.decided_with_local_blocks = true;
+        subdag.recovered_rejected_transactions = true;
+        subdag.rejected_transactions_by_block = reject_votes;
+    } else {
+        subdag.decided_with_local_blocks = false;
+        subdag.recovered_rejected_transactions = false;
+    }
+
     subdag
 }
 
@@ -666,7 +715,7 @@ mod tests {
     use crate::{
         block::TestBlock,
         context::Context,
-        storage::{mem_store::MemStore, WriteBatch},
+        storage::{WriteBatch, mem_store::MemStore},
     };
 
     #[tokio::test]
@@ -732,7 +781,8 @@ mod tests {
             leader_ref,
             blocks.clone(),
         );
-        let subdag = load_committed_subdag_from_store(store.as_ref(), commit.clone(), vec![]);
+        let subdag =
+            load_committed_subdag_from_store(&context, store.as_ref(), commit.clone(), vec![]);
         assert_eq!(subdag.leader, leader_ref);
         assert_eq!(subdag.timestamp_ms, leader_block.timestamp_ms());
         assert_eq!(

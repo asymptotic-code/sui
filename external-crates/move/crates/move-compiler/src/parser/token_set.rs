@@ -1,12 +1,12 @@
 // Copyright (c) The Move Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::parser::lexer::{TOK_COUNT, Tok};
+use crate::parser::{
+    ast::{ENTRY_MODIFIER, EXTEND_MODIFIER, MACRO_MODIFIER, NATIVE_MODIFIER},
+    lexer::{TOK_COUNT, Tok},
+};
 
-use once_cell::sync::Lazy;
-use std::collections::HashMap;
-
-use super::ast::{ENTRY_MODIFIER, MACRO_MODIFIER, NATIVE_MODIFIER};
+use std::{collections::HashMap, sync::LazyLock};
 
 #[derive(Clone, Debug)]
 pub struct TokenSet {
@@ -26,7 +26,21 @@ const MEMBER_VISIBILITY_TOKENS: &[Tok] = &[Tok::Public];
 
 const MEMBER_MODIFIER_TOKENS: &[Tok] = &[Tok::Native];
 
-pub static MODULE_MEMBER_OR_MODULE_START_SET: Lazy<TokenSet> = Lazy::new(|| {
+pub static MODULE_START_SET: LazyLock<TokenSet> = LazyLock::new(|| {
+    let mut token_set = TokenSet::new();
+    token_set.add_identifier(EXTEND_MODIFIER);
+    token_set.add(Tok::Module);
+    token_set.add(Tok::Spec);
+    token_set
+});
+
+pub static SEMICOLON_SET: LazyLock<TokenSet> = LazyLock::new(|| {
+    let mut token_set = TokenSet::new();
+    token_set.add(Tok::Semicolon);
+    token_set
+});
+
+pub static MODULE_MEMBER_OR_MODULE_START_SET: LazyLock<TokenSet> = LazyLock::new(|| {
     let mut token_set = TokenSet::new();
     token_set.add_all(MODULE_MEMBER_TOKENS);
     token_set.add_all(MEMBER_VISIBILITY_TOKENS);
@@ -34,7 +48,8 @@ pub static MODULE_MEMBER_OR_MODULE_START_SET: Lazy<TokenSet> = Lazy::new(|| {
     token_set.add_identifier(MACRO_MODIFIER);
     token_set.add_identifier(ENTRY_MODIFIER);
     token_set.add_identifier(NATIVE_MODIFIER);
-    token_set.add(Tok::Module);
+    // Add module starts
+    token_set.union(&MODULE_START_SET);
     // both a member and module can be annotated
     token_set.add(Tok::NumSign);
     token_set
@@ -48,9 +63,9 @@ const PARAM_STARTS: &[Tok] = &[
     Tok::RestrictedIdentifier,
 ];
 
-pub static PARAM_START_SET: Lazy<TokenSet> = Lazy::new(|| TokenSet::from(PARAM_STARTS));
+pub static PARAM_START_SET: LazyLock<TokenSet> = LazyLock::new(|| TokenSet::from(PARAM_STARTS));
 
-pub static MIGRATION_PARAM_START_SET: Lazy<TokenSet> = Lazy::new(|| {
+pub static MIGRATION_PARAM_START_SET: LazyLock<TokenSet> = LazyLock::new(|| {
     let mut param_set = TokenSet::from(PARAM_STARTS);
     param_set.union(&TokenSet::from(MOVE_2024_KEYWORDS));
     param_set
@@ -59,7 +74,7 @@ pub static MIGRATION_PARAM_START_SET: Lazy<TokenSet> = Lazy::new(|| {
 const EXP_STARTS: &[Tok] = &[
     Tok::NumValue,
     Tok::NumTypedValue,
-    Tok::ByteStringValue,
+    Tok::StringValue,
     Tok::Identifier,
     Tok::SyntaxIdentifier,
     Tok::RestrictedIdentifier,
@@ -87,9 +102,9 @@ const EXP_STARTS: &[Tok] = &[
     Tok::Match,
 ];
 
-pub static EXP_START_SET: Lazy<TokenSet> = Lazy::new(|| TokenSet::from(EXP_STARTS));
+pub static EXP_START_SET: LazyLock<TokenSet> = LazyLock::new(|| TokenSet::from(EXP_STARTS));
 
-pub static SEQ_ITEM_START_SET: Lazy<TokenSet> = Lazy::new(|| {
+pub static SEQ_ITEM_START_SET: LazyLock<TokenSet> = LazyLock::new(|| {
     let mut token_set = TokenSet::new();
     token_set.add_all(EXP_STARTS);
     token_set.add(Tok::Let);
@@ -108,7 +123,7 @@ const TYPE_STARTS: &[Tok] = &[
     Tok::RestrictedIdentifier,
 ];
 
-pub static TYPE_START_SET: Lazy<TokenSet> = Lazy::new(|| TokenSet::from(TYPE_STARTS));
+pub static TYPE_START_SET: LazyLock<TokenSet> = LazyLock::new(|| TokenSet::from(TYPE_STARTS));
 
 /// Never part of a type (or type parameter)
 const TYPE_STOPS: &[Tok] = &[
@@ -135,13 +150,13 @@ const TYPE_STOPS: &[Tok] = &[
     Tok::MinusGreater,
 ];
 
-pub static TYPE_STOP_SET: Lazy<TokenSet> = Lazy::new(|| TokenSet::from(TYPE_STOPS));
+pub static TYPE_STOP_SET: LazyLock<TokenSet> = LazyLock::new(|| TokenSet::from(TYPE_STOPS));
 
 // including `Tok::For` here is hack for `#[syntax(for)]` attribute (similar to the one in
 // `syntax::parse_attribute`)
 const ATTR_STARTS: &[Tok] = &[Tok::Identifier, Tok::For];
 
-pub static ATTR_START_SET: Lazy<TokenSet> = Lazy::new(|| TokenSet::from(ATTR_STARTS));
+pub static ATTR_START_SET: LazyLock<TokenSet> = LazyLock::new(|| TokenSet::from(ATTR_STARTS));
 
 const FIELD_BINDING_STARTS: &[Tok] = &[
     Tok::Mut,
@@ -150,8 +165,8 @@ const FIELD_BINDING_STARTS: &[Tok] = &[
     Tok::PeriodPeriod,
 ];
 
-pub static FIELD_BINDING_START_SET: Lazy<TokenSet> =
-    Lazy::new(|| TokenSet::from(FIELD_BINDING_STARTS));
+pub static FIELD_BINDING_START_SET: LazyLock<TokenSet> =
+    LazyLock::new(|| TokenSet::from(FIELD_BINDING_STARTS));
 
 const VALUE_STARTS: &[Tok] = &[
     Tok::AtSign,
@@ -159,10 +174,10 @@ const VALUE_STARTS: &[Tok] = &[
     Tok::False,
     Tok::NumValue,
     Tok::NumTypedValue,
-    Tok::ByteStringValue,
+    Tok::StringValue,
 ];
 
-pub static VALUE_START_SET: Lazy<TokenSet> = Lazy::new(|| TokenSet::from(VALUE_STARTS));
+pub static VALUE_START_SET: LazyLock<TokenSet> = LazyLock::new(|| TokenSet::from(VALUE_STARTS));
 
 //**************************************************************************************************
 // IMPLS

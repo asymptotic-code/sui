@@ -9,6 +9,8 @@ use std::ascii::{Self, String};
 
 /// ASCII Character code for the `:` (colon) symbol.
 const ASCII_COLON: u8 = 58;
+/// ASCII Character code for the `<` (less than) symbol.
+const ASCII_LESS_THAN: u8 = 60;
 
 /// ASCII Character code for the `v` (lowercase v) symbol.
 const ASCII_V: u8 = 118;
@@ -37,18 +39,22 @@ public struct TypeName has copy, drop, store {
     name: String,
 }
 
-/// Return a value representation of the type `T`.  Package IDs
-/// that appear in fully qualified type names in the output from
-/// this function are defining IDs (the ID of the package in
-/// storage that first introduced the type).
-public native fun get<T>(): TypeName;
+/// Return a value representation of the type `T`. Package IDs that appear in fully qualified type
+/// names in the output from this function are defining IDs (the ID of the package in storage that
+/// first introduced the type).
+public native fun with_defining_ids<T>(): TypeName;
 
-/// Return a value representation of the type `T`.  Package IDs
-/// that appear in fully qualified type names in the output from
-/// this function are original IDs (the ID of the first version of
-/// the package, even if the type in question was introduced in a
-/// later upgrade).
-public native fun get_with_original_ids<T>(): TypeName;
+/// Return a value representation of the type `T`. Package IDs that appear in fully qualified type
+/// names in the output from this function are original IDs (the ID of the first version of
+/// the package, even if the type in question was introduced in a later upgrade).
+public native fun with_original_ids<T>(): TypeName;
+
+/// Like `with_defining_ids`, this accesses the package ID that original defined the type `T`.
+public native fun defining_id<T>(): address;
+
+/// Like `with_original_ids`, this accesses the original ID of the package that defines type `T`,
+/// even if the type was introduced in a later version of the package.
+public native fun original_id<T>(): address;
 
 /// Returns true iff the TypeName represents a primitive type, i.e. one of
 /// u8, u16, u32, u64, u128, u256, bool, address, vector.
@@ -74,13 +80,13 @@ public fun is_primitive(self: &TypeName): bool {
 }
 
 /// Get the String representation of `self`
-public fun borrow_string(self: &TypeName): &String {
+public fun as_string(self: &TypeName): &String {
     &self.name
 }
 
 /// Get Address string (Base16 encoded), first part of the TypeName.
 /// Aborts if given a primitive type.
-public fun get_address(self: &TypeName): String {
+public fun address_string(self: &TypeName): String {
     assert!(!self.is_primitive(), ENonModuleType);
 
     // Base16 (string) representation of an address has 2 symbols per byte.
@@ -100,7 +106,7 @@ public fun get_address(self: &TypeName): String {
 
 /// Get name of the module.
 /// Aborts if given a primitive type.
-public fun get_module(self: &TypeName): String {
+public fun module_string(self: &TypeName): String {
     assert!(!self.is_primitive(), ENonModuleType);
 
     // Starts after address and a double colon: `<addr as HEX>::`
@@ -121,7 +127,68 @@ public fun get_module(self: &TypeName): String {
     ascii::string(module_name)
 }
 
+/// Get name of the datatype (struct or enum).
+/// Aborts if given a primitive type.
+public fun datatype_string(self: &TypeName): String {
+    assert!(!self.is_primitive(), ENonModuleType);
+
+    // Starts after address and a double colon: `<addr as HEX>::`
+    let mut i = address::length() * 2 + 2;
+    let str_bytes = self.name.as_bytes();
+    let str_bytes_len = str_bytes.length();
+    let colon = ASCII_COLON;
+
+    // Skip past the `<module_name>::` to the datatype name.
+    // The asserts should never fail, since all non-primitive types should have two colons.
+    while (&str_bytes[i] != &colon) i = i + 1;
+    i = i + 1;
+    assert!(&str_bytes[i] == &colon);
+    i = i + 1;
+    assert!(&str_bytes[i] != &colon);
+
+    // Take all characters until the type parameters start at `<`, or until the end of the string.
+    let mut datatype_name = vector[];
+    let lt = ASCII_LESS_THAN;
+    loop {
+        let char = &str_bytes[i];
+        if (char == &lt) break;
+
+        datatype_name.push_back(*char);
+        i = i + 1;
+        if (i >= str_bytes_len) break;
+    };
+
+    ascii::string(datatype_name)
+}
+
 /// Convert `self` into its inner String
 public fun into_string(self: TypeName): String {
     self.name
+}
+
+// === Deprecated ===
+
+#[deprecated(note = b"Renamed to `with_defining_ids` for clarity.")]
+public fun get<T>(): TypeName {
+    with_defining_ids<T>()
+}
+
+#[deprecated(note = b"Renamed to `with_original_ids` for clarity.")]
+public fun get_with_original_ids<T>(): TypeName {
+    with_original_ids<T>()
+}
+
+#[deprecated(note = b"Renamed to `as_string` for consistency.")]
+public fun borrow_string(self: &TypeName): &String {
+    self.as_string()
+}
+
+#[deprecated(note = b"Renamed to `address_string` for consistency.")]
+public fun get_address(self: &TypeName): String {
+    self.address_string()
+}
+
+#[deprecated(note = b"Renamed to `module_string` for consistency.")]
+public fun get_module(self: &TypeName): String {
+    self.module_string()
 }

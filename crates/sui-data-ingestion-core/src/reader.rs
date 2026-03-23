@@ -9,16 +9,19 @@ use futures::StreamExt;
 use mysten_metrics::spawn_monitored_task;
 #[cfg(not(target_os = "macos"))]
 use notify::{RecommendedWatcher, RecursiveMode};
-use object_store::path::Path;
 use object_store::ObjectStore;
+use object_store::ObjectStoreExt;
+use object_store::path::Path;
+use prost::Message;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
-use std::{collections::BTreeMap, sync::Arc};
+use sui_rpc::proto::sui::rpc::v2::Checkpoint as ProtoCheckpoint;
 use sui_rpc_api::Client;
-use sui_storage::blob::Blob;
-use sui_types::full_checkpoint_content::CheckpointData;
+use sui_types::full_checkpoint_content::{Checkpoint, CheckpointData};
 use sui_types::messages_checkpoint::CheckpointSequenceNumber;
 use tap::pipe::Pipe;
 use tokio::sync::mpsc;
@@ -85,8 +88,14 @@ impl CheckpointReader {
             if self.exceeds_capacity(sequence_number) {
                 break;
             }
-            match fs::read(self.path.join(format!("{}.chk", sequence_number))) {
-                Ok(bytes) => checkpoints.push(Blob::from_bytes::<Arc<CheckpointData>>(&bytes)?),
+            match fs::read(self.path.join(format!("{}.binpb.zst", sequence_number))) {
+                Ok(bytes) => {
+                    let decompressed = zstd::decode_all(&bytes[..])?;
+                    let proto_checkpoint = ProtoCheckpoint::decode(&decompressed[..])?;
+                    let checkpoint: Checkpoint = (&proto_checkpoint).try_into()?;
+                    let checkpoint_data: CheckpointData = checkpoint.into();
+                    checkpoints.push(Arc::new(checkpoint_data));
+                }
                 Err(err) => match err.kind() {
                     std::io::ErrorKind::NotFound => break,
                     _ => Err(err)?,
@@ -105,20 +114,25 @@ impl CheckpointReader {
         store: &dyn ObjectStore,
         checkpoint_number: CheckpointSequenceNumber,
     ) -> Result<(Arc<CheckpointData>, usize)> {
-        let path = Path::from(format!("{}.chk", checkpoint_number));
+        let path = Path::from(format!("{}.binpb.zst", checkpoint_number));
         let response = store.get(&path).await?;
         let bytes = response.bytes().await?;
-        Ok((
-            Blob::from_bytes::<Arc<CheckpointData>>(&bytes)?,
-            bytes.len(),
-        ))
+        let decompressed = zstd::decode_all(&bytes[..])?;
+        let proto_checkpoint = ProtoCheckpoint::decode(&decompressed[..])?;
+        let checkpoint: Checkpoint = (&proto_checkpoint).try_into()?;
+        let checkpoint_data: CheckpointData = checkpoint.into();
+        Ok((Arc::new(checkpoint_data), bytes.len()))
     }
 
     async fn fetch_from_full_node(
         client: &Client,
         checkpoint_number: CheckpointSequenceNumber,
     ) -> Result<(Arc<CheckpointData>, usize)> {
-        let checkpoint = client.get_full_checkpoint(checkpoint_number).await?;
+        let checkpoint = client
+            .clone()
+            .get_full_checkpoint(checkpoint_number)
+            .await?
+            .into();
         let size = bcs::serialized_size(&checkpoint)?;
         Ok((Arc::new(checkpoint), size))
     }
@@ -310,10 +324,10 @@ impl CheckpointReader {
         for entry in fs::read_dir(self.path.clone())? {
             let entry = entry?;
             let filename = entry.file_name();
-            if let Some(sequence_number) = Self::checkpoint_number_from_file_path(&filename) {
-                if sequence_number < watermark {
-                    fs::remove_file(entry.path())?;
-                }
+            if let Some(sequence_number) = Self::checkpoint_number_from_file_path(&filename)
+                && sequence_number < watermark
+            {
+                fs::remove_file(entry.path())?;
             }
         }
         Ok(())

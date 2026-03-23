@@ -83,7 +83,7 @@ module 0x42::M {
     // New cases for non-local borrows
 
     public fun non_local_borrow_literal() {
-        let _ref = &*&0;  // Redundant borrow-dereference on literal
+        let _ref = &*&0u64;  // Redundant borrow-dereference on literal
     }
 
     public fun get_resource(): MyResource {
@@ -108,7 +108,7 @@ module 0x42::M {
     }
 
     public fun mixed_borrow_types() {
-        let mut resource = MyResource { value: 10 };
+        let resource = MyResource { value: 10 };
         let _ref = &*&mut *&resource;  // Mixed mutable and immutable redundant borrows
     }
 

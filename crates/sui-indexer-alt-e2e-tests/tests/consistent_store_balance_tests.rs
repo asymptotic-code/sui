@@ -3,21 +3,24 @@
 
 use std::path::PathBuf;
 
-use sui_indexer_alt_consistent_api::proto::rpc::consistent::v1alpha::{
-    consistent_service_client::ConsistentServiceClient, BatchGetBalancesRequest, GetBalanceRequest,
-    ListBalancesRequest,
-};
-use sui_indexer_alt_e2e_tests::{find_address_owned, FullCluster};
+use sui_indexer_alt_consistent_api::proto::rpc::consistent::v1alpha::BatchGetBalancesRequest;
+use sui_indexer_alt_consistent_api::proto::rpc::consistent::v1alpha::CHECKPOINT_HEIGHT_METADATA;
+use sui_indexer_alt_consistent_api::proto::rpc::consistent::v1alpha::GetBalanceRequest;
+use sui_indexer_alt_consistent_api::proto::rpc::consistent::v1alpha::ListBalancesRequest;
+use sui_indexer_alt_consistent_api::proto::rpc::consistent::v1alpha::consistent_service_client::ConsistentServiceClient;
 use sui_test_transaction_builder::TestTransactionBuilder;
-use sui_types::{
-    base_types::{ObjectRef, SuiAddress},
-    crypto::get_account_key_pair,
-    effects::TransactionEffectsAPI,
-    gas_coin::GAS,
-    object::Owner,
-    programmable_transaction_builder::ProgrammableTransactionBuilder,
-    transaction::{Transaction, TransactionData},
-};
+use sui_types::base_types::ObjectRef;
+use sui_types::base_types::SuiAddress;
+use sui_types::crypto::get_account_key_pair;
+use sui_types::effects::TransactionEffectsAPI;
+use sui_types::gas_coin::GAS;
+use sui_types::object::Owner;
+use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
+use sui_types::transaction::Transaction;
+use sui_types::transaction::TransactionData;
+
+use sui_indexer_alt_e2e_tests::FullCluster;
+use sui_indexer_alt_e2e_tests::find;
 
 /// 5 SUI gas budget
 const DEFAULT_GAS_BUDGET: u64 = 5_000_000_000;
@@ -310,7 +313,7 @@ async fn test_transfers() {
 
     // Fund A with gas
     let mut gas_budget = DEFAULT_GAS_BUDGET;
-    let mut a_gas = find_address_owned(
+    let mut a_gas = find::address_owned(
         &cluster
             .request_gas(a, gas_budget)
             .expect("Failed to request gas"),
@@ -639,7 +642,7 @@ async fn test_edge_cases() {
 
     request
         .metadata_mut()
-        .insert("x-sui-checkpoint", "10".parse().unwrap());
+        .insert(CHECKPOINT_HEIGHT_METADATA, "10".parse().unwrap());
 
     let err = client.list_balances(request).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::OutOfRange);
@@ -652,7 +655,7 @@ async fn test_edge_cases() {
 
     request
         .metadata_mut()
-        .insert("x-sui-checkpoint", "10".parse().unwrap());
+        .insert(CHECKPOINT_HEIGHT_METADATA, "10".parse().unwrap());
 
     let err = client.get_balance(request).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::OutOfRange);
@@ -673,7 +676,7 @@ async fn test_edge_cases() {
 
     request
         .metadata_mut()
-        .insert("x-sui-checkpoint", "10".parse().unwrap());
+        .insert(CHECKPOINT_HEIGHT_METADATA, "10".parse().unwrap());
 
     let err = client.batch_get_balances(request).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::OutOfRange);
@@ -703,7 +706,7 @@ fn create_coin(cluster: &mut FullCluster, owner: SuiAddress, amount: u64) -> Obj
         .expect("Failed to execute transaction");
 
     assert!(fx.status().is_ok(), "create coin transaction failed");
-    sui_indexer_alt_e2e_tests::find_address_owned(&fx).expect("Failed to find created coin")
+    find::address_owned(&fx).expect("Failed to find created coin")
 }
 
 /// Helper to perform forward pagination over balances.
@@ -727,9 +730,10 @@ async fn list_balances(
     });
 
     if let Some(checkpoint) = checkpoint {
-        request
-            .metadata_mut()
-            .insert("x-sui-checkpoint", checkpoint.to_string().parse().unwrap());
+        request.metadata_mut().insert(
+            CHECKPOINT_HEIGHT_METADATA,
+            checkpoint.to_string().parse().unwrap(),
+        );
     }
 
     let response = client.list_balances(request).await?.into_inner();
@@ -744,7 +748,7 @@ async fn list_balances(
         .into_iter()
         .map(|b| {
             assert_eq!(b.owner(), &owner, "Owner mismatch in balance response");
-            (b.coin_type().to_owned(), b.balance())
+            (b.coin_type().to_owned(), b.total_balance())
         })
         .collect();
 
@@ -769,9 +773,10 @@ async fn get_balance(
     });
 
     if let Some(checkpoint) = checkpoint {
-        request
-            .metadata_mut()
-            .insert("x-sui-checkpoint", checkpoint.to_string().parse().unwrap());
+        request.metadata_mut().insert(
+            CHECKPOINT_HEIGHT_METADATA,
+            checkpoint.to_string().parse().unwrap(),
+        );
     }
 
     let response = client.get_balance(request).await?.into_inner();
@@ -782,7 +787,7 @@ async fn get_balance(
         "Owner mismatch in balance response"
     );
 
-    Ok((response.coin_type().to_owned(), response.balance()))
+    Ok((response.coin_type().to_owned(), response.total_balance()))
 }
 
 async fn batch_get_balances(
@@ -805,9 +810,10 @@ async fn batch_get_balances(
     });
 
     if let Some(checkpoint) = checkpoint {
-        request
-            .metadata_mut()
-            .insert("x-sui-checkpoint", checkpoint.to_string().parse().unwrap());
+        request.metadata_mut().insert(
+            CHECKPOINT_HEIGHT_METADATA,
+            checkpoint.to_string().parse().unwrap(),
+        );
     }
 
     Ok(client
@@ -816,6 +822,12 @@ async fn batch_get_balances(
         .into_inner()
         .balances
         .into_iter()
-        .map(|b| (b.owner().to_owned(), b.coin_type().to_owned(), b.balance()))
+        .map(|b| {
+            (
+                b.owner().to_owned(),
+                b.coin_type().to_owned(),
+                b.total_balance(),
+            )
+        })
         .collect())
 }

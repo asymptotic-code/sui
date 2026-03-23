@@ -5,7 +5,7 @@ use crate::{
     expansion::ast::{Fields, ModuleIdent, Mutability, Value, Value_},
     hlir::translate::Context,
     ice, ice_assert,
-    naming::ast::{self as N, BuiltinTypeName_, Type, UseFuns, Var},
+    naming::ast::{self as N, BuiltinTypeName_, Type, TypeInner, UseFuns, Var},
     parser::ast::{DatatypeName, Field, VariantName},
     shared::{
         ast_debug::{AstDebug, AstWriter},
@@ -62,6 +62,19 @@ pub(super) fn compile_match(
     arms: Spanned<Vec<T::MatchArm>>,
 ) -> T::Exp {
     let loc = arms.loc;
+    match subject.ty.value.inner() {
+        TypeInner::Anything | TypeInner::Void | TypeInner::UnresolvedError => {
+            ice_assert!(
+                context.reporter,
+                context.env.has_errors(),
+                loc,
+                "Divergent or error match subject reached match compilation without a prior error"
+            );
+            let exp_value = sp(loc, T::UnannotatedExp_::UnresolvedError);
+            return T::exp(result_type.clone(), exp_value);
+        }
+        _ => {}
+    }
     // NB: `from` also flattens `or` and converts constants into guards.
     let (pattern_matrix, arms) = PatternMatrix::from(context, loc, subject.ty.clone(), arms.value);
 
@@ -157,7 +170,7 @@ fn build_match_tree(
         return MatchTree::Failure;
     }
 
-    if let Some(leaf) = matrix.wild_tree_opt(&fringe) {
+    if let Some(leaf) = matrix.wild_tree_opt(context, &fringe) {
         debug_print!(context.debug.match_specialization, (msg "wild leaf"), ("matrix" => matrix));
         return MatchTree::Leaf(leaf);
     }
@@ -216,7 +229,7 @@ fn compile_match_literal(
 
     for lit in lits {
         debug_print!(context.debug.match_specialization, ("lit specializing" => lit ; fmt));
-        let (mut new_binders, inner_matrix) = matrix.specialize_literal(&lit);
+        let (mut new_binders, inner_matrix) = matrix.specialize_literal(context, &lit);
         subject_binders.append(&mut new_binders);
         arms.insert(
             lit,
@@ -224,7 +237,7 @@ fn compile_match_literal(
         );
     }
 
-    let (mut new_binders, default) = matrix.specialize_default();
+    let (mut new_binders, default) = matrix.specialize_default(context);
     subject_binders.append(&mut new_binders);
     let default_result = Box::new(build_match_tree(context, fringe, default));
 
@@ -246,7 +259,15 @@ fn compile_match_struct(
     mident: ModuleIdent,
     datatype_name: DatatypeName,
 ) -> MatchTree {
-    let decl_fields = context.info.struct_fields(&mident, &datatype_name).unwrap();
+    let Some(decl_fields) = context.info.struct_fields(&mident, &datatype_name) else {
+        ice_assert!(
+            context.reporter,
+            context.env.has_errors(),
+            subject.var.loc,
+            "Native struct reached match compilation without a prior error"
+        );
+        return MatchTree::Failure;
+    };
     let (subject_binders, unpack) = if let Some((ploc, arg_types)) = matrix.first_struct_ctors() {
         let fringe_binders = context.make_imm_ref_match_binders(decl_fields, ploc, arg_types);
         let fringe_exps = make_fringe_entries(&fringe_binders);
@@ -264,7 +285,7 @@ fn compile_match_struct(
         );
         (subject_binders, unpack)
     } else {
-        let (subject_binders, default_matrix) = matrix.specialize_default();
+        let (subject_binders, default_matrix) = matrix.specialize_default(context);
         let unpack =
             StructUnpack::Default(Box::new(build_match_tree(context, fringe, default_matrix)));
         (subject_binders, unpack)
@@ -332,7 +353,7 @@ fn compile_variant_switch(
         };
         (vec![], empty_pattern)
     } else {
-        matrix.specialize_default()
+        matrix.specialize_default(context)
     };
     subject_binders.append(&mut new_binders);
 
@@ -789,7 +810,7 @@ fn arm_struct_unpack(
     }
 
     let (queue_entries, fields) =
-        make_arm_struct_unpack_fields(context, mut_ref, pat_loc, mident, struct_, fields);
+        make_arm_struct_unpack_fields(context, mut_ref, pat_loc, mident, struct_, fields)?;
     let unpack = make_arm_struct_unpack_stmt(mut_ref, mident, struct_, tyargs, fields, rhs);
     Some((queue_entries, unpack))
 }
@@ -821,7 +842,10 @@ fn make_arm_variant_unpack_fields(
             field_tys.map(|_field, (ndx, sp!(loc, ty))| {
                 (
                     ndx,
-                    sp(loc, N::Type_::Ref(mut_, Box::new(sp(loc, ty.base_type_())))),
+                    sp(
+                        loc,
+                        N::TypeInner::Ref(mut_, sp(loc, ty.base_type_())).into(),
+                    ),
                 )
             })
         } else {
@@ -834,7 +858,7 @@ fn make_arm_variant_unpack_fields(
             .make_unpack_binders(decl_fields.clone(), pat_loc, field_tys);
     let fringe_exps = make_fringe_entries(&fringe_binders);
 
-    let ordered_pats = order_fields_by_decl(decl_fields, field_pats);
+    let ordered_pats = order_fields_by_decl(context.hlir_context, decl_fields, field_pats);
 
     let mut unpack_fields: Vec<(Field, Var, Type)> = vec![];
     assert!(fringe_exps.len() == ordered_pats.len());
@@ -860,13 +884,17 @@ fn make_arm_struct_unpack_fields(
     mident: ModuleIdent,
     struct_: DatatypeName,
     fields: Fields<(Type, MatchPattern)>,
-) -> (Vec<(FringeEntry, MatchPattern)>, Vec<(Field, Var, Type)>) {
+) -> Option<(Vec<(FringeEntry, MatchPattern)>, Vec<(Field, Var, Type)>)> {
     let field_pats = fields.clone().map(|_key, (ndx, (_, pat))| (ndx, pat));
-    let decl_fields = context
-        .hlir_context
-        .info
-        .struct_fields(&mident, &struct_)
-        .unwrap();
+    let Some(decl_fields) = context.hlir_context.info.struct_fields(&mident, &struct_) else {
+        ice_assert!(
+            context.hlir_context.reporter,
+            context.hlir_context.env.has_errors(),
+            pat_loc,
+            "Native struct reached match arm compilation without a prior error"
+        );
+        return None;
+    };
 
     let field_tys = {
         let field_tys = fields.map(|_key, (ndx, (ty, _))| (ndx, ty));
@@ -874,7 +902,10 @@ fn make_arm_struct_unpack_fields(
             field_tys.map(|_field, (ndx, sp!(loc, ty))| {
                 (
                     ndx,
-                    sp(loc, N::Type_::Ref(mut_, Box::new(sp(loc, ty.base_type_())))),
+                    sp(
+                        loc,
+                        N::TypeInner::Ref(mut_, sp(loc, ty.base_type_())).into(),
+                    ),
                 )
             })
         } else {
@@ -887,7 +918,7 @@ fn make_arm_struct_unpack_fields(
             .make_unpack_binders(decl_fields.clone(), pat_loc, field_tys);
     let fringe_exps = make_fringe_entries(&fringe_binders);
 
-    let ordered_pats = order_fields_by_decl(decl_fields, field_pats);
+    let ordered_pats = order_fields_by_decl(context.hlir_context, decl_fields, field_pats);
 
     let mut unpack_fields: Vec<(Field, Var, Type)> = vec![];
     assert!(fringe_exps.len() == ordered_pats.len());
@@ -903,7 +934,7 @@ fn make_arm_struct_unpack_fields(
         )
         .collect::<Vec<_>>();
 
-    (queue_entries, unpack_fields)
+    Some((queue_entries, unpack_fields))
 }
 
 //------------------------------------------------
@@ -912,23 +943,23 @@ fn make_arm_struct_unpack_fields(
 
 fn make_var_ref(subject: FringeEntry) -> Box<T::Exp> {
     let FringeEntry { var, ty } = subject;
-    match ty {
-        sp!(_, N::Type_::Ref(false, _)) => {
+    match ty.value.inner() {
+        N::TypeInner::Ref(false, _) => {
             let loc = var.loc;
             Box::new(make_copy_exp(ty, loc, var))
         }
-        sp!(_, N::Type_::Ref(true, inner)) => {
+        N::TypeInner::Ref(true, inner) => {
             // NB(cswords): we freeze the mut ref at the non-mut ref type.
             let loc = var.loc;
-            let ref_ty = sp(loc, N::Type_::Ref(true, inner.clone()));
+            let ref_ty = sp(loc, N::TypeInner::Ref(true, inner.clone()).into());
             let freeze_arg = make_copy_exp(ref_ty, loc, var);
-            let freeze_ty = sp(loc, N::Type_::Ref(false, inner));
+            let freeze_ty = sp(loc, N::TypeInner::Ref(false, inner.clone()).into());
             Box::new(make_freeze_exp(freeze_ty, loc, freeze_arg))
         }
-        ty => {
+        _ => {
             // NB(cswords): we borrow the local
             let loc = var.loc;
-            let ref_ty = sp(loc, N::Type_::Ref(false, Box::new(ty)));
+            let ref_ty = sp(loc, N::TypeInner::Ref(false, ty).into());
             let borrow_exp = T::UnannotatedExp_::BorrowLocal(false, var);
             Box::new(T::exp(ref_ty, sp(loc, borrow_exp)))
         }
@@ -946,7 +977,7 @@ fn make_match_variant_unpack(
     rhs: FringeEntry,
     next: T::Exp,
 ) -> T::Exp {
-    assert!(matches!(rhs.ty.value, N::Type_::Ref(false, _)));
+    assert!(matches!(rhs.ty.value.inner(), N::TypeInner::Ref(false, _)));
     let mut seq = VecDeque::new();
 
     let rhs_loc = rhs.var.loc;
@@ -988,7 +1019,7 @@ fn make_match_struct_unpack(
     rhs: FringeEntry,
     next: T::Exp,
 ) -> T::Exp {
-    assert!(matches!(rhs.ty.value, N::Type_::Ref(false, _)));
+    assert!(matches!(rhs.ty.value.inner(), N::TypeInner::Ref(false, _)));
     let mut seq = VecDeque::new();
 
     let rhs_loc = rhs.var.loc;
@@ -1091,21 +1122,26 @@ fn make_arm_struct_unpack_stmt(
 
 fn make_match_lit(subject: FringeEntry) -> T::Exp {
     let FringeEntry { var, ty } = subject;
-    match ty {
-        sp!(ty_loc, N::Type_::Ref(false, inner)) => {
+    let sp!(ty_loc, ty_) = ty;
+    match ty_.inner() {
+        N::TypeInner::Ref(false, inner) => {
             let loc = var.loc;
-            let copy_exp = make_copy_exp(sp(ty_loc, N::Type_::Ref(false, inner.clone())), loc, var);
-            make_deref_exp(*inner, loc, copy_exp)
+            let copy_exp = make_copy_exp(
+                sp(ty_loc, N::TypeInner::Ref(false, inner.clone()).into()),
+                loc,
+                var,
+            );
+            make_deref_exp(inner.clone(), loc, copy_exp)
         }
-        sp!(_, N::Type_::Ref(true, inner)) => {
+        N::TypeInner::Ref(true, inner) => {
             let loc = var.loc;
 
             // NB(cswords): we now freeze the mut ref at the non-mut ref type.
-            let ref_ty = sp(loc, N::Type_::Ref(true, inner.clone()));
+            let ref_ty = sp(loc, N::TypeInner::Ref(true, inner.clone()).into());
             let freeze_arg = make_copy_exp(ref_ty, loc, var);
-            let freeze_ty = sp(loc, N::Type_::Ref(false, inner.clone()));
+            let freeze_ty = sp(loc, N::TypeInner::Ref(false, inner.clone()).into());
             let frozen_exp = make_freeze_exp(freeze_ty, loc, freeze_arg);
-            make_deref_exp(*inner, loc, frozen_exp)
+            make_deref_exp(inner.clone(), loc, frozen_exp)
         }
         _ty => unreachable!(),
     }

@@ -5,16 +5,17 @@ use crate::{
     error::{BridgeError, BridgeResult},
     types::{BridgeAction, BridgeCommittee, SignedBridgeAction, VerifiedSignedBridgeAction},
 };
-use ethers::core::k256::ecdsa::VerifyingKey;
-use ethers::core::k256::elliptic_curve::sec1::ToEncodedPoint;
-use ethers::types::Address as EthAddress;
+use alloy::{
+    primitives::Address as EthAddress,
+    signers::k256::{ecdsa::VerifyingKey, elliptic_curve::sec1::ToEncodedPoint},
+};
 use fastcrypto::hash::HashFunction;
 use fastcrypto::{
     encoding::{Encoding, Hex},
     error::FastCryptoError,
     secp256k1::{
-        recoverable::Secp256k1RecoverableSignature, Secp256k1KeyPair, Secp256k1PublicKey,
-        Secp256k1PublicKeyAsBytes,
+        Secp256k1KeyPair, Secp256k1PublicKey, Secp256k1PublicKeyAsBytes,
+        recoverable::Secp256k1RecoverableSignature,
     },
     traits::{RecoverableSigner, ToFromBytes, VerifyRecoverable},
 };
@@ -35,7 +36,7 @@ impl BridgeAuthorityPublicKeyBytes {
     pub fn to_eth_address(&self) -> EthAddress {
         // unwrap: the conversion should not fail
         let pubkey = VerifyingKey::from_sec1_bytes(self.as_bytes()).unwrap();
-        let affine: &ethers::core::k256::AffinePoint = pubkey.as_ref();
+        let affine: &alloy::signers::k256::AffinePoint = pubkey.as_ref();
         let encoded = affine.to_encoded_point(false);
         let pubkey = &encoded.as_bytes()[1..];
         assert_eq!(pubkey.len(), 64, "raw public key must be 64 bytes");
@@ -79,7 +80,7 @@ pub struct ConciseBridgeAuthorityPublicKeyBytesRef<'a>(&'a BridgeAuthorityPublic
 
 impl Debug for ConciseBridgeAuthorityPublicKeyBytesRef<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        let s = Hex::encode(self.0 .0 .0.get(0..4).ok_or(std::fmt::Error)?);
+        let s = Hex::encode(self.0.0.0.get(0..4).ok_or(std::fmt::Error)?);
         write!(f, "k#{}..", s)
     }
 }
@@ -92,7 +93,7 @@ impl Display for ConciseBridgeAuthorityPublicKeyBytesRef<'_> {
 
 impl AsRef<[u8]> for BridgeAuthorityPublicKeyBytes {
     fn as_ref(&self) -> &[u8] {
-        self.0 .0.as_ref()
+        self.0.0.as_ref()
     }
 }
 
@@ -118,7 +119,9 @@ pub struct BridgeAuthoritySignInfo {
 
 impl BridgeAuthoritySignInfo {
     pub fn new(msg: &BridgeAction, secret: &BridgeAuthorityKeyPair) -> Self {
-        let msg_bytes = msg.to_bytes();
+        let msg_bytes = msg
+            .to_bytes()
+            .expect("Message encoding should not fail for valid actions");
         Self {
             authority_pub_key: secret.public().clone(),
             signature: secret.sign_recoverable_with_hash::<Keccak256>(&msg_bytes),
@@ -134,7 +137,9 @@ impl BridgeAuthoritySignInfo {
         }
 
         // 2. verify signature
-        let msg_bytes = msg.to_bytes();
+        let msg_bytes = msg.to_bytes().map_err(|e| {
+            BridgeError::Generic(format!("Failed to encode message for verification: {}", e))
+        })?;
 
         self.authority_pub_key
             .verify_recoverable_with_hash::<Keccak256>(&msg_bytes, &self.signature)
@@ -183,7 +188,7 @@ mod tests {
     use crate::test_utils::{get_test_authority_and_key, get_test_sui_to_eth_bridge_action};
     use crate::types::SignedBridgeAction;
     use crate::types::{BridgeAction, BridgeAuthority, SuiToEthBridgeAction};
-    use ethers::types::Address as EthAddress;
+    use alloy::primitives::Address as EthAddress;
     use fastcrypto::traits::{KeyPair, ToFromBytes};
     use prometheus::Registry;
     use std::str::FromStr;

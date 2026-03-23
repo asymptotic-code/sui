@@ -36,6 +36,16 @@ async function serverVersion(context: Readonly<Context>): Promise<void> {
     }
 }
 
+/**
+ * An extension command that restarts the language server. Modeled
+ * after a similar command in `rust-analyzer`.
+ */
+async function serverRestart(context: Readonly<Context>): Promise<void> {
+    await context.stopClient();
+    await context.startClient();
+}
+
+
 async function findPkgRoot(): Promise<string | undefined> {
     const activeEditor = vscode.window.activeTextEditor;
     if (!activeEditor) {
@@ -125,7 +135,7 @@ async function traceProject(context: Readonly<Context>): Promise<void> {
         ignoreFocusOut: true, // Keeps the input box open when it loses focus
     });
     if (filter !== undefined) {
-        const cmd = filter.length > 0 ? `test ${filter} --trace-execution` : 'test --trace-execution';
+        const cmd = filter.length > 0 ? `test ${filter} --trace --disassemble` : 'test --trace --disassemble';
         return suiMoveCmd(context, cmd);
     }
     return Promise.resolve();
@@ -159,6 +169,7 @@ export async function activate(extensionContext: Readonly<vscode.ExtensionContex
 
     // Register handlers for VS Code commands that the user explicitly issues.
     context.registerCommand('serverVersion', serverVersion);
+    context.registerCommand('serverRestart', serverRestart);
     context.registerCommand('build', buildProject);
     context.registerCommand('test', testProject);
     context.registerCommand('trace', traceProject);

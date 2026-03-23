@@ -5,12 +5,6 @@ info:
   edition: 2024.alpha
   lint: false
 ---
-error[E04036]: non-exhaustive pattern
-  ┌─ tests/move_2024/parser/invalid_mut_usage_match.move:9:15
-  │
-9 │        match (o) {
-  │               ^ Pattern 'Option::None' not covered
-
 error[E04016]: too few arguments
    ┌─ tests/move_2024/parser/invalid_mut_usage_match.move:10:10
    │
@@ -26,8 +20,14 @@ error[E01002]: unexpected token
 error[E03009]: unbound variable
    ┌─ tests/move_2024/parser/invalid_mut_usage_match.move:10:44
    │
+ 8 │     public fun weird_is_some(o: Option<bool>): bool {
+   │                              - Similarly named defintion found here
+ 9 │        match (o) {
 10 │          Option::Other { mut x: mut y } => y,
-   │                                            ^ Unbound variable 'y'
+   │                                            ^
+   │                                            │
+   │                                            Unbound variable 'y'
+   │                                            Did you mean: 'o'
 
 error[E02010]: invalid name
    ┌─ tests/move_2024/parser/invalid_mut_usage_match.move:11:33
@@ -52,27 +52,31 @@ error[E01002]: unexpected token
 error[E03009]: unbound variable
    ┌─ tests/move_2024/parser/invalid_mut_usage_match.move:12:40
    │
+ 8 │     public fun weird_is_some(o: Option<bool>): bool {
+   │                              - Similarly named defintion found here
+   ·
 12 │          Option::Other { mut x: y } => y,
-   │                                        ^ Unbound variable 'y'
-
-warning[W09002]: unused variable
-   ┌─ tests/move_2024/parser/invalid_mut_usage_match.move:13:10
-   │
-13 │          x @ mut Option::Some(true) => true,
-   │          ^ Unused local variable 'x'. Consider removing or prefixing with an underscore: '_x'
-   │
-   = This warning can be suppressed with '#[allow(unused_variable)]' applied to the 'module' or module member ('const', 'fun', or 'struct')
+   │                                        ^
+   │                                        │
+   │                                        Unbound variable 'y'
+   │                                        Did you mean: 'o'
 
 error[E01002]: unexpected token
-   ┌─ tests/move_2024/parser/invalid_mut_usage_match.move:13:14
+   ┌─ tests/move_2024/parser/invalid_mut_usage_match.move:13:15
    │
-13 │          x @ mut Option::Some(true) => true,
-   │              ^^^ Invalid 'mut' keyword on non-variable pattern
+13 │          _x @ mut Option::Some(true) => true,
+   │               ^^^ Invalid 'mut' keyword on non-variable pattern
+
+error[E01002]: unexpected token
+   ┌─ tests/move_2024/parser/invalid_mut_usage_match.move:14:15
+   │
+14 │          _x @ mut Option::Some(false) => false,
+   │               ^^^ Invalid 'mut' keyword on non-variable pattern
 
 error[E02010]: invalid name
-   ┌─ tests/move_2024/parser/invalid_mut_usage_match.move:14:10
+   ┌─ tests/move_2024/parser/invalid_mut_usage_match.move:15:10
    │
-14 │          mut Option::None => false,
+15 │          mut Option::None => false,
    │          ^^^ ------------ Expected a valid 'enum' variant, 'struct', or 'const', not a variable
    │          │    
    │          'mut' can only be used with variable bindings in patterns

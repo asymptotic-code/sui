@@ -1,34 +1,82 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::static_programmable_transactions::{
-    env::Env, linkage::resolved_linkage::RootedLinkage, loading::ast as L,
+use crate::{
+    execution_mode::ExecutionMode,
+    gas_charger::GasPayment,
+    static_programmable_transactions::{
+        env::Env,
+        loading::ast as L,
+        metering::{self, translation_meter::TranslationMeter},
+    },
 };
-use move_core_types::language_storage::StructTag;
+use move_core_types::{account_address::AccountAddress, language_storage::StructTag, u256::U256};
 use sui_types::{
+    base_types::TxContext,
     error::ExecutionError,
     object::Owner,
-    transaction::{self as P, CallArg, ObjectArg},
+    transaction::{self as P, CallArg, FundsWithdrawalArg, ObjectArg, SharedObjectMutability},
 };
 
-pub fn transaction(
+pub fn transaction<Mode: ExecutionMode>(
+    meter: &mut TranslationMeter<'_, '_>,
     env: &Env,
+    tx_context: &TxContext,
+    // which inputs are withdrawals that need to be converted to coins, must
+    // be the same length as the inputs
+    withdrawal_compatibility_inputs: Option<Vec<bool>>,
+    gas_payment: Option<GasPayment>,
     pt: P::ProgrammableTransaction,
 ) -> Result<L::Transaction, ExecutionError> {
+    metering::pre_translation::meter(meter, &pt)?;
     let P::ProgrammableTransaction { inputs, commands } = pt;
-    let inputs = inputs
+    // withdrawal_compatibility_inputs specified ==> the protocol config flag is set
+    assert_invariant!(
+        withdrawal_compatibility_inputs.is_none()
+            || env
+                .protocol_config
+                .convert_withdrawal_compatibility_ptb_arguments(),
+        "if withdrawal compatibility must be specified, then the flag is set in the protocol config"
+    );
+    let withdrawal_compatibility_inputs =
+        withdrawal_compatibility_inputs.unwrap_or_else(|| vec![false; inputs.len()]);
+    assert_invariant!(
+        inputs.len() == withdrawal_compatibility_inputs.len(),
+        "withdrawal compatibility inputs must be the same length as the inputs"
+    );
+    let inputs = withdrawal_compatibility_inputs
         .into_iter()
-        .map(|arg| input(env, arg))
+        .zip(inputs)
+        .map(|(is_withdrawal_compatibility_input, arg)| {
+            input::<Mode>(env, tx_context, is_withdrawal_compatibility_input, arg)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let commands = commands
         .into_iter()
         .enumerate()
         .map(|(idx, cmd)| command(env, cmd).map_err(|e| e.with_command_index(idx)))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(L::Transaction { inputs, commands })
+    let loaded_tx = L::Transaction {
+        gas_payment,
+        inputs,
+        commands,
+    };
+    metering::loading::meter(meter, &loaded_tx)?;
+    Ok(loaded_tx)
 }
 
-fn input(env: &Env, arg: CallArg) -> Result<(L::InputArg, L::InputType), ExecutionError> {
+fn input<Mode: ExecutionMode>(
+    env: &Env,
+    tx_context: &TxContext,
+    // True iff this is a withdrawal that needs to be converted to a coin
+    is_withdrawal_compatibility_input: bool,
+    arg: CallArg,
+) -> Result<(L::InputArg, L::InputType), ExecutionError> {
+    // is_withdrawal_compatibility_input ==> FundsWithdrawal
+    assert_invariant!(
+        !is_withdrawal_compatibility_input || matches!(arg, CallArg::FundsWithdrawal(_)),
+        "withdrawal compatibility inputs must be FundsWithdrawal"
+    );
     Ok(match arg {
         CallArg::Pure(bytes) => (L::InputArg::Pure(bytes), L::InputType::Bytes),
         CallArg::Object(ObjectArg::Receiving(oref)) => {
@@ -48,7 +96,12 @@ fn input(env: &Env, arg: CallArg) -> Result<(L::InputArg, L::InputType), Executi
                 Owner::ObjectOwner(_)
                 | Owner::Shared { .. }
                 | Owner::ConsensusAddressOwner { .. } => {
-                    invariant_violation!("Unexpected owner for ImmOrOwnedObject: {:?}", obj.owner);
+                    assert_invariant!(
+                        Mode::allow_arbitrary_values(),
+                        "Unexpected owner for ImmOrOwnedObject: {:?}",
+                        obj.owner,
+                    );
+                    L::ObjectArg::OwnedObject(oref)
                 }
             };
             (L::InputArg::Object(arg), L::InputType::Fixed(ty))
@@ -56,36 +109,94 @@ fn input(env: &Env, arg: CallArg) -> Result<(L::InputArg, L::InputType), Executi
         CallArg::Object(ObjectArg::SharedObject {
             id,
             initial_shared_version,
-            mutable,
+            mutability,
         }) => {
             let obj = env.read_object(&id)?;
             let Some(ty) = obj.type_() else {
-                invariant_violation!("Object {:?} has does not have a Move type", id);
+                invariant_violation!("Object {:?} does not have a Move type", id);
             };
             let tag: StructTag = ty.clone().into();
             let ty = env.load_type_from_struct(&tag)?;
+            let kind = match obj.owner {
+                Owner::AddressOwner(_) | Owner::ObjectOwner(_) | Owner::Immutable => {
+                    assert_invariant!(
+                        Mode::allow_arbitrary_values(),
+                        "Unexpected owner for SharedObject: {:?}",
+                        obj.owner
+                    );
+                    L::SharedObjectKind::Party
+                }
+                Owner::Shared { .. } => L::SharedObjectKind::Legacy,
+                Owner::ConsensusAddressOwner { .. } => L::SharedObjectKind::Party,
+            };
             (
                 L::InputArg::Object(L::ObjectArg::SharedObject {
                     id,
                     initial_shared_version,
-                    mutable,
+                    mutability: object_mutability(mutability),
+                    kind,
                 }),
                 L::InputType::Fixed(ty),
             )
         }
-        CallArg::BalanceWithdraw(_) => {
-            // TODO(address-balances): Add support for balance withdraws.
-            todo!("Load balance withdraw call arg")
+        CallArg::FundsWithdrawal(f) => {
+            assert_invariant!(
+                env.protocol_config.enable_accumulators(),
+                "Withdrawals should be rejected at signing if accumulators are not enabled"
+            );
+            let FundsWithdrawalArg {
+                reservation,
+                type_arg,
+                withdraw_from,
+            } = f;
+            let amount = match reservation {
+                P::Reservation::MaxAmountU64(u) => U256::from(u),
+                // TODO when types other than u64 are supported, we must check that this is a
+                // valid amount for the type
+            };
+            let funds_ty = match type_arg {
+                P::WithdrawalTypeArg::Balance(inner) => {
+                    let inner = env.load_type_tag(0, &inner)?;
+                    env.balance_type(inner)?
+                }
+            };
+            let ty = env.withdrawal_type(funds_ty.clone())?;
+            let owner: AccountAddress = match withdraw_from {
+                P::WithdrawFrom::Sender => tx_context.sender().into(),
+                P::WithdrawFrom::Sponsor => tx_context
+                    .sponsor()
+                    .ok_or_else(|| {
+                        make_invariant_violation!(
+                            "A sponsor withdrawal requires a sponsor and should have been \
+                            checked at signing"
+                        )
+                    })?
+                    .into(),
+            };
+            (
+                L::InputArg::FundsWithdrawal(L::FundsWithdrawalArg {
+                    from_compatibility_object: is_withdrawal_compatibility_input,
+                    amount,
+                    ty: ty.clone(),
+                    owner,
+                }),
+                L::InputType::Fixed(ty),
+            )
         }
     })
+}
+
+fn object_mutability(mutability: SharedObjectMutability) -> L::ObjectMutability {
+    match mutability {
+        SharedObjectMutability::Mutable => L::ObjectMutability::Mutable,
+        SharedObjectMutability::NonExclusiveWrite => L::ObjectMutability::NonExclusiveWrite,
+        SharedObjectMutability::Immutable => L::ObjectMutability::Immutable,
+    }
 }
 
 fn command(env: &Env, command: P::Command) -> Result<L::Command, ExecutionError> {
     Ok(match command {
         P::Command::MoveCall(pmc) => {
-            let resolved_linkage = env
-                .linkage_analysis
-                .compute_call_linkage(&pmc, env.linkable_store)?;
             let P::ProgrammableMoveCall {
                 package,
                 module,
@@ -93,13 +204,12 @@ fn command(env: &Env, command: P::Command) -> Result<L::Command, ExecutionError>
                 type_arguments: ptype_arguments,
                 arguments,
             } = *pmc;
-            let linkage = RootedLinkage::new(*package, resolved_linkage);
             let type_arguments = ptype_arguments
                 .into_iter()
                 .enumerate()
                 .map(|(idx, ty)| env.load_type_input(idx, ty))
                 .collect::<Result<Vec<_>, _>>()?;
-            let function = env.load_function(package, module, name, type_arguments, linkage)?;
+            let function = env.load_function(package, module, name, type_arguments)?;
             L::Command::MoveCall(Box::new(L::MoveCall {
                 function,
                 arguments,

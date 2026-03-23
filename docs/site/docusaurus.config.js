@@ -1,13 +1,24 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { themes } from "prism-react-renderer";
+import { fileURLToPath } from "url";
 import path from "path";
 import math from "remark-math";
 import katex from "rehype-katex";
+import remarkGlossary from "./src/shared/plugins/remark-glossary.js";
+
+const npm2yarn = require("@docusaurus/remark-plugin-npm2yarn");
 
 const effortRemarkPlugin = require("./src/plugins/effort");
 const betaRemarkPlugin = require("./src/plugins/betatag");
+
+const lightCodeTheme = require("prism-react-renderer").themes.github;
+const darkCodeTheme = require("prism-react-renderer").themes.nightOwl;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const SIDEBARS_PATH = fileURLToPath(new URL("./sidebars.js", import.meta.url));
 
 require("dotenv").config();
 
@@ -31,62 +42,127 @@ const config = {
   // Set the /<baseUrl>/ pathname under which your site is served
   // For GitHub pages deployment, it is often '/<projectName>/'
   baseUrl: "/",
-  customFields: {
-    amplitudeKey: process.env.AMPLITUDE_KEY,
-  },
 
   onBrokenLinks: "throw",
-  onBrokenMarkdownLinks: "warn",
+  onBrokenAnchors: "ignore",
+  onDuplicateRoutes: 'ignore',
 
-  // Even if you don't use internationalization, you can use this field to set
-  // useful metadata like html lang. For example, if your site is Chinese, you
-  // may want to replace "en" with "zh-Hans".
-  /*  i18n: {
-    defaultLocale: "en",
-    locales: [
-      "en",
-      "el",
-      "fr",
-      "ko",
-      "tr",
-      "vi",
-      "zh-CN",
-      "zh-TW",
-    ],
-  },*/
+  staticDirectories: ["static", "src/open-spec"],
   markdown: {
     format: "detect",
     mermaid: true,
+    hooks: {
+    onBrokenMarkdownLinks: 'throw',
   },
+  },
+  
+  clientModules: [require.resolve("./src/client/pushfeedback-toc.js")],
   plugins: [
-    // ....
-    // path.resolve(__dirname, `./src/plugins/examples`),
+    function llmsTxtDirectivePlugin() {
+      return {
+        name: 'llms-txt-directive-plugin',
+        injectHtmlTags() {
+          return {
+            preBodyTags: [
+              {
+                tagName: 'link',
+                attributes: {
+                  rel: 'alternate',
+                  type: 'text/plain',
+                  href: '/llms.txt',
+                  title: 'LLMs.txt',
+                },
+              },
+            ],
+          };
+        },
+      };
+    },
+     function aliasPlugin() {
+      return {
+        name: 'custom-aliases',
+        configureWebpack() {
+          return {
+            resolve: {
+              alias: {
+                '@generated-imports': path.resolve(__dirname, '.generated'),
+              },
+            },
+          };
+        },
+      };
+    },
+    //require.resolve('./src/plugins/framework'),
+    "docusaurus-plugin-copy-page-button",
+    require.resolve("./src/plugins/validate-openrpc"),
+
     [
-      "posthog-docusaurus",
+      require.resolve("./src/shared/plugins/plausible"),
       {
-        apiKey: process.env.POSTHOG_API_KEY || "dev", // required
-        appUrl: "https://us.i.posthog.com", // optional, defaults to "https://us.i.posthog.com"
-        enableInDevelopment: false, // optional
+        domain: "docs.sui.io",
+        enableInDev: false,
+        trackOutboundLinks: true,
+        hashMode: false,
+        trackLocalhost: false,
       },
     ],
-    [path.resolve(__dirname, "src/plugins/inject-code"), {}],
+    function stepHeadingLoader() {
+      return {
+        name: "step-heading-loader",
+        configureWebpack() {
+          return {
+            module: {
+              rules: [
+                {
+                  test: /\.mdx?$/, // run on .md and .mdx
+                  enforce: "pre", // make sure it runs BEFORE @docusaurus/mdx-loader
+                  include: [
+                    // adjust these to match where your Markdown lives
+                    path.resolve(__dirname, "../content"),
+                  ],
+                  use: [
+                    {
+                      loader: path.resolve(
+                        __dirname,
+                        "./src/shared/plugins/inject-code/stepLoader.js",
+                      ),
+                    },
+                  ],
+                },
+              ],
+            },
+            resolve: {
+              alias: {
+                "@repo": path.resolve(__dirname, "../../"),
+                "@docs": path.resolve(__dirname, "../content/"),
+              },
+            },
+          };
+        },
+      };
+    },
     [
       "@graphql-markdown/docusaurus",
       {
-        schema: "../../crates/sui-graphql-rpc/schema.graphql",
-        rootPath: "../content", // docs will be generated under rootPath/baseURL
-        baseURL: "references/sui-api/sui-graphql/reference",
+        id: "beta",
+        schema: "../../crates/sui-indexer-alt-graphql/schema.graphql",
+        rootPath: "../content",
+        baseURL: "references/sui-api/sui-graphql/beta/reference",
+        homepage: false,
+        docOptions: {
+          frontMatter: {
+            isGraphQlBeta: true,
+            pagination_next: null, // disable page navigation next
+            pagination_prev: null, // disable page navigation previous
+            hide_table_of_contents: true, // disable page table of content
+          },
+        },
         loaders: {
           GraphQLFileLoader: "@graphql-tools/graphql-file-loader",
         },
       },
     ],
-    [
-      "docusaurus-plugin-includes",
-      {
-        postBuildDeletedFolders: ["../snippets"],
-      },
-    ],
+    //require.resolve("./src/shared/plugins/tabs-md-client/index.mjs"),
     async function myPlugin(context, options) {
       return {
         name: "docusaurus-tailwindcss",
@@ -98,46 +174,38 @@ const config = {
         },
       };
     },
-    path.resolve(__dirname, `./src/plugins/descriptions`),
+    path.resolve(__dirname, `./src/shared/plugins/descriptions`),
     path.resolve(__dirname, `./src/plugins/framework`),
-    path.resolve(__dirname, `./src/plugins/askcookbook`),
     path.resolve(__dirname, `./src/plugins/protocol`),
   ],
   presets: [
     [
-      "classic",
       /** @type {import('@docusaurus/preset-classic').Options} */
-      ({
+      "classic",
+      {
         docs: {
           path: "../content",
           routeBasePath: "/",
-          sidebarPath: require.resolve("./sidebars.js"),
+          sidebarPath: SIDEBARS_PATH,
           // the double docs below is a fix for having the path set to ../content
           editUrl: "https://github.com/MystenLabs/sui/tree/main/docs/docs",
-          /*disableVersioning: true,
-          lastVersion: "current",
-          versions: {
-            current: {
-              label: "Latest",
-              path: "/",
-            },
-          },
-          onlyIncludeVersions: [
-            "current",
-            "1.0.0",
-          ],*/
+          exclude: [
+            "**/snippets/**",
+            "**/standards/deepbook-ref/**",
+            "**/app-examples/ts-sdk-ref/**",
+            "**/app-examples/ts-sdk-ref/**",
+          ],
           admonitions: {
             keywords: ["checkpoint"],
             extendDefaults: true,
           },
+          beforeDefaultRemarkPlugins: [],
           remarkPlugins: [
             math,
-            [
-              require("@docusaurus/remark-plugin-npm2yarn"),
-              { sync: true, converters: ["yarn", "pnpm"] },
-            ],
+            [npm2yarn, { sync: true, converters: ["yarn", "pnpm"] }],
             effortRemarkPlugin,
             betaRemarkPlugin,
+            [remarkGlossary, { glossaryFile: path.resolve(__dirname, "static/glossary.json") }],
           ],
           rehypePlugins: [katex],
         },
@@ -145,14 +213,37 @@ const config = {
           customCss: [
             require.resolve("./src/css/fonts.css"),
             require.resolve("./src/css/custom.css"),
+            require.resolve("./src/css/details.css"),
           ],
         },
-      }),
+        pages: {
+          remarkPlugins: [[remarkGlossary, { glossaryFile: path.resolve(__dirname, "static/glossary.json") }]],
+        }
+      },
     ],
   ],
+
   scripts: [
+    //{ src: "./src/js/tabs-md.js", defer: true },
     {
-      src: "/js/clarity.js",
+      src: "https://widget.kapa.ai/kapa-widget.bundle.js",
+      "data-website-id": "b05d8d86-0b10-4eb2-acfe-e9012d75d9db",
+      "data-project-name": "Sui Knowledge",
+      "data-project-color": "#298DFF",
+      "data-button-hide": "true",
+      "data-modal-title": "Ask Sui AI",
+      "data-modal-ask-ai-input-placeholder": "Ask me anything about Sui!",
+      "data-modal-example-questions":"How do I deploy to Sui?,What is Mysticeti?,What are object ownership types for Sui Move?,What are programmable transaction blocks (PTBs)?",
+      "data-modal-body-bg-color": "#E0E2E6",
+      "data-source-link-bg-color": "#FFFFFF",
+      "data-source-link-border": "#298DFF",
+      "data-answer-feedback-button-bg-color": "#FFFFFF",
+      "data-answer-copy-button-bg-color" : "#FFFFFF",
+      "data-thread-clear-button-bg-color" : "#FFFFFF",
+      "data-modal-image": "img/logo.svg",
+      "data-mcp-enabled": "true",
+      "data-mcp-server-url": "https://sui.mcp.kapa.ai",
+      "data-mcp-button-text": "Use Sui MCP Server",
       async: true,
     },
   ],
@@ -173,7 +264,7 @@ const config = {
       type: "text/css",
     },
   ],
-  themes: ["@docusaurus/theme-mermaid", "docusaurus-theme-frontmatter"],
+  themes: ["@docusaurus/theme-mermaid", "docusaurus-theme-github-codeblock"],
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
@@ -183,6 +274,7 @@ const config = {
           autoCollapseCategories: false,
         },
       },
+
       navbar: {
         title: "Sui Documentation",
         logo: {
@@ -206,18 +298,6 @@ const config = {
             label: "References",
             to: "references",
           },
-
-          /*
-          {
-            type: "docsVersionDropdown",
-            position: "right",
-            dropdownActiveClassDisabled: true,
-          },
-          {
-            type: "localeDropdown",
-            position: "right",
-          },
-          */
         ],
       },
       footer: {
@@ -229,9 +309,13 @@ const config = {
         style: "dark",
         copyright: `© ${new Date().getFullYear()} Sui Foundation | Documentation distributed under <a href="https://github.com/MystenLabs/sui/blob/main/docs/site/LICENSE">CC BY 4.0</a>`,
       },
+      codeblock: {
+        showGithubLink: true,
+        githubLinkLabel: "View on GitHub",
+      },
       prism: {
-        theme: themes.github,
-        darkTheme: themes.nightOwl,
+        theme: lightCodeTheme,
+        darkTheme: darkCodeTheme,
         additionalLanguages: ["rust", "typescript", "toml", "json"],
       },
     }),

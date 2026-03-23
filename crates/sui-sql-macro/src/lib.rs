@@ -2,18 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use proc_macro::TokenStream;
-use quote::quote;
-use syn::{
-    parse::{Parse, ParseStream},
-    parse_macro_input,
-    punctuated::Punctuated,
-    Error, Expr, LitStr, Result, Token, Type,
-};
 
-use crate::{
-    lexer::Lexer,
-    parser::{Format, Parser},
-};
+use quote::quote;
+use syn::Error;
+use syn::Expr;
+use syn::LitStr;
+use syn::Result;
+use syn::Token;
+use syn::Type;
+use syn::parse::Parse;
+use syn::parse::ParseStream;
+use syn::parse_macro_input;
+use syn::punctuated::Punctuated;
+
+use crate::lexer::Lexer;
+use crate::parser::Format;
+use crate::parser::Parser;
 
 mod lexer;
 mod parser;
@@ -150,7 +154,7 @@ pub fn sql(input: TokenStream) -> TokenStream {
 ///
 /// The format string introduces binders with curly braces. An empty binder interpolates another
 /// query at that position, otherwise the binder is expected to contain a `SqlType` for a value
-/// that will be bound into the query, given a a string which must correspond to a type in the
+/// that will be bound into the query, given a string which must correspond to a type in the
 /// `diesel::sql_types` module. Bound values or queries to interpolate follow in the order matching
 /// their binders in the string:
 ///

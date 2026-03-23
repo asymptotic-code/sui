@@ -167,22 +167,6 @@ interface JSONTraceReadEffect {
     root_value_read: JSONTraceValue;
 }
 
-interface JSONTracePushEffect {
-    RuntimeValue?: JSONTraceRuntimeValueContent;
-    MutRef?: {
-        location: JSONTraceLocation;
-        snapshot: any[];
-    };
-}
-
-interface JSONTracePopEffect {
-    RuntimeValue?: JSONTraceRuntimeValueContent;
-    MutRef?: {
-        location: JSONTraceLocation;
-        snapshot: any[];
-    };
-}
-
 interface JSONDataLoadEffect {
     ref_type: JSONTraceRefType;
     location: JSONTraceLocation;
@@ -190,19 +174,18 @@ interface JSONDataLoadEffect {
 }
 
 interface JSONTraceEffect {
-    Push?: JSONTracePushEffect;
-    Pop?: JSONTracePopEffect;
+    Push?: JSONTraceValue;
+    Pop?: JSONTraceValue;
     Write?: JSONTraceWriteEffect;
     Read?: JSONTraceReadEffect;
     DataLoad?: JSONDataLoadEffect;
     ExecutionError?: string;
-
 }
 
 interface JSONTraceCloseFrame {
     frame_id: number;
     gas_left: number;
-    return_: JSONTraceRuntimeValueContent[];
+    return_: JSONTraceValue[];
 }
 
 interface JSONExtMoveCallSummary {
@@ -471,6 +454,35 @@ export const EXT_EVENT_FRAME_ID = Number.MAX_SAFE_INTEGER - 4;
 
 
 /**
+ * Splits decompressed trace file data into lines without creating a large intermediate string.
+ * This avoids hitting JavaScript's maximum string length limit for large trace files.
+ *
+ * @param decompressed the decompressed buffer containing trace data
+ * @returns array of strings representing lines from the trace file
+ */
+function splitTraceFileLines(decompressed: Uint8Array): string[] {
+    const NEWLINE_BYTE = 0x0A;
+    const decoder = new TextDecoder();
+    const lines: string[] = [];
+
+    let lineStart = 0;
+
+    for (let i = 0; i <= decompressed.length; i++) {
+        if (i === decompressed.length || decompressed[i] === NEWLINE_BYTE) {
+            // end of the buffer or a new line
+            if (i > lineStart) {
+                const lineBytes = decompressed.slice(lineStart, i);
+                const line = decoder.decode(lineBytes).trimEnd();
+                lines.push(line);
+            }
+            lineStart = i + 1;
+        }
+    }
+
+    return lines;
+}
+
+/**
  * Reads a Move VM execution trace from a JSON file.
  *
  * @param traceFilePath path to the trace JSON file.
@@ -491,7 +503,8 @@ export async function readTrace(
 ): Promise<ITrace> {
     const buf = Buffer.from(fs.readFileSync(traceFilePath));
     const decompressed = await decompress(buf);
-    const [header, ...rest] = new TextDecoder().decode(decompressed).trimEnd().split('\n');
+    const lines = splitTraceFileLines(decompressed);
+    const [header, ...rest] = lines;
     const jsonVersion: number = JSON.parse(header).version;
     const jsonEvents: JSONTraceEvent[] = rest.map((line) => {
         return JSON.parse(line);
@@ -552,6 +565,12 @@ export async function readTrace(
                 }
             }
             localLifetimeEnds.set(frame.frame_id, lifetimeEnds);
+            // Extend lifetimes of locals referenced by parameters
+            for (const param of frame.parameters) {
+                if (param) {
+                    extendLifetimeIfReference(param, localLifetimeEnds);
+                }
+            }
             // Trace v3 introduces `version_id` field in frame, which represents
             // address of the on-chain package version that contains the function.
             // It is different from `frame.module.address` if the package has been
@@ -629,6 +648,12 @@ export async function readTrace(
                 bcodeFunEntry
             });
         } else if (event.CloseFrame) {
+            // Extend lifetimes of locals referenced by return values
+            for (const returnValue of event.CloseFrame.return_) {
+                if (returnValue) {
+                    extendLifetimeIfReference(returnValue, localLifetimeEnds);
+                }
+            }
             events.push({
                 type: TraceEventKind.CloseFrame,
                 id: event.CloseFrame.frame_id
@@ -724,6 +749,13 @@ export async function readTrace(
             localLifetimeEndsMax.set(nonInlinedFrameID, lifetimeEndsMax);
         } else if (event.Effect) {
             const effect = event.Effect;
+            // Process Push/Pop effects that contain references to extend local lifetimes
+            if (effect.Push) {
+                extendLifetimeIfReference(effect.Push, localLifetimeEnds);
+            }
+            if (effect.Pop) {
+                extendLifetimeIfReference(effect.Pop, localLifetimeEnds);
+            }
             if (effect.Write || effect.Read || effect.DataLoad) {
                 const location = effect.Write
                     ? effect.Write.location
@@ -1200,6 +1232,24 @@ function processJSONLocation(
         return processJSONLocation(traceLocation.Indexed[0], indexPath, localLifetimeEnds);
     } else {
         throw new Error('Unsupported location type');
+    }
+}
+
+/**
+ * Extends the lifetime of a local variable if it contains a reference.
+ *
+ * @param value JSON trace value that may contain a reference.
+ * @param localLifetimeEnds map of local variable lifetimes.
+ */
+function extendLifetimeIfReference(
+    value: JSONTraceValue,
+    localLifetimeEnds?: Map<number, number[]>
+): void {
+    if ('MutRef' in value || 'ImmRef' in value) {
+        const refContent = 'MutRef' in value ? value.MutRef : value.ImmRef;
+        if (refContent && refContent.location) {
+            processJSONLocation(refContent.location, [], localLifetimeEnds);
+        }
     }
 }
 

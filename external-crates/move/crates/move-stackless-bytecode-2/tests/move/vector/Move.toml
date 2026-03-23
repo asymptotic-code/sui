@@ -1,7 +1,9 @@
 [package]
-name = "Vector"
-version = "0.0.1"
+name = "Vec"
 edition = "2024.beta"
 
 [addresses]
-counter = "0x0"
+vec = "0x0"
+
+[dependencies]
+MoveStdlib = { local = "../../../../move-stdlib" }

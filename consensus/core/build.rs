@@ -8,11 +8,9 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-// Build script to generate anemo RPC stubs.
 fn main() -> Result<()> {
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     build_tonic_services(&out_dir);
-    build_anemo_services(&out_dir);
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo::rerun-if-env-changed=USE_TIDEHUNTER");
@@ -24,9 +22,9 @@ fn main() -> Result<()> {
 }
 
 fn build_tonic_services(out_dir: &Path) {
-    let codec_path = "tonic::codec::ProstCodec";
+    let codec_path = "tonic_prost::ProstCodec";
 
-    let service = tonic_build::manual::Service::builder()
+    let validator_service = tonic_build::manual::Service::builder()
         .name("ConsensusService")
         .package("consensus")
         .comment("Consensus authority interface")
@@ -90,69 +88,43 @@ fn build_tonic_services(out_dir: &Path) {
         )
         .build();
 
-    tonic_build::manual::Builder::new()
-        .out_dir(out_dir)
-        .compile(&[service]);
-}
-
-fn build_anemo_services(out_dir: &Path) {
-    let mut automock_attribute = anemo_build::Attributes::default();
-    automock_attribute.push_trait(".", r#"#[mockall::automock]"#);
-
-    let codec_path = "mysten_network::codec::anemo::BcsSnappyCodec";
-
-    let service = anemo_build::manual::Service::builder()
-        .name("ConsensusRpc")
+    let observer_service = tonic_build::manual::Service::builder()
+        .name("ObserverService")
         .package("consensus")
-        .attributes(automock_attribute.clone())
+        .comment("Observer node interface to serve observer clients")
         .method(
-            anemo_build::manual::Method::builder()
-                .name("send_block")
-                .route_name("SendBlock")
-                .request_type("crate::network::anemo_network::SendBlockRequest")
-                .response_type("crate::network::anemo_network::SendBlockResponse")
+            tonic_build::manual::Method::builder()
+                .name("stream_blocks")
+                .route_name("StreamBlocks")
+                .input_type("crate::network::observer::BlockStreamRequest")
+                .output_type("crate::network::observer::BlockStreamResponse")
                 .codec_path(codec_path)
+                .server_streaming()
+                .client_streaming()
                 .build(),
         )
         .method(
-            anemo_build::manual::Method::builder()
+            tonic_build::manual::Method::builder()
                 .name("fetch_blocks")
                 .route_name("FetchBlocks")
-                .request_type("crate::network::anemo_network::FetchBlocksRequest")
-                .response_type("crate::network::anemo_network::FetchBlocksResponse")
+                .input_type("crate::network::observer::FetchBlocksRequest")
+                .output_type("crate::network::observer::FetchBlocksResponse")
                 .codec_path(codec_path)
+                .server_streaming()
                 .build(),
         )
         .method(
-            anemo_build::manual::Method::builder()
+            tonic_build::manual::Method::builder()
                 .name("fetch_commits")
                 .route_name("FetchCommits")
-                .request_type("crate::network::anemo_network::FetchCommitsRequest")
-                .response_type("crate::network::anemo_network::FetchCommitsResponse")
-                .codec_path(codec_path)
-                .build(),
-        )
-        .method(
-            anemo_build::manual::Method::builder()
-                .name("fetch_latest_blocks")
-                .route_name("FetchLatestBlocks")
-                .request_type("crate::network::anemo_network::FetchLatestBlocksRequest")
-                .response_type("crate::network::anemo_network::FetchLatestBlocksResponse")
-                .codec_path(codec_path)
-                .build(),
-        )
-        .method(
-            anemo_build::manual::Method::builder()
-                .name("get_latest_rounds")
-                .route_name("GetLatestRounds")
-                .request_type("crate::network::anemo_network::GetLatestRoundsRequest")
-                .response_type("crate::network::anemo_network::GetLatestRoundsResponse")
+                .input_type("crate::network::observer::FetchCommitsRequest")
+                .output_type("crate::network::observer::FetchCommitsResponse")
                 .codec_path(codec_path)
                 .build(),
         )
         .build();
 
-    anemo_build::manual::Builder::new()
+    tonic_build::manual::Builder::new()
         .out_dir(out_dir)
-        .compile(&[service]);
+        .compile(&[validator_service, observer_service]);
 }

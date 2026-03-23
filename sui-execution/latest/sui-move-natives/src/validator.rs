@@ -1,13 +1,14 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::NativesCostTable;
+use crate::{NativesCostTable, get_extension};
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::{gas_algebra::InternalGas, vm_status::StatusCode};
-use move_vm_runtime::{native_charge_gas_early_exit, native_functions::NativeContext};
-use move_vm_types::{
-    loaded_data::runtime_types::Type, natives::function::NativeResult, pop_arg, values::Value,
+use move_vm_runtime::pop_arg;
+use move_vm_runtime::{
+    execution::Type, execution::values::Value, natives::functions::NativeResult,
 };
+use move_vm_runtime::{native_charge_gas_early_exit, natives::functions::NativeContext};
 use smallvec::smallvec;
 use std::collections::VecDeque;
 use sui_types::sui_system_state::sui_system_state_inner_v1::ValidatorMetadataV1;
@@ -31,9 +32,7 @@ pub fn validate_metadata_bcs(
     debug_assert!(ty_args.is_empty());
     debug_assert!(args.len() == 1);
 
-    let validator_validate_metadata_bcs_cost_params = context
-        .extensions_mut()
-        .get::<NativesCostTable>()?
+    let validator_validate_metadata_bcs_cost_params = get_extension!(context, NativesCostTable)?
         .validator_validate_metadata_bcs_cost_params
         .clone();
 
@@ -60,7 +59,7 @@ pub fn validate_metadata_bcs(
 
     let cost = context.gas_used();
 
-    if let Result::Err(err_code) = validator_metadata.verify() {
+    if let Result::Err(err_code) = validator_metadata.verify(true) {
         return Ok(NativeResult::err(cost, err_code));
     }
 

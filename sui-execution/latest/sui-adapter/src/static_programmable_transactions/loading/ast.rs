@@ -1,15 +1,21 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::static_programmable_transactions::linkage::resolved_linkage::{
-    ResolvedLinkage, RootedLinkage,
+use crate::{
+    gas_charger::GasPayment,
+    static_programmable_transactions::linkage::resolved_linkage::{
+        ExecutableLinkage, ResolvedLinkage,
+    },
 };
 use indexmap::IndexSet;
-use move_binary_format::file_format::{AbilitySet, CodeOffset, FunctionDefinitionIndex};
+use move_binary_format::file_format::{
+    AbilitySet, CodeOffset, FunctionDefinitionIndex, Visibility,
+};
 use move_core_types::{
     account_address::AccountAddress,
     identifier::IdentStr,
     language_storage::{ModuleId, StructTag},
+    u256::U256,
 };
 use std::rc::Rc;
 use sui_types::{
@@ -23,6 +29,7 @@ use sui_types::{
 
 #[derive(Debug)]
 pub struct Transaction {
+    pub gas_payment: Option<GasPayment>,
     pub inputs: Inputs,
     pub commands: Commands,
 }
@@ -37,6 +44,13 @@ pub enum InputArg {
     Pure(Vec<u8>),
     Receiving(ObjectRef),
     Object(ObjectArg),
+    FundsWithdrawal(FundsWithdrawalArg),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedObjectKind {
+    Legacy,
+    Party,
 }
 
 #[derive(Debug)]
@@ -47,8 +61,28 @@ pub enum ObjectArg {
     SharedObject {
         id: ObjectID,
         initial_shared_version: SequenceNumber,
-        mutable: bool,
+        mutability: ObjectMutability,
+        kind: SharedObjectKind,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectMutability {
+    Mutable,
+    Immutable,
+    NonExclusiveWrite,
+}
+
+#[derive(Debug)]
+#[cfg_attr(debug_assertions, derive(Clone))]
+pub struct FundsWithdrawalArg {
+    // if true, it was from a compatibility object input, not a intentional withdrawal argument
+    pub from_compatibility_object: bool,
+    /// The full type `sui::funds_accumulator::Withdrawal<T>`
+    pub ty: Type,
+    pub owner: AccountAddress,
+    /// This amount is verified to be <= the max for the type described by the `T` in `ty`
+    pub amount: U256,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -112,14 +146,17 @@ pub struct LoadedFunctionInstantiation {
 
 #[derive(Debug)]
 pub struct LoadedFunction {
-    pub storage_id: ModuleId,
-    pub runtime_id: ModuleId,
+    pub version_mid: ModuleId,
+    pub original_mid: ModuleId,
     pub name: Identifier,
     pub type_arguments: Vec<Type>,
     pub signature: LoadedFunctionInstantiation,
-    pub linkage: RootedLinkage,
+    pub linkage: ExecutableLinkage,
     pub instruction_length: CodeOffset,
     pub definition_index: FunctionDefinitionIndex,
+    pub visibility: Visibility,
+    pub is_entry: bool,
+    pub is_native: bool,
 }
 
 #[derive(Debug)]
@@ -142,11 +179,11 @@ impl ObjectArg {
         }
     }
 
-    pub fn is_mutable(&self) -> bool {
+    pub fn mutability(&self) -> ObjectMutability {
         match self {
-            ObjectArg::ImmObject(_) => false,
-            ObjectArg::OwnedObject(_) => true,
-            ObjectArg::SharedObject { mutable, .. } => *mutable,
+            ObjectArg::ImmObject(_) => ObjectMutability::Immutable,
+            ObjectArg::OwnedObject(_) => ObjectMutability::Mutable,
+            ObjectArg::SharedObject { mutability, .. } => *mutability,
         }
     }
 }
@@ -203,6 +240,43 @@ impl Type {
             Type::Datatype(dt) => dt.all_addresses(),
         }
     }
+
+    pub fn node_count(&self) -> u64 {
+        use Type::*;
+        let mut total = 0u64;
+        let mut stack = vec![self];
+
+        while let Some(ty) = stack.pop() {
+            total = total.saturating_add(1);
+            match ty {
+                Bool | U8 | U16 | U32 | U64 | U128 | U256 | Address | Signer => {}
+                Vector(v) => stack.push(&v.element_type),
+                Reference(_, inner) => stack.push(inner),
+                Datatype(dt) => {
+                    stack.extend(&dt.type_arguments);
+                }
+            }
+        }
+
+        total
+    }
+
+    pub fn is_reference(&self) -> bool {
+        match self {
+            Type::Bool
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::U128
+            | Type::U256
+            | Type::Address
+            | Type::Signer
+            | Type::Vector(_)
+            | Type::Datatype(_) => false,
+            Type::Reference(_, _) => true,
+        }
+    }
 }
 
 impl Datatype {
@@ -221,6 +295,42 @@ impl Datatype {
             addresses.extend(arg.all_addresses());
         }
         addresses
+    }
+}
+
+impl Command {
+    pub fn arguments_mut(&mut self) -> Box<dyn Iterator<Item = &mut Argument> + '_> {
+        match self {
+            Command::MoveCall(mc) => Box::new(mc.arguments.iter_mut()),
+            Command::TransferObjects(objs, recipient) => {
+                Box::new(objs.iter_mut().chain(std::iter::once(recipient)))
+            }
+            Command::SplitCoins(coin, amounts) => {
+                Box::new(std::iter::once(coin).chain(amounts.iter_mut()))
+            }
+            Command::MergeCoins(coin, coins) => {
+                Box::new(std::iter::once(coin).chain(coins.iter_mut()))
+            }
+            Command::MakeMoveVec(_, elements) => Box::new(elements.iter_mut()),
+            Command::Publish(_, _, _) => Box::new(std::iter::empty()),
+            Command::Upgrade(_, _, _, obj, _) => Box::new(std::iter::once(obj)),
+        }
+    }
+
+    pub fn arguments(&self) -> Box<dyn Iterator<Item = &Argument> + '_> {
+        match self {
+            Command::MoveCall(mc) => Box::new(mc.arguments.iter()),
+            Command::TransferObjects(objs, recipient) => {
+                Box::new(objs.iter().chain(std::iter::once(recipient)))
+            }
+            Command::SplitCoins(coin, amounts) => {
+                Box::new(std::iter::once(coin).chain(amounts.iter()))
+            }
+            Command::MergeCoins(coin, coins) => Box::new(std::iter::once(coin).chain(coins.iter())),
+            Command::MakeMoveVec(_, elements) => Box::new(elements.iter()),
+            Command::Publish(_, _, _) => Box::new(std::iter::empty()),
+            Command::Upgrade(_, _, _, obj, _) => Box::new(std::iter::once(obj)),
+        }
     }
 }
 

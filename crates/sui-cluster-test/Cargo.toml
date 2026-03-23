@@ -4,7 +4,7 @@ version.workspace = true
 authors = ["Mysten Labs <build@mystenlabs.com>"]
 license = "Apache-2.0"
 publish = false
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 futures.workspace = true
@@ -25,10 +25,7 @@ shared-crypto.workspace = true
 derive_more = { workspace = true, features = ["debug"] }
 regex.workspace = true
 
-sui-indexer.workspace = true
 sui-faucet.workspace = true
-sui-graphql-rpc.workspace = true
-sui-pg-db.workspace = true
 sui-swarm.workspace = true
 sui-swarm-config.workspace = true
 sui-json-rpc-types.workspace = true

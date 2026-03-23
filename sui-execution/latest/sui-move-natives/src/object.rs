@@ -1,16 +1,18 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{object_runtime::ObjectRuntime, NativesCostTable};
+use crate::{NativesCostTable, get_extension, get_extension_mut, object_runtime::ObjectRuntime};
 use move_binary_format::errors::PartialVMResult;
 use move_core_types::{account_address::AccountAddress, gas_algebra::InternalGas};
-use move_vm_runtime::{native_charge_gas_early_exit, native_functions::NativeContext};
-use move_vm_types::{
-    loaded_data::runtime_types::Type,
-    natives::function::NativeResult,
+use move_vm_runtime::{
+    execution::{
+        Type,
+        values::{StructRef, Value},
+    },
+    natives::functions::NativeResult,
     pop_arg,
-    values::{StructRef, Value},
 };
+use move_vm_runtime::{native_charge_gas_early_exit, natives::functions::NativeContext};
 use smallvec::smallvec;
 use std::collections::VecDeque;
 
@@ -31,9 +33,7 @@ pub fn borrow_uid(
     debug_assert!(ty_args.len() == 1);
     debug_assert!(args.len() == 1);
 
-    let borrow_uid_cost_params = context
-        .extensions_mut()
-        .get::<NativesCostTable>()?
+    let borrow_uid_cost_params = get_extension!(context, NativesCostTable)?
         .borrow_uid_cost_params
         .clone();
 
@@ -63,9 +63,7 @@ pub fn delete_impl(
     debug_assert!(ty_args.is_empty());
     debug_assert!(args.len() == 1);
 
-    let delete_impl_cost_params = context
-        .extensions_mut()
-        .get::<NativesCostTable>()?
+    let delete_impl_cost_params = get_extension!(context, NativesCostTable)?
         .delete_impl_cost_params
         .clone();
 
@@ -78,7 +76,7 @@ pub fn delete_impl(
     // unwrap safe because the interface of native function guarantees it.
     let uid_bytes = pop_arg!(args, AccountAddress);
 
-    let obj_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let obj_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     obj_runtime.delete_id(uid_bytes.into())?;
     Ok(NativeResult::ok(context.gas_used(), smallvec![]))
 }
@@ -100,9 +98,7 @@ pub fn record_new_uid(
     debug_assert!(ty_args.is_empty());
     debug_assert!(args.len() == 1);
 
-    let record_new_id_cost_params = context
-        .extensions_mut()
-        .get::<NativesCostTable>()?
+    let record_new_id_cost_params = get_extension!(context, NativesCostTable)?
         .record_new_id_cost_params
         .clone();
 
@@ -115,7 +111,7 @@ pub fn record_new_uid(
     // unwrap safe because the interface of native function guarantees it.
     let uid_bytes = pop_arg!(args, AccountAddress);
 
-    let obj_runtime: &mut ObjectRuntime = context.extensions_mut().get_mut()?;
+    let obj_runtime: &mut ObjectRuntime = get_extension_mut!(context)?;
     obj_runtime.new_id(uid_bytes.into())?;
     Ok(NativeResult::ok(context.gas_used(), smallvec![]))
 }

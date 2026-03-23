@@ -1,28 +1,26 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use fastcrypto::encoding::Base64;
-use futures::stream;
-use futures::StreamExt;
-use futures_core::Stream;
-use jsonrpsee::core::client::Subscription;
 use std::collections::BTreeMap;
 use std::future;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use sui_json_rpc_types::DevInspectArgs;
-use sui_json_rpc_types::SuiData;
-use sui_json_rpc_types::ZkLoginIntentScope;
-use sui_json_rpc_types::ZkLoginVerifyResult;
 
-use crate::error::{Error, SuiRpcResult};
-use crate::RpcClient;
+use fastcrypto::encoding::Base64;
+use futures::StreamExt;
+use futures::stream;
+use futures_core::Stream;
+use jsonrpsee::core::client::Subscription;
 use sui_json_rpc_api::{
     CoinReadApiClient, GovernanceReadApiClient, IndexerApiClient, MoveUtilsClient, ReadApiClient,
     WriteApiClient,
 };
 use sui_json_rpc_types::CheckpointPage;
+use sui_json_rpc_types::DevInspectArgs;
+use sui_json_rpc_types::SuiData;
+use sui_json_rpc_types::ZkLoginIntentScope;
+use sui_json_rpc_types::ZkLoginVerifyResult;
 use sui_json_rpc_types::{
     Balance, Checkpoint, CheckpointId, Coin, CoinPage, DelegatedStake, DevInspectResults,
     DryRunTransactionBlockResponse, DynamicFieldPage, EventFilter, EventPage, ObjectsPage,
@@ -37,14 +35,17 @@ use sui_types::base_types::{ObjectID, SequenceNumber, SuiAddress, TransactionDig
 use sui_types::dynamic_field::DynamicFieldName;
 use sui_types::event::EventID;
 use sui_types::messages_checkpoint::CheckpointSequenceNumber;
-use sui_types::quorum_driver_types::ExecuteTransactionRequestType;
 use sui_types::sui_serde::BigInt;
 use sui_types::sui_system_state::sui_system_state_summary::SuiSystemStateSummary;
 use sui_types::transaction::{Transaction, TransactionData, TransactionKind};
+use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
+use tracing::debug;
 
-const WAIT_FOR_LOCAL_EXECUTION_DELAY: Duration = Duration::from_millis(200);
+use crate::RpcClient;
+use crate::error::{Error, SuiRpcResult};
 
-const WAIT_FOR_LOCAL_EXECUTION_INTERVAL: Duration = Duration::from_secs(2);
+const WAIT_FOR_LOCAL_EXECUTION_MIN_INTERVAL: Duration = Duration::from_millis(100);
+const WAIT_FOR_LOCAL_EXECUTION_MAX_INTERVAL: Duration = Duration::from_secs(2);
 
 /// The main read API structure with functions for retrieving data about different objects and transactions
 #[derive(Debug)]
@@ -660,8 +661,8 @@ impl ReadApi {
     ///   construct calls involving objects you do not own).
     /// - Calls are not checked for visibility (you can call private functions on modules)
     /// - Inputs of any type can be constructed and passed in, (including
-    ///    Coins and other objects that would usually need to be constructed
-    ///    with a move call).
+    ///   Coins and other objects that would usually need to be constructed
+    ///   with a move call).
     /// - Function returns do not need to be used, even if they do not have `drop`.
     ///
     /// Dev inspect's output includes a breakdown of results returned by every transaction
@@ -1151,9 +1152,11 @@ impl QuorumDriverApi {
         options: SuiTransactionBlockResponseOptions,
         request_type: Option<ExecuteTransactionRequestType>,
     ) -> SuiRpcResult<SuiTransactionBlockResponse> {
+        let tx_digest = *tx.digest();
         let (tx_bytes, signatures) = tx.to_tx_bytes_and_signatures();
         let request_type = request_type.unwrap_or_else(|| options.default_execution_request_type());
 
+        debug!(?tx_digest, "Submitting a transaction for execution");
         let start = Instant::now();
         let response = self
             .api
@@ -1167,12 +1170,14 @@ impl QuorumDriverApi {
                 None,
             )
             .await?;
+        debug!(?tx_digest, "Transaction executed");
 
         if let ExecuteTransactionRequestType::WaitForEffectsCert = request_type {
             return Ok(response);
         }
 
         // JSON-RPC ignores WaitForLocalExecution, so simulate it by polling for the transaction.
+        debug!(?tx_digest, "Waiting for local execution on full node");
         let wait_for_local_execution_timeout: Duration = if cfg!(msim) {
             // In simtests, fullnodes can stop receiving checkpoints for > 30s.
             Duration::from_secs(120)
@@ -1180,12 +1185,15 @@ impl QuorumDriverApi {
             Duration::from_secs(60)
         };
         let mut poll_response = tokio::time::timeout(wait_for_local_execution_timeout, async {
-            // Apply a short delay to give the full node a chance to catch up.
-            tokio::time::sleep(WAIT_FOR_LOCAL_EXECUTION_DELAY).await;
-
-            let mut interval = tokio::time::interval(WAIT_FOR_LOCAL_EXECUTION_INTERVAL);
+            let mut backoff = mysten_common::backoff::ExponentialBackoff::new(
+                WAIT_FOR_LOCAL_EXECUTION_MIN_INTERVAL,
+                WAIT_FOR_LOCAL_EXECUTION_MAX_INTERVAL,
+            );
             loop {
-                interval.tick().await;
+                // Intentionally waiting for a short delay (MIN_INTERVAL) before the 1st iteration,
+                // to leave time for the checkpoint containing the transaction to be certified, propagate
+                // to the full node, and get executed.
+                tokio::time::sleep(backoff.next().unwrap()).await;
 
                 if let Ok(poll_response) = self
                     .api
@@ -1193,7 +1201,17 @@ impl QuorumDriverApi {
                     .get_transaction_block(*tx.digest(), Some(options.clone()))
                     .await
                 {
-                    break poll_response;
+                    // Wait until the transaction is included in a checkpoint,
+                    // not just known to the fullnode. Index data is only
+                    // available after the checkpoint has been processed.
+                    if poll_response.checkpoint.is_some() {
+                        break poll_response;
+                    }
+                } else {
+                    debug!(
+                        ?tx_digest,
+                        "Failed to get transaction content from the full node"
+                    );
                 }
             }
         })

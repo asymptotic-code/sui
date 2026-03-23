@@ -1,8 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::authority::authority_store_tables::LiveObject;
 use crate::authority::AuthorityStore;
+use crate::authority::authority_store_tables::LiveObject;
 use std::time::Instant;
 use sui_types::base_types::ObjectID;
 use sui_types::object::Object;
@@ -87,10 +87,15 @@ fn live_object_set_index_task<T: LiveObjectIndexer>(
     for object in authority_store
         .perpetual_tables
         .range_iter_live_object_set(Some(start_id), Some(end_id), false)
-        .filter_map(LiveObject::to_normal)
+        .map(|live| {
+            let LiveObject::Normal(object) = live else {
+                unreachable!("range_iter_live_object_set(false) must not yield wrapped objects");
+            };
+            object
+        })
     {
         object_scanned += 1;
-        if object_scanned % 2_000_000 == 0 {
+        if object_scanned.is_multiple_of(2_000_000) {
             info!(
                 "[Index] Task {}: object scanned: {}",
                 task_id, object_scanned

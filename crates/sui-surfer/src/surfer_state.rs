@@ -6,19 +6,19 @@ use move_binary_format::file_format::Visibility;
 use move_binary_format::normalized;
 use move_core_types::identifier::IdentStr;
 use move_core_types::language_storage::StructTag;
+use mysten_common::fatal;
 use rand::rngs::StdRng;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
-use sui_json_rpc_types::{SuiTransactionBlockEffects, SuiTransactionBlockEffectsAPI};
+use std::time::{Duration, Instant};
 use sui_move_build::BuildConfig;
 use sui_protocol_config::{Chain, ProtocolConfig};
 use sui_types::base_types::{ConsensusObjectSequenceKey, ObjectID, ObjectRef, SuiAddress};
-use sui_types::execution_config_utils::to_binary_config;
+use sui_types::effects::{TransactionEffects, TransactionEffectsAPI};
 use sui_types::object::{Object, Owner};
 use sui_types::storage::WriteKind;
-use sui_types::transaction::{CallArg, ObjectArg, TransactionData, TEST_ONLY_GAS_UNIT_FOR_PUBLISH};
+use sui_types::transaction::{CallArg, ObjectArg, TEST_ONLY_GAS_UNIT_FOR_PUBLISH, TransactionData};
 use sui_types::{Identifier, SUI_FRAMEWORK_ADDRESS};
 use test_cluster::TestCluster;
 use tokio::sync::RwLock;
@@ -173,8 +173,9 @@ impl SurferState {
             rgp,
         )
         .unwrap();
-        let tx = self.cluster.wallet.sign_transaction(&tx_data);
+        let tx = self.cluster.wallet.sign_transaction(&tx_data).await;
         let response = loop {
+            debug!("Executing transaction {:?}", tx.digest());
             match self
                 .cluster
                 .wallet
@@ -192,7 +193,7 @@ impl SurferState {
             "Successfully executed transaction {:?} with response {:?}",
             tx, response
         );
-        let effects = response.effects.unwrap();
+        let effects = response.effects;
         info!(
             "[{:?}] Calling Move function {:?}::{:?} returned {:?}",
             self.address,
@@ -211,15 +212,15 @@ impl SurferState {
     }
 
     #[tracing::instrument(skip_all, fields(surfer_id = self.id))]
-    async fn process_tx_effects(&mut self, effects: &SuiTransactionBlockEffects) {
-        for (owned_ref, write_kind) in effects.all_changed_objects() {
-            if matches!(owned_ref.owner, Owner::ObjectOwner(_)) {
+    async fn process_tx_effects(&mut self, effects: &TransactionEffects) {
+        for (obj_ref, owner, write_kind) in effects.all_changed_objects() {
+            if matches!(owner, Owner::ObjectOwner(_)) {
                 // For object owned objects, we don't need to do anything.
                 // We also cannot read them because in the case of shared objects, there can be
                 // races and the child object may no longer exist.
                 continue;
             }
-            let obj_ref = owned_ref.reference.to_object_ref();
+            // let obj_ref = owned_ref.reference.to_object_ref();
             let object = self
                 .cluster
                 .get_object_from_fullnode_store(&obj_ref.0)
@@ -230,7 +231,7 @@ impl SurferState {
                 continue;
             }
             let struct_tag = object.struct_tag().unwrap();
-            match owned_ref.owner {
+            match owner {
                 Owner::Immutable => {
                     self.immutable_objects
                         .write()
@@ -279,7 +280,7 @@ impl SurferState {
         let move_package = package.into_inner().data.try_into_package().unwrap();
         let proto_version = self.cluster.highest_protocol_version();
         let config = ProtocolConfig::get_for_version(proto_version, Chain::Unknown);
-        let binary_config = to_binary_config(&config);
+        let binary_config = config.binary_config(None);
         let pool: &mut normalized::ArcPool = &mut *self.pool.write().await;
         let entry_functions: Vec<_> = move_package
             .normalize(pool, &binary_config, /* include code */ false)
@@ -303,10 +304,10 @@ impl SurferState {
                             return None;
                         }
                         let mut parameters = (*func.parameters).clone();
-                        if let Some(last_param) = parameters.last().as_ref() {
-                            if is_type_tx_context(last_param) {
-                                parameters.pop();
-                            }
+                        if let Some(last_param) = parameters.last().as_ref()
+                            && is_type_tx_context(last_param)
+                        {
+                            parameters.pop();
                         }
                         Some(EntryFunction {
                             package: package_id,
@@ -332,7 +333,10 @@ impl SurferState {
     #[tracing::instrument(skip_all, fields(surfer_id = self.id))]
     pub async fn publish_package(&mut self, path: &Path) {
         let rgp = self.cluster.get_reference_gas_price().await;
-        let package = BuildConfig::new_for_testing().build(path).unwrap();
+        let package = BuildConfig::new_for_testing()
+            .build_async(path)
+            .await
+            .unwrap();
         let modules = package.get_package_bytes(false);
         let tx_data = TransactionData::new_module(
             self.address,
@@ -342,7 +346,10 @@ impl SurferState {
             TEST_ONLY_GAS_UNIT_FOR_PUBLISH * rgp,
             rgp,
         );
-        let tx = self.cluster.wallet.sign_transaction(&tx_data);
+        let tx = self.cluster.wallet.sign_transaction(&tx_data).await;
+        let tx_digest = *tx.digest();
+        info!(?tx_digest, "Publishing package");
+        let start = Instant::now();
         let response = loop {
             match self
                 .cluster
@@ -354,13 +361,20 @@ impl SurferState {
                     break response;
                 }
                 Err(err) => {
-                    error!("Failed to publish package: {:?}", err);
+                    if start.elapsed() > Duration::from_secs(120) {
+                        fatal!(
+                            "Failed to publish package after 120 seconds: {} {}",
+                            err,
+                            tx.digest()
+                        );
+                    }
+                    error!(?tx_digest, "Failed to publish package: {}", err);
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         };
         info!("Successfully published package in {:?}", path);
-        self.process_tx_effects(&response.effects.unwrap()).await;
+        self.process_tx_effects(&response.effects).await;
     }
 
     pub fn matching_owned_objects_count(&self, type_tag: &StructTag) -> usize {

@@ -1,14 +1,26 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
+use anyhow::Context;
 use async_graphql::dataloader::Loader;
-use diesel::{BoolExpressionMethods, ExpressionMethods, QueryDsl};
-use sui_indexer_alt_schema::{objects::StoredObject, schema::kv_objects};
-use sui_types::{base_types::ObjectID, object::Object, storage::ObjectKey};
+use diesel::BoolExpressionMethods;
+use diesel::ExpressionMethods;
+use diesel::QueryDsl;
+use prost_types::FieldMask;
+use sui_indexer_alt_schema::objects::StoredObject;
+use sui_indexer_alt_schema::schema::kv_objects;
+use sui_rpc::field::FieldMaskUtil;
+use sui_rpc::proto::sui::rpc::v2 as proto;
+use sui_types::base_types::ObjectID;
+use sui_types::object::Object;
+use sui_types::storage::ObjectKey;
 
-use crate::{bigtable_reader::BigtableReader, error::Error, pg_reader::PgReader};
+use crate::bigtable_reader::BigtableReader;
+use crate::error::Error;
+use crate::ledger_grpc_reader::LedgerGrpcReader;
+use crate::pg_reader::PgReader;
 
 /// Key for fetching the contents a particular version of an object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -17,19 +29,19 @@ pub struct VersionedObjectKey(pub ObjectID, pub u64);
 #[async_trait::async_trait]
 impl Loader<VersionedObjectKey> for PgReader {
     type Value = StoredObject;
-    type Error = Arc<Error>;
+    type Error = Error;
 
     async fn load(
         &self,
         keys: &[VersionedObjectKey],
-    ) -> Result<HashMap<VersionedObjectKey, StoredObject>, Self::Error> {
+    ) -> Result<HashMap<VersionedObjectKey, StoredObject>, Error> {
         use kv_objects::dsl as o;
 
         if keys.is_empty() {
             return Ok(HashMap::new());
         }
 
-        let mut conn = self.connect().await.map_err(Arc::new)?;
+        let mut conn = self.connect().await?;
 
         let mut query = o::kv_objects.into_boxed();
 
@@ -41,7 +53,7 @@ impl Loader<VersionedObjectKey> for PgReader {
             );
         }
 
-        let objects: Vec<StoredObject> = conn.results(query).await.map_err(Arc::new)?;
+        let objects: Vec<StoredObject> = conn.results(query).await?;
 
         let key_to_stored: HashMap<_, _> = objects
             .iter()
@@ -66,12 +78,12 @@ impl Loader<VersionedObjectKey> for PgReader {
 #[async_trait::async_trait]
 impl Loader<VersionedObjectKey> for BigtableReader {
     type Value = Object;
-    type Error = Arc<Error>;
+    type Error = Error;
 
     async fn load(
         &self,
         keys: &[VersionedObjectKey],
-    ) -> Result<HashMap<VersionedObjectKey, Object>, Self::Error> {
+    ) -> Result<HashMap<VersionedObjectKey, Object>, Error> {
         if keys.is_empty() {
             return Ok(HashMap::new());
         }
@@ -87,5 +99,49 @@ impl Loader<VersionedObjectKey> for BigtableReader {
             .into_iter()
             .map(|o| (VersionedObjectKey(o.id(), o.version().into()), o))
             .collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl Loader<VersionedObjectKey> for LedgerGrpcReader {
+    type Value = Object;
+    type Error = Error;
+
+    async fn load(
+        &self,
+        keys: &[VersionedObjectKey],
+    ) -> Result<HashMap<VersionedObjectKey, Object>, Error> {
+        if keys.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let requests = keys
+            .iter()
+            .map(|key| {
+                let mut req = proto::GetObjectRequest::new(&key.0.into());
+                req.version = Some(key.1);
+                req
+            })
+            .collect();
+
+        let mut request = proto::BatchGetObjectsRequest::default();
+        request.requests = requests;
+        request.read_mask = Some(FieldMask::from_paths(["bcs"]));
+
+        let batch_response = self.batch_get_objects(request).await?;
+
+        let mut results = HashMap::new();
+        for obj_result in batch_response.objects {
+            if let Some(proto::get_object_result::Result::Object(object)) = obj_result.result {
+                let obj: Object = object
+                    .bcs
+                    .as_ref()
+                    .context("Missing bcs in object")?
+                    .deserialize()
+                    .context("Failed to deserialize object")?;
+                results.insert(VersionedObjectKey(obj.id(), obj.version().into()), obj);
+            }
+        }
+        Ok(results)
     }
 }

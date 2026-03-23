@@ -1,18 +1,22 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::PathBuf;
+
 use anyhow::Context;
 use clap::Parser;
+use futures::TryFutureExt as _;
 use prometheus::Registry;
-use sui_indexer_alt_consistent_store::{
-    args::{Args, Command},
-    config::ServiceConfig,
-    start_service,
-};
+use sui_indexer_alt_framework::service::Error;
 use sui_indexer_alt_metrics::MetricsService;
-use tokio::{fs, signal};
-use tokio_util::sync::CancellationToken;
-use tracing::info;
+use sui_indexer_alt_metrics::uptime;
+use tokio::fs;
+
+use sui_indexer_alt_consistent_store::args::Args;
+use sui_indexer_alt_consistent_store::args::Command;
+use sui_indexer_alt_consistent_store::config::ServiceConfig;
+use sui_indexer_alt_consistent_store::restore::start_restorer;
+use sui_indexer_alt_consistent_store::start_service;
 
 // Define the `GIT_REVISION` const
 bin_version::git_revision!();
@@ -45,36 +49,18 @@ async fn main() -> anyhow::Result<()> {
             metrics_args,
             config,
         } => {
-            let config = if let Some(path) = config {
-                let contents = fs::read_to_string(path)
-                    .await
-                    .context("Failed to read configuration TOML file")?;
-
-                toml::from_str(&contents).context("Failed to parse configuration TOML file")?
-            } else {
-                ServiceConfig::default()
-            };
-
-            let cancel = CancellationToken::new();
+            let config = read_config(config).await?;
             let registry = Registry::new_custom(Some("consistent_store".into()), None)
                 .context("Failed to create Prometheus registry")?;
 
-            let metrics = MetricsService::new(metrics_args, registry, cancel.child_token());
+            let metrics = MetricsService::new(metrics_args, registry);
 
-            let h_ctrl_c = tokio::spawn({
-                let cancel = cancel.clone();
-                async move {
-                    tokio::select! {
-                        _ = cancel.cancelled() => {}
-                        _ = signal::ctrl_c() => {
-                            info!("Received Ctrl-C, shutting down...");
-                            cancel.cancel();
-                        }
-                    }
-                }
-            });
+            metrics
+                .registry()
+                .register(uptime(VERSION)?)
+                .context("Failed to register uptime metric")?;
 
-            let h_service = start_service(
+            let s_service = start_service(
                 database_path,
                 indexer_args,
                 client_args,
@@ -82,16 +68,75 @@ async fn main() -> anyhow::Result<()> {
                 VERSION,
                 config,
                 metrics.registry(),
-                cancel.child_token(),
             )
             .await?;
 
-            let h_metrics = metrics.run().await?;
+            let s_metrics = metrics.run().await?;
 
-            let _ = h_service.await;
-            cancel.cancel();
-            let _ = h_metrics.await;
-            let _ = h_ctrl_c.await;
+            match s_service.attach(s_metrics).main().await {
+                Ok(()) | Err(Error::Terminated) => {}
+
+                Err(Error::Aborted) => {
+                    std::process::exit(1);
+                }
+
+                Err(Error::Task(_)) => {
+                    std::process::exit(2);
+                }
+            }
+        }
+
+        Command::Restore {
+            database_path,
+            formal_snapshot_args,
+            storage_connection_args,
+            restore_args,
+            metrics_args,
+            pipeline,
+            config,
+        } => {
+            let config = read_config(config).await?;
+            let registry = Registry::new_custom(Some("consistent_store".into()), None)
+                .context("Failed to create Prometheus registry")?;
+
+            let metrics = MetricsService::new(metrics_args, registry);
+
+            metrics
+                .registry()
+                .register(uptime(VERSION)?)
+                .context("Failed to register uptime metric")?;
+
+            let (s_restorer, finalizer) = start_restorer(
+                database_path,
+                formal_snapshot_args,
+                storage_connection_args,
+                restore_args,
+                pipeline.into_iter().collect(),
+                config.rocksdb,
+                metrics.registry(),
+            )
+            .await?;
+
+            let s_metrics = metrics.run().await?;
+
+            match s_restorer
+                .attach(s_metrics)
+                .main()
+                .and_then(|_| finalizer.run().main())
+                .await
+            {
+                Ok(()) => {}
+
+                // We can only guarantee that the restorer succeeded if it is allowed to complete
+                // without being instructed to exit or abort.
+                Err(Error::Terminated | Error::Aborted) => {
+                    std::process::exit(1);
+                }
+
+                Err(Error::Task(_)) => {
+                    std::process::exit(2);
+                }
+            }
         }
 
         Command::GenerateConfig => {
@@ -104,4 +149,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn read_config(path: Option<PathBuf>) -> anyhow::Result<ServiceConfig> {
+    if let Some(path) = path {
+        let contents = fs::read_to_string(path)
+            .await
+            .context("Failed to read configuration TOML file")?;
+
+        toml::from_str(&contents).context("Failed to parse configuration TOML file")
+    } else {
+        Ok(ServiceConfig::default())
+    }
 }

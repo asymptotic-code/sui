@@ -1,8 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::authority::authority_per_epoch_store::AuthorityPerEpochStore;
 use crate::authority::AuthorityStore;
+use crate::authority::authority_per_epoch_store::AuthorityPerEpochStore;
 use crate::checkpoints::CheckpointStore;
 use crate::par_index_live_object_set::LiveObjectIndexer;
 use crate::par_index_live_object_set::ParMakeLiveObjectIndexer;
@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
-use sui_config::RpcIndexInitConfig;
+use sui_types::SUI_ACCUMULATOR_ROOT_OBJECT_ID;
 use sui_types::base_types::MoveObjectType;
 use sui_types::base_types::ObjectID;
 use sui_types::base_types::SequenceNumber;
@@ -27,6 +27,7 @@ use sui_types::base_types::SuiAddress;
 use sui_types::coin::Coin;
 use sui_types::committee::EpochId;
 use sui_types::digests::TransactionDigest;
+use sui_types::effects::{AccumulatorValue, TransactionEffectsAPI};
 use sui_types::full_checkpoint_content::CheckpointData;
 use sui_types::layout_resolver::LayoutResolver;
 use sui_types::messages_checkpoint::CheckpointContents;
@@ -34,19 +35,20 @@ use sui_types::messages_checkpoint::CheckpointSequenceNumber;
 use sui_types::object::Data;
 use sui_types::object::Object;
 use sui_types::object::Owner;
-use sui_types::storage::error::Error as StorageError;
 use sui_types::storage::BackingPackageStore;
 use sui_types::storage::DynamicFieldKey;
 use sui_types::storage::EpochInfo;
 use sui_types::storage::TransactionInfo;
+use sui_types::storage::error::Error as StorageError;
 use sui_types::sui_system_state::SuiSystemStateTrait;
+use sui_types::transaction::{TransactionDataAPI, TransactionKind};
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
-use tracing::{debug, info};
-use typed_store::rocks::{DBMap, DBMapTableConfigMap, MetricConf};
-use typed_store::rocksdb::{MergeOperands, WriteOptions};
-use typed_store::traits::Map;
+use tracing::{debug, info, warn};
 use typed_store::DBMapUtils;
 use typed_store::TypedStoreError;
+use typed_store::rocks::{DBMap, DBMapTableConfigMap, MetricConf};
+use typed_store::rocksdb::{MergeOperands, WriteOptions, compaction_filter::Decision};
+use typed_store::traits::Map;
 
 const CURRENT_DB_VERSION: u64 = 3;
 // I tried increasing this to 100k and 1M and it didn't speed up indexing at all.
@@ -177,18 +179,6 @@ impl From<u64> for BalanceIndexInfo {
 }
 
 impl BalanceIndexInfo {
-    fn invert(self) -> Self {
-        // Check for potential overflow when negating i128::MIN
-        assert!(
-            self.balance_delta != i128::MIN,
-            "Cannot invert balance_delta: would overflow i128"
-        );
-
-        Self {
-            balance_delta: -self.balance_delta,
-        }
-    }
-
     fn merge_delta(&mut self, other: &Self) {
         self.balance_delta += other.balance_delta;
     }
@@ -218,8 +208,35 @@ pub struct PackageVersionInfo {
     pub storage_id: ObjectID,
 }
 
+#[derive(Default, Clone)]
+pub struct IndexStoreOptions {
+    pub events_compaction_filter: Option<EventsCompactionFilter>,
+}
+
 fn default_table_options() -> typed_store::rocks::DBOptions {
     typed_store::rocks::default_db_options().disable_write_throttling()
+}
+
+fn events_table_options(
+    compaction_filter: Option<EventsCompactionFilter>,
+) -> typed_store::rocks::DBOptions {
+    let mut options = default_table_options();
+    if let Some(filter) = compaction_filter {
+        options.options.set_compaction_filter(
+            "events_by_stream",
+            move |_, key, value| match filter.filter(key, value) {
+                Ok(decision) => decision,
+                Err(e) => {
+                    warn!(
+                        "Failed to parse event key during compaction: {}, key: {:?}",
+                        e, key
+                    );
+                    Decision::Remove
+                }
+            },
+        );
+    }
+    options
 }
 
 fn balance_delta_merge_operator(
@@ -245,9 +262,23 @@ fn balance_delta_merge_operator(
     )
 }
 
+fn balance_compaction_filter(_level: u32, _key: &[u8], value: &[u8]) -> Decision {
+    let balance_info = match bcs::from_bytes::<BalanceIndexInfo>(value) {
+        Ok(info) => info,
+        Err(_) => return Decision::Keep,
+    };
+
+    if balance_info.balance_delta == 0 {
+        Decision::Remove
+    } else {
+        Decision::Keep
+    }
+}
+
 fn balance_table_options() -> typed_store::rocks::DBOptions {
     default_table_options()
         .set_merge_operator_associative("balance_merge", balance_delta_merge_operator)
+        .set_compaction_filter("balance_zero_filter", balance_compaction_filter)
 }
 
 impl CoinIndexInfo {
@@ -276,9 +307,9 @@ struct IndexStoreTables {
     ///
     /// A few uses for this singleton:
     /// - determining if the DB has been initialized (as some tables will still be empty post
-    ///     initialization)
+    ///   initialization)
     /// - version of the DB. Everytime a new table or schema is changed the version number needs to
-    ///     be incremented.
+    ///   be incremented.
     meta: DBMap<(), MetadataInfo>,
 
     /// Table used to track watermark for the highest indexed checkpoint
@@ -299,6 +330,8 @@ struct IndexStoreTables {
     ///
     /// Only contains entries for transactions which have yet to be pruned from the main database.
     #[default_options_override_fn = "default_table_options"]
+    #[allow(unused)]
+    #[deprecated]
     transactions: DBMap<TransactionDigest, TransactionInfo>,
 
     /// An index of object ownership.
@@ -334,34 +367,50 @@ struct IndexStoreTables {
     /// Allows efficient listing of all versions of a package.
     #[default_options_override_fn = "default_table_options"]
     package_version: DBMap<PackageVersionKey, PackageVersionInfo>,
+
+    /// Authenticated events index by (stream_id, checkpoint_seq, transaction_idx, event_index)
+    events_by_stream: DBMap<EventIndexKey, ()>,
     // NOTE: Authors and Reviewers before adding any new tables ensure that they are either:
     // - bounded in size by the live object set
     // - are prune-able and have corresponding logic in the `prune` function
 }
 
-impl IndexStoreTables {
-    fn track_coin_balance_change(
-        object: &Object,
-        owner: &SuiAddress,
-        is_removal: bool,
-        balance_changes: &mut HashMap<BalanceKey, BalanceIndexInfo>,
-    ) -> Result<(), StorageError> {
-        if let Some((struct_tag, value)) = get_balance_and_type_if_coin(object)? {
-            let key = BalanceKey {
-                owner: *owner,
-                coin_type: struct_tag,
-            };
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EventIndexKey {
+    pub stream_id: SuiAddress,
+    pub checkpoint_seq: u64,
+    /// The accumulator version that this event is settled into
+    pub accumulator_version: u64,
+    pub transaction_idx: u32,
+    pub event_index: u32,
+}
 
-            let mut delta = BalanceIndexInfo::from(value);
-            if is_removal {
-                delta = delta.invert();
-            }
+/// Compaction filter for automatic pruning of old authenticated events during RocksDB compaction.
+#[derive(Clone)]
+pub struct EventsCompactionFilter {
+    pruning_watermark: Arc<std::sync::atomic::AtomicU64>,
+}
 
-            balance_changes.entry(key).or_default().merge_delta(&delta);
-        }
-        Ok(())
+impl EventsCompactionFilter {
+    pub fn new(pruning_watermark: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        Self { pruning_watermark }
     }
 
+    pub fn filter(&self, key: &[u8], _value: &[u8]) -> anyhow::Result<Decision> {
+        let event_key: EventIndexKey = bcs::from_bytes(key)?;
+        let watermark = self
+            .pruning_watermark
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        if event_key.checkpoint_seq <= watermark {
+            Ok(Decision::Remove)
+        } else {
+            Ok(Decision::Keep)
+        }
+    }
+}
+
+impl IndexStoreTables {
     fn extract_version_if_package(
         object: &Object,
     ) -> Option<(PackageVersionKey, PackageVersionInfo)> {
@@ -380,12 +429,23 @@ impl IndexStoreTables {
         None
     }
 
-    fn open<P: Into<PathBuf>>(path: P) -> Self {
-        IndexStoreTables::open_tables_read_write(
+    fn open_with_index_options<P: Into<PathBuf>>(
+        path: P,
+        index_options: IndexStoreOptions,
+    ) -> Self {
+        let mut table_options = std::collections::BTreeMap::new();
+        table_options.insert("balance".to_string(), balance_table_options());
+        table_options.insert(
+            "events_by_stream".to_string(),
+            events_table_options(index_options.events_compaction_filter),
+        );
+
+        IndexStoreTables::open_tables_read_write_with_deprecation_option(
             path.into(),
             MetricConf::new("rpc-index"),
             None,
-            None,
+            Some(DBMapTableConfigMap::new(table_options)),
+            true, // remove deprecated tables
         )
     }
 
@@ -394,11 +454,12 @@ impl IndexStoreTables {
         options: typed_store::rocksdb::Options,
         table_options: Option<DBMapTableConfigMap>,
     ) -> Self {
-        IndexStoreTables::open_tables_read_write(
+        IndexStoreTables::open_tables_read_write_with_deprecation_option(
             path.into(),
             MetricConf::new("rpc-index"),
             Some(options),
             table_options,
+            true, // remove deprecated tables
         )
     }
 
@@ -428,6 +489,7 @@ impl IndexStoreTables {
         _epoch_store: &AuthorityPerEpochStore,
         _package_store: &Arc<dyn BackingPackageStore + Send + Sync>,
         batch_size_limit: usize,
+        rpc_config: &sui_config::RpcConfig,
     ) -> Result<(), StorageError> {
         info!("Initializing RPC indexes");
 
@@ -452,7 +514,12 @@ impl IndexStoreTables {
         });
 
         if let Some(checkpoint_range) = checkpoint_range {
-            self.index_existing_transactions(authority_store, checkpoint_store, checkpoint_range)?;
+            self.index_existing_checkpoints(
+                authority_store,
+                checkpoint_store,
+                checkpoint_range,
+                rpc_config,
+            )?;
         }
 
         self.initialize_current_epoch(authority_store, checkpoint_store)?;
@@ -494,12 +561,13 @@ impl IndexStoreTables {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, authority_store, checkpoint_store))]
-    fn index_existing_transactions(
+    #[tracing::instrument(skip(self, authority_store, checkpoint_store, rpc_config))]
+    fn index_existing_checkpoints(
         &mut self,
         authority_store: &AuthorityStore,
         checkpoint_store: &CheckpointStore,
         checkpoint_range: std::ops::RangeInclusive<u64>,
+        rpc_config: &sui_config::RpcConfig,
     ) -> Result<(), StorageError> {
         info!(
             "Indexing {} checkpoints in range {checkpoint_range:?}",
@@ -508,16 +576,23 @@ impl IndexStoreTables {
         let start_time = Instant::now();
 
         checkpoint_range.into_par_iter().try_for_each(|seq| {
-            let checkpoint_data =
-                sparse_checkpoint_data_for_backfill(authority_store, checkpoint_store, seq)?;
+            let load_events = rpc_config.authenticated_events_indexing();
+            let Some(checkpoint_data) = sparse_checkpoint_data_for_epoch_backfill(
+                authority_store,
+                checkpoint_store,
+                seq,
+                load_events,
+            )?
+            else {
+                return Ok(());
+            };
 
-            let mut batch = self.transactions.batch();
+            let mut batch = self.epochs.batch();
 
             self.index_epoch(&checkpoint_data, &mut batch)?;
-            self.index_transactions(&checkpoint_data, &mut batch)?;
 
             batch
-                .write_opt(&(bulk_ingestion_write_options()))
+                .write_opt(bulk_ingestion_write_options())
                 .map_err(StorageError::from)
         })?;
 
@@ -532,15 +607,10 @@ impl IndexStoreTables {
     fn prune(
         &self,
         pruned_checkpoint_watermark: u64,
-        checkpoint_contents_to_prune: &[CheckpointContents],
+        _checkpoint_contents_to_prune: &[CheckpointContents],
     ) -> Result<(), TypedStoreError> {
-        let mut batch = self.transactions.batch();
+        let mut batch = self.watermark.batch();
 
-        let transactions_to_prune = checkpoint_contents_to_prune
-            .iter()
-            .flat_map(|contents| contents.iter().map(|digests| digests.transaction));
-
-        batch.delete_batch(&self.transactions, transactions_to_prune)?;
         batch.insert_batch(
             &self.watermark,
             [(Watermark::Pruned, pruned_checkpoint_watermark)],
@@ -554,16 +624,21 @@ impl IndexStoreTables {
         &self,
         checkpoint: &CheckpointData,
         _resolver: &mut dyn LayoutResolver,
+        rpc_config: &sui_config::RpcConfig,
     ) -> Result<typed_store::rocks::DBBatch, StorageError> {
         debug!(
             checkpoint = checkpoint.checkpoint_summary.sequence_number,
             "indexing checkpoint"
         );
 
-        let mut batch = self.transactions.batch();
+        let mut batch = self.owner.batch();
 
         self.index_epoch(checkpoint, &mut batch)?;
-        self.index_transactions(checkpoint, &mut batch)?;
+        self.index_transactions(
+            checkpoint,
+            &mut batch,
+            rpc_config.authenticated_events_indexing(),
+        )?;
         self.index_objects(checkpoint, &mut batch)?;
 
         batch.insert_batch(
@@ -580,6 +655,80 @@ impl IndexStoreTables {
         );
 
         Ok(batch)
+    }
+
+    fn extract_accumulator_version(
+        &self,
+        tx: &sui_types::full_checkpoint_content::CheckpointTransaction,
+    ) -> Option<u64> {
+        let TransactionKind::ProgrammableSystemTransaction(pt) =
+            tx.transaction.transaction_data().kind()
+        else {
+            return None;
+        };
+
+        if pt.shared_input_objects().any(|obj| {
+            obj.id == SUI_ACCUMULATOR_ROOT_OBJECT_ID
+                && obj.mutability == sui_types::transaction::SharedObjectMutability::Mutable
+        }) {
+            return tx.output_objects.iter().find_map(|obj| {
+                if obj.id() == SUI_ACCUMULATOR_ROOT_OBJECT_ID {
+                    Some(obj.version().value())
+                } else {
+                    None
+                }
+            });
+        }
+
+        None
+    }
+
+    fn index_transaction_events(
+        &self,
+        tx: &sui_types::full_checkpoint_content::CheckpointTransaction,
+        checkpoint_seq: u64,
+        tx_idx: u32,
+        accumulator_version: Option<u64>,
+        batch: &mut typed_store::rocks::DBBatch,
+    ) -> Result<(), StorageError> {
+        let acc_events = tx.effects.accumulator_events();
+        if acc_events.is_empty() {
+            return Ok(());
+        }
+
+        let mut entries: Vec<(EventIndexKey, ())> = Vec::new();
+        for acc in acc_events {
+            if let AccumulatorValue::EventDigest(event_digests) = &acc.write.value {
+                let Some(accumulator_version) = accumulator_version else {
+                    mysten_common::debug_fatal!(
+                        "Found events at checkpoint {} tx {} before any accumulator settlement",
+                        checkpoint_seq,
+                        tx_idx
+                    );
+                    continue;
+                };
+
+                if let Some(stream_id) =
+                    sui_types::accumulator_root::stream_id_from_accumulator_event(&acc)
+                {
+                    for (idx, _d) in event_digests {
+                        let key = EventIndexKey {
+                            stream_id,
+                            checkpoint_seq,
+                            accumulator_version,
+                            transaction_idx: tx_idx,
+                            event_index: *idx as u32,
+                        };
+                        entries.push((key, ()));
+                    }
+                }
+            }
+        }
+
+        if !entries.is_empty() {
+            batch.insert_batch(&self.events_by_stream, entries)?;
+        }
+        Ok(())
     }
 
     fn index_epoch(
@@ -644,18 +793,49 @@ impl IndexStoreTables {
         &self,
         checkpoint: &CheckpointData,
         batch: &mut typed_store::rocks::DBBatch,
+        index_events: bool,
     ) -> Result<(), StorageError> {
-        for tx in &checkpoint.transactions {
-            let info = TransactionInfo::new(
-                tx.transaction.transaction_data(),
+        let cp = checkpoint.checkpoint_summary.sequence_number;
+        let mut current_accumulator_version: Option<u64> = None;
+
+        // iterate in reverse order, process accumulator settlements first
+        for (tx_idx, tx) in checkpoint.transactions.iter().enumerate().rev() {
+            let balance_changes = sui_types::balance_change::derive_balance_changes(
                 &tx.effects,
                 &tx.input_objects,
                 &tx.output_objects,
-                checkpoint.checkpoint_summary.sequence_number,
-            );
+            )
+            .into_iter()
+            .filter_map(|change| {
+                if let TypeTag::Struct(coin_type) = change.coin_type {
+                    Some((
+                        BalanceKey {
+                            owner: change.address,
+                            coin_type: *coin_type,
+                        },
+                        BalanceIndexInfo {
+                            balance_delta: change.amount,
+                        },
+                    ))
+                } else {
+                    None
+                }
+            });
+            batch.partial_merge_batch(&self.balance, balance_changes)?;
 
-            let digest = tx.transaction.digest();
-            batch.insert_batch(&self.transactions, [(digest, info)])?;
+            if index_events {
+                if let Some(version) = self.extract_accumulator_version(tx) {
+                    current_accumulator_version = Some(version);
+                }
+
+                self.index_transaction_events(
+                    tx,
+                    cp,
+                    tx_idx as u32,
+                    current_accumulator_version,
+                    batch,
+                )?;
+            }
         }
 
         Ok(())
@@ -667,21 +847,13 @@ impl IndexStoreTables {
         batch: &mut typed_store::rocks::DBBatch,
     ) -> Result<(), StorageError> {
         let mut coin_index: HashMap<CoinIndexKey, CoinIndexInfo> = HashMap::new();
-        let mut balance_changes: HashMap<BalanceKey, BalanceIndexInfo> = HashMap::new();
         let mut package_version_index: Vec<(PackageVersionKey, PackageVersionInfo)> = vec![];
 
         for tx in &checkpoint.transactions {
             // determine changes from removed objects
             for removed_object in tx.removed_objects_pre_version() {
                 match removed_object.owner() {
-                    Owner::AddressOwner(owner) | Owner::ConsensusAddressOwner { owner, .. } => {
-                        Self::track_coin_balance_change(
-                            removed_object,
-                            owner,
-                            true,
-                            &mut balance_changes,
-                        )?;
-
+                    Owner::AddressOwner(_) | Owner::ConsensusAddressOwner { .. } => {
                         let owner_key = OwnerIndexKey::from_object(removed_object);
                         batch.delete_batch(&self.owner, [owner_key])?;
                     }
@@ -699,14 +871,7 @@ impl IndexStoreTables {
             for (object, old_object) in tx.changed_objects() {
                 if let Some(old_object) = old_object {
                     match old_object.owner() {
-                        Owner::AddressOwner(owner) | Owner::ConsensusAddressOwner { owner, .. } => {
-                            Self::track_coin_balance_change(
-                                old_object,
-                                owner,
-                                true,
-                                &mut balance_changes,
-                            )?;
-
+                        Owner::AddressOwner(_) | Owner::ConsensusAddressOwner { .. } => {
                             let owner_key = OwnerIndexKey::from_object(old_object);
                             batch.delete_batch(&self.owner, [owner_key])?;
                         }
@@ -725,13 +890,7 @@ impl IndexStoreTables {
                 }
 
                 match object.owner() {
-                    Owner::AddressOwner(owner) | Owner::ConsensusAddressOwner { owner, .. } => {
-                        Self::track_coin_balance_change(
-                            object,
-                            owner,
-                            false,
-                            &mut balance_changes,
-                        )?;
+                    Owner::AddressOwner(_) | Owner::ConsensusAddressOwner { .. } => {
                         let owner_key = OwnerIndexKey::from_object(object);
                         let owner_info = OwnerIndexInfo::new(object);
                         batch.insert_batch(&self.owner, [(owner_key, owner_info)])?;
@@ -769,7 +928,6 @@ impl IndexStoreTables {
         }
 
         batch.insert_batch(&self.coin, coin_index)?;
-        batch.partial_merge_batch(&self.balance, balance_changes)?;
         batch.insert_batch(&self.package_version, package_version_index)?;
 
         Ok(())
@@ -779,11 +937,37 @@ impl IndexStoreTables {
         self.epochs.get(&epoch)
     }
 
-    fn get_transaction_info(
+    fn event_iter(
         &self,
-        digest: &TransactionDigest,
-    ) -> Result<Option<TransactionInfo>, TypedStoreError> {
-        self.transactions.get(digest)
+        stream_id: SuiAddress,
+        start_checkpoint: u64,
+        start_accumulator_version: u64,
+        start_transaction_idx: u32,
+        start_event_idx: u32,
+        end_checkpoint: u64,
+        limit: u32,
+    ) -> Result<impl Iterator<Item = Result<EventIndexKey, TypedStoreError>> + '_, TypedStoreError>
+    {
+        let lower = EventIndexKey {
+            stream_id,
+            checkpoint_seq: start_checkpoint,
+            accumulator_version: start_accumulator_version,
+            transaction_idx: start_transaction_idx,
+            event_index: start_event_idx,
+        };
+        let upper = EventIndexKey {
+            stream_id,
+            checkpoint_seq: end_checkpoint,
+            accumulator_version: u64::MAX,
+            transaction_idx: u32::MAX,
+            event_index: u32::MAX,
+        };
+
+        Ok(self
+            .events_by_stream
+            .safe_iter_with_bounds(Some(lower), Some(upper))
+            .map(|res| res.map(|(k, _)| k))
+            .take(limit as usize))
     }
 
     fn owner_iter(
@@ -919,6 +1103,7 @@ impl IndexStoreTables {
 pub struct RpcIndexStore {
     tables: IndexStoreTables,
     pending_updates: Mutex<BTreeMap<u64, typed_store::rocks::DBBatch>>,
+    rpc_config: sui_config::RpcConfig,
 }
 
 impl RpcIndexStore {
@@ -933,12 +1118,40 @@ impl RpcIndexStore {
         checkpoint_store: &CheckpointStore,
         epoch_store: &AuthorityPerEpochStore,
         package_store: &Arc<dyn BackingPackageStore + Send + Sync>,
-        index_config: Option<&RpcIndexInitConfig>,
+        pruning_watermark: Arc<std::sync::atomic::AtomicU64>,
+        rpc_config: sui_config::RpcConfig,
+    ) -> Self {
+        let events_filter = EventsCompactionFilter::new(pruning_watermark);
+        let index_options = IndexStoreOptions {
+            events_compaction_filter: Some(events_filter),
+        };
+
+        Self::new_with_options(
+            dir,
+            authority_store,
+            checkpoint_store,
+            epoch_store,
+            package_store,
+            index_options,
+            rpc_config,
+        )
+        .await
+    }
+
+    pub async fn new_with_options(
+        dir: &Path,
+        authority_store: &AuthorityStore,
+        checkpoint_store: &CheckpointStore,
+        epoch_store: &AuthorityPerEpochStore,
+        package_store: &Arc<dyn BackingPackageStore + Send + Sync>,
+        index_options: IndexStoreOptions,
+        rpc_config: sui_config::RpcConfig,
     ) -> Self {
         let path = Self::db_path(dir);
+        let index_config = rpc_config.index_initialization_config();
 
         let tables = {
-            let tables = IndexStoreTables::open(&path);
+            let tables = IndexStoreTables::open_with_index_options(&path, index_options.clone());
 
             // If the index tables are uninitialized or on an older version then we need to
             // populate them
@@ -1046,12 +1259,16 @@ impl RpcIndexStore {
                             let buffer_count = (cf_memory_budget / buffer_size)
                                 .clamp(2, target_buffer_count)
                                 as i32;
-                            debug!("Calculated buffer_size: {} bytes, buffer_count: {} (based on {} CPUs)", 
-                                buffer_size, buffer_count, target_buffer_count);
+                            debug!(
+                                "Calculated buffer_size: {} bytes, buffer_count: {} (based on {} CPUs)",
+                                buffer_size, buffer_count, target_buffer_count
+                            );
                             (buffer_size, buffer_count)
                         }
                         _ => {
-                            panic!("indexing-cf-write-buffer-size and indexing-cf-max-write-buffer-number must both be specified or both be omitted");
+                            panic!(
+                                "indexing-cf-write-buffer-size and indexing-cf-max-write-buffer-number must both be specified or both be omitted"
+                            );
                         }
                     };
 
@@ -1071,8 +1288,10 @@ impl RpcIndexStore {
                         let half_buffer = buffer_size / 2;
                         let default_limit = 1 << 27; // 128MB
                         let limit = half_buffer.min(default_limit);
-                        debug!("Calculated batch_size_limit: {} bytes (min of half_buffer={} and default_limit={})", 
-                            limit, half_buffer, default_limit);
+                        debug!(
+                            "Calculated batch_size_limit: {} bytes (min of half_buffer={} and default_limit={})",
+                            limit, half_buffer, default_limit
+                        );
                         limit
                     };
 
@@ -1089,6 +1308,11 @@ impl RpcIndexStore {
                     );
                     table_config_map.insert("balance".to_string(), balance_options);
 
+                    table_config_map.insert(
+                        "events_by_stream".to_string(),
+                        events_table_options(index_options.events_compaction_filter.clone()),
+                    );
+
                     IndexStoreTables::open_with_options(
                         &path,
                         options,
@@ -1103,6 +1327,7 @@ impl RpcIndexStore {
                         epoch_store,
                         package_store,
                         batch_size_limit,
+                        &rpc_config,
                     )
                     .expect("unable to initialize rpc index from live object set");
 
@@ -1130,7 +1355,8 @@ impl RpcIndexStore {
                 }
 
                 // Reopen the DB with default options (eg without `unordered_write`s enabled)
-                let reopened_tables = IndexStoreTables::open(&path);
+                let reopened_tables =
+                    IndexStoreTables::open_with_index_options(&path, index_options);
 
                 // Sanity check: verify the database version was persisted correctly
                 let stored_version = reopened_tables
@@ -1153,16 +1379,18 @@ impl RpcIndexStore {
         Self {
             tables,
             pending_updates: Default::default(),
+            rpc_config,
         }
     }
 
     pub fn new_without_init(dir: &Path) -> Self {
         let path = Self::db_path(dir);
-        let tables = IndexStoreTables::open(path);
+        let tables = IndexStoreTables::open_with_index_options(path, IndexStoreOptions::default());
 
         Self {
             tables,
             pending_updates: Default::default(),
+            rpc_config: sui_config::RpcConfig::default(),
         }
     }
 
@@ -1187,7 +1415,7 @@ impl RpcIndexStore {
         let sequence_number = checkpoint.checkpoint_summary.sequence_number;
         let batch = self
             .tables
-            .index_checkpoint(checkpoint, resolver)
+            .index_checkpoint(checkpoint, resolver, &self.rpc_config)
             .expect("db error");
 
         self.pending_updates
@@ -1219,13 +1447,6 @@ impl RpcIndexStore {
 
     pub fn get_epoch_info(&self, epoch: EpochId) -> Result<Option<EpochInfo>, TypedStoreError> {
         self.tables.get_epoch_info(epoch)
-    }
-
-    pub fn get_transaction_info(
-        &self,
-        digest: &TransactionDigest,
-    ) -> Result<Option<TransactionInfo>, TypedStoreError> {
-        self.tables.get_transaction_info(digest)
     }
 
     pub fn owner_iter(
@@ -1284,6 +1505,34 @@ impl RpcIndexStore {
         TypedStoreError,
     > {
         self.tables.package_versions_iter(original_id, cursor)
+    }
+
+    pub fn event_iter(
+        &self,
+        stream_id: SuiAddress,
+        start_checkpoint: u64,
+        start_accumulator_version: u64,
+        start_transaction_idx: u32,
+        start_event_idx: u32,
+        end_checkpoint: u64,
+        limit: u32,
+    ) -> Result<impl Iterator<Item = Result<EventIndexKey, TypedStoreError>> + '_, TypedStoreError>
+    {
+        self.tables.event_iter(
+            stream_id,
+            start_checkpoint,
+            start_accumulator_version,
+            start_transaction_idx,
+            start_event_idx,
+            end_checkpoint,
+            limit,
+        )
+    }
+
+    pub fn get_highest_indexed_checkpoint_seq_number(
+        &self,
+    ) -> Result<Option<CheckpointSequenceNumber>, TypedStoreError> {
+        self.tables.watermark.get(&Watermark::Indexed)
     }
 }
 
@@ -1408,6 +1657,27 @@ impl LiveObjectIndexer for RpcLiveObjectIndexer<'_> {
                     self.batch
                         .insert_batch(&self.tables.dynamic_field, [(field_key, ())])?;
                 }
+
+                // Index address balances
+                if parent == SUI_ACCUMULATOR_ROOT_OBJECT_ID.into()
+                    && let Some((owner, coin_type, balance)) = get_address_balance_info(&object)
+                {
+                    let balance_key = BalanceKey { owner, coin_type };
+                    let balance_info = BalanceIndexInfo {
+                        balance_delta: balance,
+                    };
+                    self.balance_changes
+                        .entry(balance_key)
+                        .or_default()
+                        .merge_delta(&balance_info);
+
+                    if self.balance_changes.len() >= BALANCE_FLUSH_THRESHOLD {
+                        self.batch.partial_merge_batch(
+                            &self.tables.balance,
+                            std::mem::take(&mut self.balance_changes),
+                        )?;
+                    }
+                }
             }
 
             Owner::Shared { .. } | Owner::Immutable => {}
@@ -1436,7 +1706,7 @@ impl LiveObjectIndexer for RpcLiveObjectIndexer<'_> {
         // data we need to hold in memory doesn't grow unbounded.
         if self.batch.size_in_bytes() >= self.batch_size_limit {
             std::mem::replace(&mut self.batch, self.tables.owner.batch())
-                .write_opt(&bulk_ingestion_write_options())?;
+                .write_opt(bulk_ingestion_write_options())?;
         }
 
         Ok(())
@@ -1447,25 +1717,30 @@ impl LiveObjectIndexer for RpcLiveObjectIndexer<'_> {
             &self.tables.balance,
             std::mem::take(&mut self.balance_changes),
         )?;
-        self.batch.write_opt(&bulk_ingestion_write_options())?;
+        self.batch.write_opt(bulk_ingestion_write_options())?;
         Ok(())
     }
 }
 
 // TODO figure out a way to dedup this logic. Today we'd need to do quite a bit of refactoring to
 // make it possible.
-//
-// Load a CheckpointData struct without event data
-fn sparse_checkpoint_data_for_backfill(
+fn sparse_checkpoint_data_for_epoch_backfill(
     authority_store: &AuthorityStore,
     checkpoint_store: &CheckpointStore,
     checkpoint: u64,
-) -> Result<CheckpointData, StorageError> {
+    load_events: bool,
+) -> Result<Option<CheckpointData>, StorageError> {
     use sui_types::full_checkpoint_content::CheckpointTransaction;
 
     let summary = checkpoint_store
         .get_checkpoint_by_sequence_number(checkpoint)?
         .ok_or_else(|| StorageError::missing(format!("missing checkpoint {checkpoint}")))?;
+
+    // Only load genesis and end of epoch checkpoints
+    if summary.end_of_epoch_data.is_none() && summary.sequence_number != 0 {
+        return Ok(None);
+    }
+
     let contents = checkpoint_store
         .get_checkpoint_contents(&summary.content_digest)?
         .ok_or_else(|| StorageError::missing(format!("missing checkpoint {checkpoint}")))?;
@@ -1488,8 +1763,16 @@ fn sparse_checkpoint_data_for_backfill(
         .map(|maybe_effects| maybe_effects.ok_or_else(|| StorageError::custom("missing effects")))
         .collect::<Result<Vec<_>, _>>()?;
 
+    let events = if load_events {
+        authority_store
+            .multi_get_events(&transaction_digests)
+            .map_err(|e| StorageError::custom(e.to_string()))?
+    } else {
+        vec![None; transaction_digests.len()]
+    };
+
     let mut full_transactions = Vec::with_capacity(transactions.len());
-    for (tx, fx) in transactions.into_iter().zip(effects) {
+    for ((tx, fx), ev) in transactions.into_iter().zip(effects).zip(events) {
         let input_objects =
             sui_types::storage::get_transaction_input_objects(authority_store, &fx)?;
         let output_objects =
@@ -1498,7 +1781,7 @@ fn sparse_checkpoint_data_for_backfill(
         let full_transaction = CheckpointTransaction {
             transaction: tx.into(),
             effects: fx,
-            events: None,
+            events: ev,
             input_objects,
             output_objects,
         };
@@ -1512,7 +1795,7 @@ fn sparse_checkpoint_data_for_backfill(
         transactions: full_transactions,
     };
 
-    Ok(checkpoint_data)
+    Ok(Some(checkpoint_data))
 }
 
 fn get_balance_and_type_if_coin(object: &Object) -> Result<Option<(StructTag, u64)>, StorageError> {
@@ -1534,5 +1817,158 @@ fn get_balance_and_type_if_coin(object: &Object) -> Result<Option<(StructTag, u6
                 e
             )))
         }
+    }
+}
+
+fn get_address_balance_info(object: &Object) -> Option<(SuiAddress, StructTag, i128)> {
+    let move_object = object.data.try_as_move()?;
+
+    let TypeTag::Struct(coin_type) = move_object.type_().balance_accumulator_field_type_maybe()?
+    else {
+        return None;
+    };
+
+    let (key, value): (
+        sui_types::accumulator_root::AccumulatorKey,
+        sui_types::accumulator_root::AccumulatorValue,
+    ) = move_object.try_into().ok()?;
+
+    let balance = value.as_u128()? as i128;
+    if balance <= 0 {
+        return None;
+    }
+
+    Some((key.owner, *coin_type, balance))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+    use sui_types::base_types::SuiAddress;
+
+    #[tokio::test]
+    async fn test_events_compaction_filter() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        let db_path = path.join("rpc-index");
+
+        let pruning_watermark = Arc::new(AtomicU64::new(5));
+        let compaction_filter = EventsCompactionFilter::new(pruning_watermark.clone());
+
+        let index_options = IndexStoreOptions {
+            events_compaction_filter: Some(compaction_filter),
+        };
+
+        let tables = IndexStoreTables::open_with_index_options(&db_path, index_options);
+        let stream_id = SuiAddress::random_for_testing_only();
+        let test_events: Vec<EventIndexKey> = [1, 3, 5, 10, 15]
+            .iter()
+            .map(|&checkpoint_seq| EventIndexKey {
+                stream_id,
+                checkpoint_seq,
+                accumulator_version: 0,
+                transaction_idx: 0,
+                event_index: 0,
+            })
+            .collect();
+
+        let mut batch = tables.events_by_stream.batch();
+        for key in &test_events {
+            batch
+                .insert_batch(&tables.events_by_stream, [(key.clone(), ())])
+                .unwrap();
+        }
+        batch.write().unwrap();
+
+        tables.events_by_stream.flush().unwrap();
+        let mut events_before_compaction = 0;
+        for result in tables.events_by_stream.safe_iter() {
+            if result.is_ok() {
+                events_before_compaction += 1;
+            }
+        }
+        assert_eq!(
+            events_before_compaction, 5,
+            "Should have 5 events before compaction"
+        );
+        let start_key = EventIndexKey {
+            stream_id: SuiAddress::ZERO,
+            checkpoint_seq: 0,
+            accumulator_version: 0,
+            transaction_idx: 0,
+            event_index: 0,
+        };
+        let end_key = EventIndexKey {
+            stream_id: SuiAddress::random_for_testing_only(),
+            checkpoint_seq: u64::MAX,
+            accumulator_version: u64::MAX,
+            transaction_idx: u32::MAX,
+            event_index: u32::MAX,
+        };
+
+        tables
+            .events_by_stream
+            .compact_range(&start_key, &end_key)
+            .unwrap();
+        let mut events_after_compaction = Vec::new();
+        for (key, _event) in tables.events_by_stream.safe_iter().flatten() {
+            events_after_compaction.push(key);
+        }
+
+        println!("Events after compaction: {}", events_after_compaction.len());
+        assert!(
+            events_after_compaction.len() >= 2,
+            "Should have at least the events that shouldn't be pruned"
+        );
+        pruning_watermark.store(20, std::sync::atomic::Ordering::Relaxed);
+        let watermark_after = pruning_watermark.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(watermark_after, 20, "Watermark should be updated");
+    }
+
+    #[test]
+    fn test_events_compaction_filter_logic() {
+        let watermark = Arc::new(AtomicU64::new(100));
+        let filter = EventsCompactionFilter::new(watermark.clone());
+
+        let old_key = EventIndexKey {
+            stream_id: SuiAddress::random_for_testing_only(),
+            checkpoint_seq: 50,
+            accumulator_version: 0,
+            transaction_idx: 0,
+            event_index: 0,
+        };
+        let old_key_bytes = bcs::to_bytes(&old_key).unwrap();
+        let decision = filter.filter(&old_key_bytes, &[]).unwrap();
+        assert!(
+            matches!(decision, Decision::Remove),
+            "Event with checkpoint 50 should be removed when watermark is 100"
+        );
+        let new_key = EventIndexKey {
+            stream_id: SuiAddress::random_for_testing_only(),
+            checkpoint_seq: 150,
+            accumulator_version: 0,
+            transaction_idx: 0,
+            event_index: 0,
+        };
+        let new_key_bytes = bcs::to_bytes(&new_key).unwrap();
+        let decision = filter.filter(&new_key_bytes, &[]).unwrap();
+        assert!(
+            matches!(decision, Decision::Keep),
+            "Event with checkpoint 150 should be kept when watermark is 100"
+        );
+        let boundary_key = EventIndexKey {
+            stream_id: SuiAddress::random_for_testing_only(),
+            checkpoint_seq: 100,
+            accumulator_version: 0,
+            transaction_idx: 0,
+            event_index: 0,
+        };
+        let boundary_key_bytes = bcs::to_bytes(&boundary_key).unwrap();
+        let decision = filter.filter(&boundary_key_bytes, &[]).unwrap();
+        assert!(
+            matches!(decision, Decision::Remove),
+            "Event with checkpoint equal to watermark should be removed"
+        );
     }
 }

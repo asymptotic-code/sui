@@ -5,23 +5,27 @@ use std::sync::Arc;
 
 use async_graphql::dataloader::DataLoader;
 use prometheus::Registry;
-use sui_indexer_alt_reader::{
-    bigtable_reader::{BigtableArgs, BigtableReader},
-    error::Error,
-    kv_loader::KvLoader,
-    package_resolver::{DbPackageStore, PackageCache, PackageResolver},
-    pg_reader::db::DbArgs,
-    pg_reader::PgReader,
-};
+use sui_indexer_alt_reader::bigtable_reader::BigtableArgs;
+use sui_indexer_alt_reader::bigtable_reader::BigtableReader;
+use sui_indexer_alt_reader::consistent_reader::ConsistentReader;
+use sui_indexer_alt_reader::consistent_reader::ConsistentReaderArgs;
+use sui_indexer_alt_reader::kv_loader::KvLoader;
+use sui_indexer_alt_reader::package_resolver::DbPackageStore;
+use sui_indexer_alt_reader::package_resolver::PackageCache;
+use sui_indexer_alt_reader::pg_reader::PgReader;
+use sui_indexer_alt_reader::pg_reader::db::DbArgs;
 use sui_package_resolver::Resolver;
-use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::{config::RpcConfig, metrics::RpcMetrics};
+use crate::config::RpcConfig;
+use crate::metrics::RpcMetrics;
 
 /// A bundle of different interfaces to data, for use by JSON-RPC method implementations.
 #[derive(Clone)]
 pub(crate) struct Context {
+    /// Access to the Consistent Store.
+    consistent_reader: ConsistentReader,
+
     /// Direct access to the database, for running SQL queries.
     pg_reader: PgReader,
 
@@ -36,7 +40,7 @@ pub(crate) struct Context {
 
     /// Access to the database for accessing information about types from their packages (again
     /// through the same connection pool as `reader`).
-    package_resolver: PackageResolver,
+    package_resolver: Arc<Resolver<Arc<PackageCache>>>,
 
     /// Access to the RPC's metrics.
     metrics: Arc<RpcMetrics>,
@@ -55,12 +59,12 @@ impl Context {
         bigtable_instance: Option<String>,
         db_args: DbArgs,
         bigtable_args: BigtableArgs,
+        consistent_reader_args: ConsistentReaderArgs,
         config: RpcConfig,
         metrics: Arc<RpcMetrics>,
         registry: &Registry,
-        cancel: CancellationToken,
-    ) -> Result<Self, Error> {
-        let pg_reader = PgReader::new(None, database_url, db_args, registry, cancel).await?;
+    ) -> Result<Self, anyhow::Error> {
+        let pg_reader = PgReader::new(None, database_url, db_args, registry).await?;
         let pg_loader = Arc::new(pg_reader.as_data_loader());
 
         let kv_loader = if let Some(instance_id) = bigtable_instance {
@@ -77,13 +81,18 @@ impl Context {
             KvLoader::new_with_pg(pg_loader.clone())
         };
 
-        let store = PackageCache::new(DbPackageStore::new(pg_loader.clone()));
+        let store = Arc::new(PackageCache::new(DbPackageStore::new(pg_loader.clone())));
         let package_resolver = Arc::new(Resolver::new_with_limits(
             store,
             config.package_resolver.clone(),
         ));
 
+        let consistent_reader =
+            ConsistentReader::new(Some("jsonrpc_consistent"), consistent_reader_args, registry)
+                .await?;
+
         Ok(Self {
+            consistent_reader,
             pg_reader,
             pg_loader,
             kv_loader,
@@ -91,6 +100,11 @@ impl Context {
             metrics,
             config: Arc::new(config),
         })
+    }
+
+    /// For performing reads against the Consistent Store.
+    pub(crate) fn consistent_reader(&self) -> &ConsistentReader {
+        &self.consistent_reader
     }
 
     /// For performing arbitrary SQL queries on the Postgres db.
@@ -103,16 +117,15 @@ impl Context {
         &self.pg_loader
     }
 
-    /// For performing point look-ups on the kv store.
-    /// Depends on the configuration of the indexer, the kv store may be backed by
-    /// eitherBigtable or Postgres.
+    /// For performing point look-ups on the kv store. Depends on the configuration of the indexer,
+    /// the kv store may be backed by either Bigtable or Postgres.
     pub(crate) fn kv_loader(&self) -> &KvLoader {
         &self.kv_loader
     }
 
     /// For querying type and function signature information.
-    pub(crate) fn package_resolver(&self) -> &PackageResolver {
-        &self.package_resolver
+    pub(crate) fn package_resolver(&self) -> &Resolver<Arc<PackageCache>> {
+        self.package_resolver.as_ref()
     }
 
     /// Access to the RPC metrics.

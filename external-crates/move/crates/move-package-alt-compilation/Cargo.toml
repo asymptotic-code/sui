@@ -25,5 +25,10 @@ move-symbol-pool.workspace = true
 petgraph.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
+toml_edit.workspace = true
 tracing.workspace = true
 vfs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

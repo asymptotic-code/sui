@@ -4,7 +4,7 @@
 use move_binary_format::CompiledModule;
 use move_trace_format::format::MoveTraceBuilder;
 use move_vm_config::verifier::{MeterConfig, VerifierConfig};
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 use sui_protocol_config::ProtocolConfig;
 use sui_types::execution::ExecutionTiming;
 use sui_types::execution_params::ExecutionOrEarlyError;
@@ -24,8 +24,8 @@ use sui_types::{
 };
 
 use move_bytecode_verifier_meter::Meter;
-use move_vm_runtime_latest::move_vm::MoveVM;
-use sui_adapter_latest::adapter::{new_move_vm, run_metered_move_bytecode_verifier};
+use move_vm_runtime_latest::runtime::MoveRuntime;
+use sui_adapter_latest::adapter::{new_move_runtime, run_metered_move_bytecode_verifier};
 use sui_adapter_latest::execution_engine::{
     execute_genesis_state_update, execute_transaction_to_effects,
 };
@@ -38,7 +38,7 @@ use crate::executor;
 use crate::verifier;
 use sui_adapter_latest::execution_mode;
 
-pub(crate) struct Executor(Arc<MoveVM>);
+pub(crate) struct Executor(Arc<MoveRuntime>);
 
 pub(crate) struct Verifier<'m> {
     config: VerifierConfig,
@@ -46,15 +46,10 @@ pub(crate) struct Verifier<'m> {
 }
 
 impl Executor {
-    pub(crate) fn new(
-        protocol_config: &ProtocolConfig,
-        silent: bool,
-        enable_profiler: Option<PathBuf>,
-    ) -> Result<Self, SuiError> {
-        Ok(Executor(Arc::new(new_move_vm(
+    pub(crate) fn new(protocol_config: &ProtocolConfig, silent: bool) -> Result<Self, SuiError> {
+        Ok(Executor(Arc::new(new_move_runtime(
             all_natives(silent, protocol_config),
             protocol_config,
-            enable_profiler,
         )?)))
     }
 }
@@ -216,6 +211,10 @@ impl executor::Executor for Executor {
 impl verifier::Verifier for Verifier<'_> {
     fn meter(&self, config: MeterConfig) -> Box<dyn Meter> {
         Box::new(SuiVerifierMeter::new(config))
+    }
+
+    fn override_deprecate_global_storage_ops_during_deserialization(&self) -> Option<bool> {
+        Some(true)
     }
 
     fn meter_compiled_modules(

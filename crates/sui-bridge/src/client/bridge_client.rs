@@ -3,15 +3,17 @@
 
 //! `BridgeClient` talks to BridgeNode.
 
-use crate::crypto::{verify_signed_bridge_action, BridgeAuthorityPublicKeyBytes};
+use crate::crypto::{BridgeAuthorityPublicKeyBytes, verify_signed_bridge_action};
 use crate::error::{BridgeError, BridgeResult};
 use crate::server::APPLICATION_JSON;
-use crate::types::{BridgeAction, BridgeCommittee, VerifiedSignedBridgeAction};
+use crate::types::{BridgeAction, BridgeCommittee, SignedBridgeAction, VerifiedSignedBridgeAction};
 use fastcrypto::encoding::{Encoding, Hex};
 use fastcrypto::traits::ToFromBytes;
 use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
+
+const MAX_BRIDGE_CLIENT_RESPONSE_SIZE: usize = 1024 * 1024;
 
 // Note: `base_url` is `Option<Url>` because `quorum_map_then_reduce_with_timeout_and_prefs`
 // uses `[]` to get Client based on key. Therefore even when the URL is invalid we need to
@@ -37,7 +39,10 @@ impl BridgeClient {
         // Unwrap safe: we passed the `is_active_member` check above
         let member = committee.member(&authority_name).unwrap();
         Ok(Self {
-            inner: reqwest::Client::new(),
+            inner: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?,
             authority: authority_name.clone(),
             base_url: Url::from_str(&member.base_url).ok(),
             committee,
@@ -56,7 +61,20 @@ impl BridgeClient {
                 "sign/bridge_tx/sui/eth/{}/{}",
                 e.sui_tx_digest, e.sui_tx_event_index
             ),
+            BridgeAction::SuiToEthTokenTransfer(_) | BridgeAction::SuiToEthTokenTransferV2(_) => {
+                format!(
+                    "/sign/bridge_action/sui/eth/{source_chain}/{message_type}/{bridge_seq_num}",
+                    source_chain = event.chain_id() as u8,
+                    message_type = event.action_type() as u8,
+                    bridge_seq_num = event.seq_number(),
+                )
+            }
             BridgeAction::EthToSuiBridgeAction(e) => format!(
+                "sign/bridge_tx/eth/sui/{}/{}",
+                Hex::encode(e.eth_tx_hash.0),
+                e.eth_event_index
+            ),
+            BridgeAction::EthToSuiTokenTransferV2(e) => format!(
                 "sign/bridge_tx/eth/sui/{}/{}",
                 Hex::encode(e.eth_tx_hash.0),
                 e.eth_event_index
@@ -96,8 +114,8 @@ impl BridgeClient {
             BridgeAction::EvmContractUpgradeAction(a) => {
                 let chain_id = (a.chain_id as u8).to_string();
                 let nonce = a.nonce.to_string();
-                let proxy_address = Hex::encode(a.proxy_address.as_bytes());
-                let new_impl_address = Hex::encode(a.new_impl_address.as_bytes());
+                let proxy_address = Hex::encode(a.proxy_address.as_slice());
+                let new_impl_address = Hex::encode(a.new_impl_address.as_slice());
                 let path = format!(
                     "sign/upgrade_evm_contract/{chain_id}/{nonce}/{proxy_address}/{new_impl_address}"
                 );
@@ -207,7 +225,10 @@ impl BridgeClient {
             .await?;
         if !resp.status().is_success() {
             let error_status = format!("{:?}", resp.error_for_status_ref());
-            let resp_text = resp.text().await?;
+            let resp_text = String::from_utf8_lossy(
+                &read_limited_response_bytes(resp, MAX_BRIDGE_CLIENT_RESPONSE_SIZE).await?,
+            )
+            .to_string();
             return match resp_text {
                 text if text.contains(&format!("{:?}", BridgeError::TxNotFinalized)) => {
                     Err(BridgeError::TxNotFinalized)
@@ -218,7 +239,12 @@ impl BridgeClient {
                 ))),
             };
         }
-        let signed_bridge_action = resp.json().await?;
+        let signed_bridge_action: SignedBridgeAction = serde_json::from_slice(
+            &read_limited_response_bytes(resp, MAX_BRIDGE_CLIENT_RESPONSE_SIZE).await?,
+        )
+        .map_err(|e| {
+            BridgeError::RestAPIError(format!("Failed to deserialize bridge action response: {e}"))
+        })?;
         verify_signed_bridge_action(
             &action,
             signed_bridge_action,
@@ -226,6 +252,33 @@ impl BridgeClient {
             &self.committee,
         )
     }
+}
+
+async fn read_limited_response_bytes(
+    mut response: reqwest::Response,
+    max_size: usize,
+) -> BridgeResult<Vec<u8>> {
+    if let Some(content_length) = response.content_length()
+        && content_length as usize > max_size
+    {
+        return Err(BridgeError::RestAPIError(format!(
+            "Response too large: {} bytes (max: {})",
+            content_length, max_size
+        )));
+    }
+
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len() + chunk.len() > max_size {
+            return Err(BridgeError::RestAPIError(format!(
+                "Response too large: exceeded {} bytes",
+                max_size
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -240,13 +293,13 @@ mod tests {
         test_utils::{get_test_authority_and_key, get_test_sui_to_eth_bridge_action},
         types::SignedBridgeAction,
     };
-    use ethers::types::Address as EthAddress;
-    use ethers::types::TxHash;
+    use alloy::primitives::{Address as EthAddress, TxHash};
+    use alloy::sol_types::SolValue;
     use fastcrypto::hash::{HashFunction, Keccak256};
     use fastcrypto::traits::KeyPair;
     use prometheus::Registry;
-    use sui_types::bridge::{BridgeChainId, TOKEN_ID_BTC, TOKEN_ID_USDT};
     use sui_types::TypeTag;
+    use sui_types::bridge::{BridgeChainId, TOKEN_ID_BTC, TOKEN_ID_USDT};
     use sui_types::{base_types::SuiAddress, crypto::get_key_pair, digests::TransactionDigest};
 
     #[tokio::test]
@@ -574,7 +627,7 @@ mod tests {
             "sign/upgrade_evm_contract/12/123/0606060606060606060606060606060606060606/0909090909090909090909090909090909090909/5cd8a76b",
         );
 
-        call_data.extend(ethers::abi::encode(&[ethers::abi::Token::Uint(42.into())]));
+        call_data.extend(alloy::primitives::U256::from(42).abi_encode());
         let action =
             BridgeAction::EvmContractUpgradeAction(crate::types::EvmContractUpgradeAction {
                 nonce: 123,
@@ -622,5 +675,32 @@ mod tests {
             BridgeClient::bridge_action_to_path(&action),
             "sign/add_tokens_on_evm/12/0/1/99,100,101/0x0101010101010101010101010101010101010101,0x0202020202020202020202020202020202020202,0x0303030303030303030303030303030303030303/5,6,7/1000000000,2000000000,3000000000",
         );
+    }
+
+    #[tokio::test]
+    async fn test_read_limited_response_bytes_rejects_oversized_response() {
+        let app = axum::Router::new().route(
+            "/large",
+            axum::routing::get(|| async { "a".repeat(MAX_BRIDGE_CLIENT_RESPONSE_SIZE + 1) }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/large"))
+            .send()
+            .await
+            .unwrap();
+
+        let err = read_limited_response_bytes(response, MAX_BRIDGE_CLIENT_RESPONSE_SIZE)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BridgeError::RestAPIError(_)));
+
+        server.abort();
     }
 }

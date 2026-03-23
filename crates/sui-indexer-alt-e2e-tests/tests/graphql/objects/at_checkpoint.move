@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//# init --protocol-version 70 --accounts A --addresses P=0x0 --simulator
+//# init --protocol-version 108 --accounts A --addresses P=0x0 --simulator
 
 //# publish
 module P::M {
@@ -130,4 +130,9 @@ module P::M {
 
   # Deleting the object makes it disappear for good.
   afterDelete: object(address: "@{obj_3_0}", atCheckpoint: 8) { version }
+}
+
+//# run-graphql
+{ # Error - Querying a checkpoint in the future.
+  object(address: "@{obj_3_0}", atCheckpoint: 9) { version }
 }
