@@ -10,7 +10,6 @@ use move_compiler::command_line::DEFAULT_OUTPUT_DIR;
 use move_compiler::editions::Edition;
 use move_compiler::{diagnostics::warning_filters::WarningFiltersBuilder, shared::PackageConfig};
 use move_core_types::account_address::AccountAddress;
-use sha2::{Digest, Sha256};
 use move_symbol_pool::Symbol;
 use std::fs::File;
 use std::str::FromStr;
@@ -556,16 +555,25 @@ impl Package {
                 &self.source_package.package.name
             )
         })?;
+        let mut unresolved_addresses = Vec::new();
+
         for (name, addr) in resolving_table.bindings(pkg_id) {
             match *addr {
                 Some(addr) => {
                     self.resolved_table.insert(name, addr);
                 }
                 None => {
-                    let placeholder = placeholder_address_for_name(name.as_str());
-                    self.resolved_table.insert(name, placeholder);
+                    unresolved_addresses
+                        .push(format!("  Named address '{name}' in package '{pkg_name}'"));
                 }
             }
+        }
+
+        if !unresolved_addresses.is_empty() {
+            bail!(
+                "Unresolved addresses: [\n{}\n]",
+                unresolved_addresses.join("\n"),
+            )
         }
 
         Ok(())
@@ -654,18 +662,6 @@ impl Package {
             warning_filter: WarningFiltersBuilder::new_for_source(),
         }
     }
-}
-
-/// Generates a deterministic placeholder address for an unresolved named address by hashing
-/// the name. This allows building models for packages with unassigned addresses.
-fn placeholder_address_for_name(name: &str) -> AccountAddress {
-    let mut hasher = Sha256::new();
-    hasher.update(b"UNRESOLVED_ADDRESS::");
-    hasher.update(name.as_bytes());
-    let hash = hasher.finalize();
-    let mut addr_bytes = [0u8; AccountAddress::LENGTH];
-    addr_bytes.copy_from_slice(&hash[..AccountAddress::LENGTH]);
-    AccountAddress::new(addr_bytes)
 }
 
 fn source_paths_for_config(package_path: &Path, config: &BuildConfig) -> Vec<PathBuf> {
