@@ -1081,14 +1081,8 @@ fn top_level_address_(
             match named_address_mapping.get(&name.value).copied() {
                 Some(addr) => make_address(context, name, loc, addr),
                 None => {
-                    if name_res.is_ok() {
-                        context.add_diag(address_without_value_error(
-                            suggest_declaration,
-                            loc,
-                            &name,
-                        ));
-                    }
-                    Address::NamedUnassigned(name)
+                    let placeholder = placeholder_address_for_name(name.value.as_str());
+                    make_address(context, name, loc, placeholder)
                 }
             }
         }
@@ -1139,6 +1133,21 @@ fn maybe_make_well_known_address(context: &mut Context, loc: Loc, name: Symbol) 
         loc,
         addr,
     ))
+}
+
+fn placeholder_address_for_name(name: &str) -> NumericalAddress {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
+    for &b in name.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3); // FNV prime
+    }
+    let mut addr_bytes = [0u8; AccountAddress::LENGTH];
+    for (i, byte) in addr_bytes.iter_mut().enumerate() {
+        h ^= (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+        *byte = (h >> (i % 8 * 8)) as u8;
+    }
+    NumericalAddress::new(addr_bytes, crate::shared::NumberFormat::Hex)
 }
 
 fn address_without_value_error(suggest_declaration: bool, loc: Loc, n: &Name) -> Diagnostic {
