@@ -743,6 +743,13 @@ impl Move2024PathExpander {
                 let NR::UnresolvedName(_, _) = result else {
                     return result;
                 };
+                // Fall back to address resolution for unresolved names (e.g. in
+                // attributes like #[spec(target = addr::module::func)])
+                let ln = sp(loc, LN::Name(name));
+                let address = top_level_address(context, false, ln);
+                if !matches!(address, E::Address::NamedUnassigned(_)) {
+                    return NR::Address(loc, address);
+                }
                 let Some(suggestion) = self.aliases.suggest_leading_access(
                     make_leading_access_filter_fn(chain_length, access),
                     &name,
