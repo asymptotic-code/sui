@@ -562,7 +562,7 @@ impl Package {
                     self.resolved_table.insert(name, addr);
                 }
                 None => {
-                    let placeholder = placeholder_address_for_name(name.as_str());
+                    let placeholder = placeholder_address_for_name(name.value.as_str());
                     self.resolved_table.insert(name, placeholder);
                 }
             }
