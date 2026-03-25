@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 
 use move_compiler::{expansion::ast as EA, shared::NumericalAddress};
+use move_core_types::account_address::AccountAddress;
 
 use crate::{
     ast::{Attribute, QualifiedSymbol, Value},
@@ -177,8 +178,11 @@ impl<'env> ModelBuilder<'env> {
         match addr {
             EA::Address::Numerical { value: bytes, .. } => bytes.value,
             EA::Address::NamedUnassigned(name) => {
-                self.error(loc, &format!("Undeclared address `{}`", name));
-                NumericalAddress::DEFAULT_ERROR_ADDRESS
+                let placeholder = placeholder_address_for_name(name.as_str());
+                NumericalAddress::new(
+                    placeholder.into_bytes(),
+                    move_compiler::shared::NumberFormat::Hex,
+                )
             }
         }
     }
@@ -197,6 +201,27 @@ impl<'env> ModelBuilder<'env> {
                 Type::Error
             })
     }
+}
+
+/// Generates a deterministic placeholder address for an unresolved named address by
+/// using a simple hash of the name bytes. This allows building models for packages
+/// with unassigned addresses.
+fn placeholder_address_for_name(name: &str) -> AccountAddress {
+    let name_bytes = name.as_bytes();
+    let mut addr_bytes = [0u8; AccountAddress::LENGTH];
+    // Simple deterministic derivation: fill address bytes from name bytes cyclically
+    // with a mixing step to reduce collisions
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
+    for &b in name_bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3); // FNV prime
+    }
+    for (i, byte) in addr_bytes.iter_mut().enumerate() {
+        h ^= (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+        *byte = (h >> (i % 8 * 8)) as u8;
+    }
+    AccountAddress::new(addr_bytes)
 }
 
 #[derive(Debug, Clone)]

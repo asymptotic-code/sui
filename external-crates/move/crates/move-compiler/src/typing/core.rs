@@ -2281,15 +2281,17 @@ pub enum PublicForTesting {
 }
 
 pub fn public_testing_visibility(
-    env: &CompilationEnv,
+    _env: &CompilationEnv,
     _package: Option<Symbol>,
     _callee_name: &FunctionName,
     callee_entry: Option<Loc>,
 ) -> Option<PublicForTesting> {
     // is_testing && (is_entry || is_sui_init)
-    if !env.test_mode() {
-        return None;
-    }
+    // if !env.test_mode() {
+    //     return None;
+    // }
+    // for sui-prover allow access to all tests
+
 
     // TODO support sui init functions
     // let flavor = env.package_config(package).flavor;
