@@ -168,3 +168,15 @@ public(package) native fun remove_child_object<Child: key>(parent: address, id: 
 public(package) native fun has_child_object(parent: address, id: address): bool;
 
 public(package) native fun has_child_object_with_ty<Child: key>(parent: address, id: address): bool;
+
+// ==================================================================================
+// Spec-only total helper
+//
+// Spec-only native used by the Sui Prover. Pure, total counterpart of
+// `dynamic_field::borrow` that never aborts — missing-field reads return an
+// uninterpreted-but-deterministic value.
+
+/// Spec-only total borrow: returns the value stored under `name` on `object`
+/// if present, else an uninterpreted but deterministic value. Never aborts.
+#[spec_only]
+public native fun borrow_or_unknown<Name: copy + drop + store, Value: store>(object: &UID, name: Name): &Value;

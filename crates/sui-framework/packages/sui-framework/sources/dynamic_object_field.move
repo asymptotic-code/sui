@@ -187,3 +187,15 @@ macro fun exists_with_type_impl<$Name: copy + drop + store, $Value: key>(
     let (field, value_id) = field::field_info<Wrapper<$Name>>(object, key);
     field::has_child_object_with_ty<$Value>(field.to_address(), value_id)
 }
+
+// ==================================================================================
+// Spec-only total helper
+//
+// Spec-only native used by the Sui Prover. Pure, total counterpart of
+// `dynamic_object_field::borrow` that never aborts — missing-field reads
+// return an uninterpreted-but-deterministic value.
+
+/// Spec-only total borrow: returns the object stored under `name` on `object`
+/// if present, else an uninterpreted but deterministic value. Never aborts.
+#[spec_only]
+public native fun borrow_or_unknown<Name: copy + drop + store, Value: key + store>(object: &UID, name: Name): &Value;

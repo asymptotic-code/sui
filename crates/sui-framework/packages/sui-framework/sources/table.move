@@ -100,3 +100,25 @@ public fun drop<K: copy + drop + store, V: drop + store>(table: Table<K, V>) {
     let Table { id, size: _ } = table;
     id.delete()
 }
+
+// ==================================================================================
+// Spec-only total / functional helpers
+//
+// These are spec-only natives used by the Sui Prover. They never abort.
+// Missing-key reads return an uninterpreted-but-deterministic value.
+
+/// Spec-only total borrow: returns the value at `key` if contained, else an
+/// uninterpreted but deterministic value. Never aborts.
+#[spec_only]
+public native fun borrow_or_unknown<K: copy + drop + store, V: store>(t: &Table<K, V>, k: K): &V;
+
+/// Spec-only functional add: returns the table obtained by inserting `(k, v)`.
+/// Callers should guarantee `!t.contains(k)` for the result to satisfy the
+/// no-duplicate-keys invariant.
+#[spec_only]
+public native fun add_pure<K: copy + drop + store, V: store>(t: &Table<K, V>, k: K, v: &V): &Table<K, V>;
+
+/// Spec-only functional remove: returns the table with `k`'s entry removed
+/// if present, else the same table unchanged. Never aborts.
+#[spec_only]
+public native fun remove_pure<K: copy + drop + store, V: store>(t: &Table<K, V>, k: K): &Table<K, V>;
