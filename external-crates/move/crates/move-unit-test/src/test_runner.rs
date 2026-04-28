@@ -59,6 +59,25 @@ use std::{
 
 use parking_lot::RwLock;
 
+/// External test executor — replaces VM execution for an individual test
+/// without touching test discovery, argument binding, or `#[expected_failure]`
+/// matching. Returning the same `(VMResult<ValueFrame>, TestRunInfo)` shape
+/// keeps the runner's downstream pattern matching identical to the VM path.
+///
+/// Wired up by `lean-backend`'s differential test pipeline: the implementation
+/// there shells the call out to a Lean dispatcher process, which evaluates the
+/// matching `<f>.exec` definition and returns a `MoveResult`. The bridge
+/// converts the result back into a synthetic `VMResult<ValueFrame>` so the
+/// runner cannot tell which backend produced it.
+pub trait TestExecutor: Send + Sync + std::fmt::Debug {
+    fn execute(
+        &self,
+        test_plan: &ModuleTestPlan,
+        function_name: &str,
+        arguments: Vec<MoveValue>,
+    ) -> (VMResult<ValueFrame>, TestRunInfo);
+}
+
 /// Test state common to all tests
 pub struct SharedTestingConfig<V: VMTestSetup> {
     report_stacktrace_on_abort: bool,
@@ -69,6 +88,9 @@ pub struct SharedTestingConfig<V: VMTestSetup> {
     num_iters: u64,
     deterministic_generation: bool,
     trace_location: Option<(TraceType, String)>,
+    /// When set, every test is dispatched through this executor instead of
+    /// calling `execute_via_move_vm`. Set via `TestRunner::with_external_executor`.
+    external_executor: Option<Arc<dyn TestExecutor>>,
 }
 
 pub struct TestRunner<V: VMTestSetup> {
@@ -176,10 +198,18 @@ impl<V: VMTestSetup + Sync> TestRunner<V> {
                 num_iters,
                 deterministic_generation,
                 trace_location,
+                external_executor: None,
             },
             num_threads,
             tests,
         })
+    }
+
+    /// Install an external `TestExecutor` that replaces VM execution for every
+    /// test in this runner. See [`TestExecutor`].
+    pub fn with_external_executor(mut self, executor: Arc<dyn TestExecutor>) -> Self {
+        self.testing_config.external_executor = Some(executor);
+        self
     }
 
     pub fn run<W: Write + Send>(self, writer: &Mutex<W>) -> Result<TestResults> {
@@ -470,8 +500,10 @@ impl<V: VMTestSetup> SharedTestingConfig<V> {
         prng_seed: Option<u64>,
         is_last_execution_of_test: bool,
     ) -> bool {
-        let (exec_result, test_run_info) =
-            self.execute_via_move_vm(test_plan, function_name, arguments);
+        let (exec_result, test_run_info) = match &self.external_executor {
+            Some(executor) => executor.execute(test_plan, function_name, arguments),
+            None => self.execute_via_move_vm(test_plan, function_name, arguments),
+        };
 
         // Save the trace -- one per test -- for each test that we have traced (and if tracing is
         // enabled).

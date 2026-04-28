@@ -7,6 +7,7 @@ pub mod test_reporter;
 pub mod test_runner;
 pub mod vm_test_setup;
 
+pub use crate::test_runner::TestExecutor;
 use crate::{test_runner::TestRunner, vm_test_setup::VMTestSetup};
 use anyhow::{Result, bail};
 use clap::*;
@@ -16,11 +17,11 @@ use move_compiler::{
     self, Compiler, Flags, PASS_CFGIR,
     compiled_unit::NamedCompiledModule,
     diagnostics,
-    shared::{self, NumericalAddress},
+    shared::{self, NumericalAddress, PackagePaths},
     unit_test::{self, TestPlan},
 };
 use move_core_types::language_storage::ModuleId;
-use std::{collections::BTreeMap, io::Write, marker::Send, sync::Mutex};
+use std::{collections::BTreeMap, io::Write, marker::Send, sync::{Arc, Mutex}};
 
 /// The default value bounding the amount of gas consumed in a test.
 const DEFAULT_EXECUTION_BOUND: u64 = 1_000_000;
@@ -125,6 +126,12 @@ pub struct UnitTestingConfig {
     // Enable tracing for tests
     #[clap(long = TRACE_FLAG, default_missing_value = "full", num_args = 0..=1)]
     pub trace: Option<TraceType>,
+
+    /// External `TestExecutor` injected by callers (e.g. lean-backend) to
+    /// replace VM execution. Skipped from clap because trait objects can't
+    /// be parsed; set programmatically via `with_external_executor`.
+    #[clap(skip)]
+    pub external_executor: Option<Arc<dyn TestExecutor>>,
 }
 
 #[derive(Debug, Clone, Default, clap::ValueEnum)]
@@ -165,6 +172,7 @@ impl UnitTestingConfig {
             seed: None,
             deterministic_generation: false,
             trace: None,
+            external_executor: None,
         }
     }
 
@@ -174,6 +182,13 @@ impl UnitTestingConfig {
     ) -> Self {
         assert!(self.named_address_values.is_empty());
         self.named_address_values = named_address_values.into_iter().collect();
+        self
+    }
+
+    /// Install an external test executor that will replace VM execution for
+    /// every test. See [`crate::test_runner::TestExecutor`].
+    pub fn with_external_executor(mut self, executor: Arc<dyn TestExecutor>) -> Self {
+        self.external_executor = Some(executor);
         self
     }
 
@@ -225,6 +240,71 @@ impl UnitTestingConfig {
 
         let mut test_plan = self.compile_to_test_plan(
             self.source_files.clone(),
+            deps,
+            self.bytecode_deps_files.clone(),
+        )?;
+        test_plan.module_info.extend(module_info);
+        Some(test_plan)
+    }
+
+    /// Same as `compile_to_test_plan` but takes per-package
+    /// `PackagePaths` so each input package compiles under its own
+    /// `PackageConfig` (notably `edition`). Required when target +
+    /// dep packages target different editions — `Compiler::from_files`
+    /// applies a single `Flags::testing()` edition to the whole flat
+    /// file list, which fails on mixed-edition graphs (e.g. a Legacy
+    /// client package + Sui-framework's `2024.beta` modules).
+    fn compile_to_test_plan_from_packages(
+        &self,
+        targets: Vec<PackagePaths>,
+        deps: Vec<PackagePaths>,
+        bytecode_deps_files: Vec<String>,
+    ) -> Option<TestPlan> {
+        let flags = Flags::testing();
+        let (files, comments_and_compiler_res) =
+            Compiler::from_package_paths(None, targets, deps)
+                .ok()?
+                .set_flags(flags)
+                .run::<PASS_CFGIR>()
+                .unwrap();
+        let compiler =
+            diagnostics::unwrap_or_report_pass_diagnostics(&files, comments_and_compiler_res);
+
+        let (compiler, cfgir) = compiler.into_ast();
+        let compilation_env = compiler.compilation_env();
+        let test_plan = unit_test::plan_builder::construct_test_plan(compilation_env, None, &cfgir);
+        let mapped_files = compilation_env.mapped_files().clone();
+
+        let compilation_result = compiler.at_cfgir(cfgir).build();
+        let (units, warnings) =
+            diagnostics::unwrap_or_report_pass_diagnostics(&files, compilation_result);
+        diagnostics::report_warnings(&files, warnings);
+        let units: Vec<_> = units.into_iter().map(|unit| unit.named_module).collect();
+
+        let bytecode_deps_modules = bytecode_deps_files
+            .iter()
+            .map(|path| {
+                let bytes = std::fs::read(path).unwrap();
+                CompiledModule::deserialize_with_defaults(&bytes).unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        test_plan.map(|tests| TestPlan::new(tests, mapped_files, units, bytecode_deps_modules))
+    }
+
+    /// Same as [`build_test_plan`] but takes per-package
+    /// `PackagePaths`. Use this when targets and deps have different
+    /// `edition` settings — see [`compile_to_test_plan_from_packages`].
+    pub fn build_test_plan_from_packages(
+        &self,
+        targets: Vec<PackagePaths>,
+        deps: Vec<PackagePaths>,
+    ) -> Option<TestPlan> {
+        let TestPlan { module_info, .. } =
+            self.compile_to_test_plan_from_packages(deps.clone(), vec![], vec![])?;
+
+        let mut test_plan = self.compile_to_test_plan_from_packages(
+            targets,
             deps,
             self.bytecode_deps_files.clone(),
         )?;
@@ -291,6 +371,10 @@ impl UnitTestingConfig {
             vm_test_setup,
         )
         .unwrap();
+
+        if let Some(executor) = self.external_executor.clone() {
+            test_runner = test_runner.with_external_executor(executor);
+        }
 
         if let Some(filter_str) = &self.filter {
             test_runner.filter(filter_str)?;
