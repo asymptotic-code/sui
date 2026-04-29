@@ -640,11 +640,7 @@ impl Package {
         Ok(ret)
     }
 
-    pub fn compiler_config(
-        &self,
-        is_dependency: bool,
-        config: &BuildConfig,
-    ) -> PackageConfig {
+    pub fn compiler_config(&self, is_dependency: bool, config: &BuildConfig) -> PackageConfig {
         PackageConfig {
             is_dependency,
             flavor: self

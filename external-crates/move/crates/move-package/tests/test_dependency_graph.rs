@@ -705,12 +705,12 @@ source = { local = "./B" }
 #[test]
 fn warn_explicit_sui_dependencies() {
     use std::io::Cursor;
-    
+
     // Create a temporary directory for the test
     let tmp_dir = tempfile::tempdir().unwrap();
     let pkg_path = tmp_dir.path().join("test_pkg");
     std::fs::create_dir_all(&pkg_path).unwrap();
-    
+
     // Create a Move.toml with explicit Sui dependencies of different types
     let manifest_content = r#"
 [package]
@@ -723,12 +723,9 @@ Sui = { local = "../sui-framework" }
 [dev-dependencies]
 SuiSystem = { local = "../sui-system" }
 "#;
-    
-    std::fs::write(
-        pkg_path.join("Move.toml"),
-        manifest_content,
-    ).unwrap();
-    
+
+    std::fs::write(pkg_path.join("Move.toml"), manifest_content).unwrap();
+
     // Capture progress output (warnings are written to progress_output, not stderr)
     let mut progress_output = Vec::new();
     {
@@ -739,7 +736,7 @@ SuiSystem = { local = "../sui-system" }
             Dependencies::default(), /* implicit deps */
             /* force_lock_file */ false,
         );
-        
+
         // This should trigger warnings for explicit Sui dependencies
         let result = dep_graph_builder.get_graph(
             &DependencyKind::default(),
@@ -747,15 +744,15 @@ SuiSystem = { local = "../sui-system" }
             manifest_content.to_string(),
             /* lock_string_opt */ None,
         );
-        
+
         // The graph creation might fail due to missing dependencies, but that's OK
         // We just want to test that the warning is emitted
         let _ = result;
     }
-    
+
     let progress_str = String::from_utf8(progress_output).unwrap();
     println!("Progress output: {}", progress_str);
-    
+
     // Check that warnings were emitted for explicit Sui dependencies
     assert!(progress_str.contains("Found explicit Sui dependencies"));
     assert!(progress_str.contains("Sui"));
@@ -766,14 +763,14 @@ SuiSystem = { local = "../sui-system" }
 #[test]
 fn warn_explicit_sui_dependencies_in_nested_packages() {
     use std::io::Cursor;
-    
+
     // Create a temporary directory structure for testing nested packages
     let tmp_dir = tempfile::tempdir().unwrap();
     let root_pkg_path = tmp_dir.path().join("root_pkg");
     let nested_pkg_path = tmp_dir.path().join("nested_pkg");
     std::fs::create_dir_all(&root_pkg_path).unwrap();
     std::fs::create_dir_all(&nested_pkg_path).unwrap();
-    
+
     // Create a nested package with Sui dependencies
     let nested_manifest_content = r#"
 [package]
@@ -783,12 +780,9 @@ edition = "2024.beta"
 [dependencies]
 Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "main" }
 "#;
-    
-    std::fs::write(
-        nested_pkg_path.join("Move.toml"),
-        nested_manifest_content,
-    ).unwrap();
-    
+
+    std::fs::write(nested_pkg_path.join("Move.toml"), nested_manifest_content).unwrap();
+
     // Create root package that depends on the nested package
     let root_manifest_content = format!(
         r#"
@@ -801,12 +795,9 @@ NestedPackage = {{ local = "{}" }}
 "#,
         nested_pkg_path.to_string_lossy()
     );
-    
-    std::fs::write(
-        root_pkg_path.join("Move.toml"),
-        &root_manifest_content,
-    ).unwrap();
-    
+
+    std::fs::write(root_pkg_path.join("Move.toml"), &root_manifest_content).unwrap();
+
     // Capture progress output to check for warnings from nested packages
     let mut progress_output = Vec::new();
     {
@@ -817,7 +808,7 @@ NestedPackage = {{ local = "{}" }}
             Dependencies::default(), /* implicit deps */
             /* force_lock_file */ false,
         );
-        
+
         // This should trigger warnings for Sui dependencies in both root and nested packages
         let result = dep_graph_builder.get_graph(
             &DependencyKind::default(),
@@ -825,15 +816,15 @@ NestedPackage = {{ local = "{}" }}
             root_manifest_content,
             /* lock_string_opt */ None,
         );
-        
+
         // The graph creation might fail due to missing dependencies, but that's OK
         // We just want to test that warnings are emitted for nested packages too
         let _ = result;
     }
-    
+
     let progress_str = String::from_utf8(progress_output).unwrap();
     println!("Progress output for nested test: {}", progress_str);
-    
+
     // Check that warnings were emitted for Sui dependencies in nested packages
     assert!(progress_str.contains("Found explicit Sui dependencies"));
     assert!(progress_str.contains("NestedPackage"));

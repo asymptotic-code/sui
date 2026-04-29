@@ -61,9 +61,7 @@ pub(crate) fn custom_package_info_fields() -> Vec<String> {
     }
 }
 
-pub fn custom_resolve_pkg_id(
-    manifest: &SourceManifest,
-) -> anyhow::Result<PackageIdentifier> {
+pub fn custom_resolve_pkg_id(manifest: &SourceManifest) -> anyhow::Result<PackageIdentifier> {
     if let Some(hooks) = &*HOOKS.lock().unwrap() {
         hooks.custom_resolve_pkg_id(manifest)
     } else {

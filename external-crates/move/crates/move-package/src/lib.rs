@@ -2,11 +2,11 @@
 // Copyright (c) The Move Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod package_lock;
 pub mod compilation;
 pub mod lock_file;
 pub mod migration;
 pub mod package_hooks;
+pub mod package_lock;
 pub mod resolution;
 pub mod source_package;
 

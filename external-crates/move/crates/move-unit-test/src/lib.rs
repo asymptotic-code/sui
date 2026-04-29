@@ -21,7 +21,12 @@ use move_compiler::{
     unit_test::{self, TestPlan},
 };
 use move_core_types::language_storage::ModuleId;
-use std::{collections::BTreeMap, io::Write, marker::Send, sync::{Arc, Mutex}};
+use std::{
+    collections::BTreeMap,
+    io::Write,
+    marker::Send,
+    sync::{Arc, Mutex},
+};
 
 /// The default value bounding the amount of gas consumed in a test.
 const DEFAULT_EXECUTION_BOUND: u64 = 1_000_000;
@@ -261,12 +266,11 @@ impl UnitTestingConfig {
         bytecode_deps_files: Vec<String>,
     ) -> Option<TestPlan> {
         let flags = Flags::testing();
-        let (files, comments_and_compiler_res) =
-            Compiler::from_package_paths(None, targets, deps)
-                .ok()?
-                .set_flags(flags)
-                .run::<PASS_CFGIR>()
-                .unwrap();
+        let (files, comments_and_compiler_res) = Compiler::from_package_paths(None, targets, deps)
+            .ok()?
+            .set_flags(flags)
+            .run::<PASS_CFGIR>()
+            .unwrap();
         let compiler =
             diagnostics::unwrap_or_report_pass_diagnostics(&files, comments_and_compiler_res);
 

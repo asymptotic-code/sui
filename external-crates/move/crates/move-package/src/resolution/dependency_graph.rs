@@ -35,7 +35,15 @@ use super::{
     local_path,
 };
 
-const SYSTEM_DEPENDENCIES: [&str; 7] = ["Prover", "SuiProver", "Sui", "SuiSystem", "DeepBook", "MoveStdlib", "SuiSpecs"];
+const SYSTEM_DEPENDENCIES: [&str; 7] = [
+    "Prover",
+    "SuiProver",
+    "Sui",
+    "SuiSystem",
+    "DeepBook",
+    "MoveStdlib",
+    "SuiSpecs",
+];
 const PRIORITIZED_MERGE_SYSTEM_DEPENDENCIES: [&str; 1] = ["MoveStdlib"];
 
 /// A representation of the transitive dependency graph of a Move package.  If successfully created,
@@ -276,7 +284,7 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
                         if !internal_dep.dep_override {
                             let dep_type = match &internal_dep.kind {
                                 PM::DependencyKind::Local(_) => "local",
-                                PM::DependencyKind::Git(_) => "git", 
+                                PM::DependencyKind::Git(_) => "git",
                                 PM::DependencyKind::OnChain(_) => "on-chain",
                             };
                             found_explicit_sui_deps.push((dep_name.as_str(), dep_type));
@@ -294,14 +302,17 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
                 .iter()
                 .map(|(name, _dep_type)| name.to_string())
                 .collect();
-            
-            eprintln!("{}", format!(
-                "[{}] Found explicit Sui dependencies in {}: {}. \
+
+            eprintln!(
+                "{}",
+                format!(
+                    "[{}] Found explicit Sui dependencies in {}: {}. \
                 Consider using implicit dependencies instead for better prover compatibility.",
-                "warning".bold().yellow(),
-                package_name,
-                dep_names.join(", ")
-            ));
+                    "warning".bold().yellow(),
+                    package_name,
+                    dep_names.join(", ")
+                )
+            );
         }
 
         Ok(())
@@ -894,19 +905,25 @@ impl DependencyGraph {
 
                 // it's the subsequent time package with pkg_name has been encountered
                 if pkg != existing_pkg {
-                    if PRIORITIZED_MERGE_SYSTEM_DEPENDENCIES.contains(&immediate_dep_name.as_str()) {
+                    if PRIORITIZED_MERGE_SYSTEM_DEPENDENCIES.contains(&immediate_dep_name.as_str())
+                    {
                         // Check if this is a git vs local conflict that can be auto-resolved
-                        let existing_is_local = matches!(existing_pkg.kind, PM::DependencyKind::Local(_));
+                        let existing_is_local =
+                            matches!(existing_pkg.kind, PM::DependencyKind::Local(_));
                         let current_is_local = matches!(pkg.kind, PM::DependencyKind::Local(_));
-                        let existing_is_git = matches!(existing_pkg.kind, PM::DependencyKind::Git(_));
+                        let existing_is_git =
+                            matches!(existing_pkg.kind, PM::DependencyKind::Git(_));
                         let current_is_git = matches!(pkg.kind, PM::DependencyKind::Git(_));
 
                         // Auto-resolve conflict: prefer external dependency over local dependency
-                        if (existing_is_local && current_is_git) || (existing_is_git && current_is_local) {
+                        if (existing_is_local && current_is_git)
+                            || (existing_is_git && current_is_local)
+                        {
                             if current_is_git {
                                 // Current dependency is external (git), prefer it over existing local dependency
                                 // Update existing_pkg_info to use the external dependency
-                                existing_pkg_info = Some((dep_id, &graph_info.g, pkg, graph_info.is_external));
+                                existing_pkg_info =
+                                    Some((dep_id, &graph_info.g, pkg, graph_info.is_external));
                             }
                             // If existing is external and current is local, keep existing (do nothing)
                             continue;

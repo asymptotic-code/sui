@@ -1840,19 +1840,40 @@ impl AstDebug for Attribute_ {
                     if !first {
                         w.write(", ");
                     }
-                    w.write(format!("extra_bpl({})", extra_bpl.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
+                    w.write(format!(
+                        "extra_bpl({})",
+                        extra_bpl
+                            .iter()
+                            .map(|u| u.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
                 if !uninterpreted.is_empty() {
                     if !first {
                         w.write(", ");
                     }
-                    w.write(format!("uninterpreted({})", uninterpreted.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
+                    w.write(format!(
+                        "uninterpreted({})",
+                        uninterpreted
+                            .iter()
+                            .map(|u| u.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
                 if !interpreted.is_empty() {
                     if !first {
                         w.write(", ");
                     }
-                    w.write(format!("interpreted({})", interpreted.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
+                    w.write(format!(
+                        "interpreted({})",
+                        interpreted
+                            .iter()
+                            .map(|u| u.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
                 if run_on.is_some() {
                     if !first {
@@ -1889,13 +1910,17 @@ impl AstDebug for Attribute_ {
                     };
 
                     if let Some(inv_target) = inv_target {
-                        w.write(format!(
-                            " inv_target={}",
-                            inv_target,
-                        ));
+                        w.write(format!(" inv_target={}", inv_target,));
                     };
                     if !extra_bpl.is_empty() {
-                        w.write(format!(" extra_bpl({})", extra_bpl.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
+                        w.write(format!(
+                            " extra_bpl({})",
+                            extra_bpl
+                                .iter()
+                                .map(|u| u.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
                     }
                     if !explicit_specs.is_empty() {
                         w.write(" explicit_specs(");
