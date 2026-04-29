@@ -532,10 +532,11 @@ fn parse_spec_parametized(
             ParsedAttribute_::Assigned(kind, val) => {
                 let prop = kind.value.to_string();
 
-                if prop != KA::VerificationAttribute::EXPLICIT_SPEC_NAME && 
-                    prop != KA::VerificationAttribute::UNINTERPRETED_NAME && 
-                    prop != KA::VerificationAttribute::INTERPRETED_NAME && 
-                    prop != KA::VerificationAttribute::EXTRA_BPL_NAME {
+                if prop != KA::VerificationAttribute::EXPLICIT_SPEC_NAME
+                    && prop != KA::VerificationAttribute::UNINTERPRETED_NAME
+                    && prop != KA::VerificationAttribute::INTERPRETED_NAME
+                    && prop != KA::VerificationAttribute::EXTRA_BPL_NAME
+                {
                     // Explicit specs can appear multiple times
                     if !visited.insert(prop.clone()) {
                         let msg = format!(
@@ -958,7 +959,8 @@ fn parse_spec_only_parametized(
                                 KA::VerificationAttribute::SPEC_ONLY,
                                 kind.value,
                             );
-                            context.add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
+                            context
+                                .add_diag(diag!(Declarations::InvalidAttribute, (*inner_loc, msg)));
                             return vec![];
                         }
                         extra_bpl.push(s.to_string());

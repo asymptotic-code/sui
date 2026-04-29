@@ -2292,7 +2292,6 @@ pub fn public_testing_visibility(
     // }
     // for sui-prover allow access to all tests
 
-
     // TODO support sui init functions
     // let flavor = env.package_config(package).flavor;
     // flavor == Flavor::Sui && callee_name.value() == INIT_FUNCTION_NAME

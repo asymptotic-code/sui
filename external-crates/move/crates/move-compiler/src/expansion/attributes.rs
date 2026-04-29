@@ -334,26 +334,23 @@ fn attribute(
             let mut specs = vec![];
             let mut spec_modules = vec![];
 
-            explicit_specs
-                .into_iter()
-                .for_each(|chain| { 
-                    let result = context
-                        .name_access_chain_to_module_access_unsafe(
-                            crate::expansion::path_expander::Access::Term,
-                            chain.clone()
-                        );
-                    if result.errors.is_empty() {
-                        specs.push(result.result.unwrap().access);
+            explicit_specs.into_iter().for_each(|chain| {
+                let result = context.name_access_chain_to_module_access_unsafe(
+                    crate::expansion::path_expander::Access::Term,
+                    chain.clone(),
+                );
+                if result.errors.is_empty() {
+                    specs.push(result.result.unwrap().access);
+                } else {
+                    if let Some(mi) = context.name_access_chain_to_module_ident(chain) {
+                        spec_modules.push(mi);
                     } else {
-                        if let Some(mi) = context.name_access_chain_to_module_ident(chain) {
-                            spec_modules.push(mi);
-                        } else {
-                            for err in result.errors {
-                                context.add_diag(err.into_diagnostic());
-                            }
+                        for err in result.errors {
+                            context.add_diag(err.into_diagnostic());
                         }
                     }
-                });
+                }
+            });
 
             KA::Verification(A::VerificationAttribute::Spec {
                 focus,
@@ -375,25 +372,31 @@ fn attribute(
                     .map(|result| result.access),
                 explicit_specs: specs,
                 explicit_spec_modules: spec_modules,
-                uninterpreted: uninterpreted.iter()
-                    .filter_map(|t|
-                        context.name_access_chain_to_module_access(
-                            crate::expansion::path_expander::Access::Term,
-                            t.clone(),
-                        ).map(|result| result.access)
-                    )
+                uninterpreted: uninterpreted
+                    .iter()
+                    .filter_map(|t| {
+                        context
+                            .name_access_chain_to_module_access(
+                                crate::expansion::path_expander::Access::Term,
+                                t.clone(),
+                            )
+                            .map(|result| result.access)
+                    })
                     .collect::<Vec<_>>(),
-                interpreted: interpreted.iter()
-                    .filter_map(|t|
-                        context.name_access_chain_to_module_access(
-                            crate::expansion::path_expander::Access::Term,
-                            t.clone(),
-                        ).map(|result| result.access)
-                    )
+                interpreted: interpreted
+                    .iter()
+                    .filter_map(|t| {
+                        context
+                            .name_access_chain_to_module_access(
+                                crate::expansion::path_expander::Access::Term,
+                                t.clone(),
+                            )
+                            .map(|result| result.access)
+                    })
                     .collect::<Vec<_>>(),
                 run_on,
             })
-        },
+        }
         PA::SpecOnly {
             axiom,
             inv_target,
@@ -404,26 +407,23 @@ fn attribute(
             let mut specs = vec![];
             let mut spec_modules = vec![];
 
-            explicit_specs
-                .into_iter()
-                .for_each(|chain| { 
-                    let result = context
-                        .name_access_chain_to_module_access_unsafe(
-                            crate::expansion::path_expander::Access::Term,
-                            chain.clone()
-                        );
-                    if result.errors.is_empty() {
-                        specs.push(result.result.unwrap().access);
+            explicit_specs.into_iter().for_each(|chain| {
+                let result = context.name_access_chain_to_module_access_unsafe(
+                    crate::expansion::path_expander::Access::Term,
+                    chain.clone(),
+                );
+                if result.errors.is_empty() {
+                    specs.push(result.result.unwrap().access);
+                } else {
+                    if let Some(mi) = context.name_access_chain_to_module_ident(chain) {
+                        spec_modules.push(mi);
                     } else {
-                        if let Some(mi) = context.name_access_chain_to_module_ident(chain) {
-                            spec_modules.push(mi);
-                        } else {
-                            for err in result.errors {
-                                context.add_diag(err.into_diagnostic());
-                            }
+                        for err in result.errors {
+                            context.add_diag(err.into_diagnostic());
                         }
                     }
-                });
+                }
+            });
 
             KA::Verification(A::VerificationAttribute::SpecOnly {
                 axiom,
