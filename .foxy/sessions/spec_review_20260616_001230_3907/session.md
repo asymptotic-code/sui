@@ -12747,3 +12747,10 @@ foxy_inspect(md[:600])
 | cost | $1.0442 |
 | tokens | 166572 in / 1562 out |
 | cache | 128508 read / 17291 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::pool_token_amount_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/pool_token_amount_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/pool_token_amount_spec/review.meta.yaml

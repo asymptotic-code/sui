@@ -12,9 +12,9 @@ parent_session: null
 name: null
 description: null
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
-started_at: 2026-06-16T00:12:54.965042
+started_at: 2026-06-16T00:12:59.972343
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
-prompt_part_hashes: {"base": "5fdb6c5e65d5df8a", "core": "35fc153c53e2c232", "file_ops": "b76d200c47b2271e", "function_knowledge": "ec5c60d9b1e6f113", "project_env": "21a3de2d42771978", "spec_loop": "26d59a7f8c0f21db", "spec_postcondition": "c9935e5df9cbd57c", "spec_precondition": "74781a107ed639cf", "spec_review": "e31ecea77dacc494", "spec_scenario": "d1ce03efba7186ff", "sui_prover_guide": "9b7aaa77fb185386", "_global": "160311722656007319faa2f275a916ec305f705771ffbe8df7d59ef39e7c857b"}
+prompt_part_hashes: {"base": "5fdb6c5e65d5df8a", "core": "35fc153c53e2c232", "file_ops": "b76d200c47b2271e", "function_knowledge": "ec5c60d9b1e6f113", "project_env": "21a3de2d42771978", "spec_loop": "26d59a7f8c0f21db", "spec_postcondition": "c9935e5df9cbd57c", "spec_precondition": "74781a107ed639cf", "spec_review": "e31ecea77dacc494", "spec_scenario": "d1ce03efba7186ff", "sui_prover_guide": "9b7aaa77fb185386", "_global": "30a84f73cb061e0c2407ddbbe4e54a80e5b44d1ec12b5cd1d36c5764f702b7a0"}
 ---
 
 ## System Prompt
@@ -3360,7 +3360,7 @@ These functions are already in the namespace — no imports needed. The namespac
 
 ## User
 
-Review the spec for `staking_pool_specs::split_spec`. Compare the actual spec against the writeup (the verification plan), using the function source, callees, and protocol context to assess coverage.
+Review the spec for `staking_pool_specs::split_staked_sui_spec`. Compare the actual spec against the writeup (the verification plan), using the function source, callees, and protocol context to assess coverage.
 
 Produce a detailed markdown review using `format_review_md()` and return it via `final_result()`. The review format and guidelines are in your system prompt.
 
@@ -3468,93 +3468,73 @@ the genesis type.
 
 ## Writeup (Verification Plan)
 
-This is what should be verified about `staking_pool_specs::split_spec`:
+This is what should be verified about `staking_pool_specs::split_staked_sui_spec`:
 
 ```yaml
-function: staking_pool_specs::split_spec
+function: staking_pool_specs::split_staked_sui_spec
 complexity: low
-summary: 'Splits a StakedSui object into two parts: a new StakedSui with principal
-  equal to split_amount, and the original object retaining the remaining principal.
-  All metadata (pool_id, stake_activation_epoch) is copied to the new object unchanged.
-  Both resulting parts must satisfy the minimum staking threshold of 1 SUI (1_000_000_000
-  MIST).'
-role: User-facing utility on StakedSui objects, callable directly via staking_pool::split
-  or through split_staked_sui (public entry). Enables holders to partition a staked
-  position without affecting pool accounting — no interaction with the StakingPool
-  state itself, purely a self-custody object operation.
+summary: Entry point that splits a StakedSui into two parts — the original stake has
+  its principal reduced by split_amount, and a new StakedSui with that principal is
+  created and transferred to the transaction sender. Both resulting parts must meet
+  the 1 SUI minimum threshold.
+role: User-facing entry point allowing StakedSui holders to partition their staking
+  position into two independent receipts; called directly by stake owners to split
+  without going through validator_set or sui_system. The new object is transferred
+  to ctx.sender() while the original stake is mutated in place.
 aborts:
-- condition: split_amount > self.principal.value()
-  reason: Cannot split more than the available principal (EInsufficientSuiTokenBalance
-    = 3)
-- condition: self.principal.value() - split_amount < MIN_STAKING_THRESHOLD
-  reason: Remaining principal would drop below 1 SUI threshold (EStakedSuiBelowThreshold
-    = 18)
+- condition: split_amount > stake.principal.value()
+  reason: Split amount exceeds the available principal balance (EInsufficientSuiTokenBalance)
+- condition: stake.principal.value() - split_amount < MIN_STAKING_THRESHOLD
+  reason: Remaining principal after split would fall below the 1 SUI minimum (EStakedSuiBelowThreshold)
 - condition: split_amount < MIN_STAKING_THRESHOLD
-  reason: Split-off amount would be below 1 SUI threshold (EStakedSuiBelowThreshold
-    = 18)
+  reason: The split portion itself would be below the 1 SUI minimum (EStakedSuiBelowThreshold)
 requires:
-- split_amount >= MIN_STAKING_THRESHOLD (1_000_000_000)
-- self.principal.value() - split_amount >= MIN_STAKING_THRESHOLD (1_000_000_000)
-- split_amount <= self.principal.value()
+- split_amount >= MIN_STAKING_THRESHOLD (1_000_000_000 MIST)
+- stake.principal.value() - split_amount >= MIN_STAKING_THRESHOLD
 ensures:
-- result.principal.value() == split_amount
-- self.principal.value() == old(self.principal.value()) - split_amount
-- result.pool_id == old(self.pool_id)
-- result.stake_activation_epoch == old(self.stake_activation_epoch)
-- self.pool_id == old(self.pool_id)
-- self.stake_activation_epoch == old(self.stake_activation_epoch)
-- self.principal.value() + result.principal.value() == old(self.principal.value())
-observations:
-- No StakingPool state is touched; this is a pure object-split with no accounting
-  side-effects.
-- Both the minimum threshold checks use the same error code (EStakedSuiBelowThreshold),
-  so distinguishing which of the two postcondition violations triggered requires inspecting
-  the amounts.
-- The subtraction remaining_amount = original_amount - split_amount is safe (no underflow)
-  because the first assert guarantees split_amount <= original_amount before the subtraction.
-- 'Principal conservation holds: old principal == new self.principal + result.principal,
-  which is the key invariant to verify.'
+- stake.principal.value() == old(stake.principal.value()) - split_amount
+- stake.pool_id == old(stake.pool_id)
+- stake.stake_activation_epoch == old(stake.stake_activation_epoch)
+- new StakedSui transferred to ctx.sender() has principal.value() == split_amount
+- new StakedSui has pool_id == old(stake.pool_id)
+- new StakedSui has stake_activation_epoch == old(stake.stake_activation_epoch)
 ```
 
 ## Actual Spec
 
 ```move
-// @VERIFY(🛡️/✅)
-#[spec(prove, target=staking_pool::split, no_opaque)]
-fun split_spec(
-    self: &mut StakedSui,
+// @VERIFY(⚙️/✅) cloud out-of-resources; verified locally via run_on
+#[spec(prove, target=staking_pool::split_staked_sui, run_on = b"local")]
+fun split_staked_sui_spec(
+    stake: &mut StakedSui,
     split_amount: u64,
     ctx: &mut TxContext,
-): StakedSui {
-    let original_amount = staking_pool::staked_sui_amount(self);
+) {
+    ghost::declare_global_mut<SpecTransferAddressExists, bool>();
+    ghost::declare_global_mut<SpecTransferAddress, address>();
+    let original_amount = staking_pool::staked_sui_amount(stake);
+    let old_pool_id = staking_pool::pool_id(stake);
+    let old_epoch = staking_pool::stake_activation_epoch(stake);
     asserts(split_amount <= original_amount);
     asserts(original_amount.to_int().sub(split_amount.to_int()).gte(MIN_STAKING_THRESHOLD.to_int()));
     asserts(split_amount >= MIN_STAKING_THRESHOLD);
-    staking_pool::split(self, split_amount, ctx)
+    staking_pool::split_staked_sui(stake, split_amount, ctx);
+    ensures(staking_pool::staked_sui_amount(stake).to_int() == original_amount.to_int().sub(split_amount.to_int()));
+    ensures(staking_pool::pool_id(stake) == old_pool_id);
+    ensures(staking_pool::stake_activation_epoch(stake) == old_epoch);
 }
 ```
 
-Statement counts: 3 asserts, 0 requires, 0 ensures | Flags: no_opaque
+Statement counts: 3 asserts, 0 requires, 3 ensures
 
 ## Target Function
 
 ```move
-/// Split StakedSui `self` to two parts, one with principal `split_amount`,
-/// and the remaining principal is left in `self`.
-/// All the other parameters of the StakedSui like `stake_activation_epoch` or `pool_id` remain the same.
-public fun split(self: &mut StakedSui, split_amount: u64, ctx: &mut TxContext): StakedSui {
-    let original_amount = self.principal.value();
-    assert!(split_amount <= original_amount, EInsufficientSuiTokenBalance);
-    let remaining_amount = original_amount - split_amount;
-    // Both resulting parts should have at least MIN_STAKING_THRESHOLD.
-    assert!(remaining_amount >= MIN_STAKING_THRESHOLD, EStakedSuiBelowThreshold);
-    assert!(split_amount >= MIN_STAKING_THRESHOLD, EStakedSuiBelowThreshold);
-    StakedSui {
-        id: object::new(ctx),
-        pool_id: self.pool_id,
-        stake_activation_epoch: self.stake_activation_epoch,
-        principal: self.principal.split(split_amount),
-    }
+#[allow(lint(public_entry))]
+/// Split the given StakedSui to the two parts, one with principal `split_amount`,
+/// transfer the newly split part to the sender address.
+public entry fun split_staked_sui(stake: &mut StakedSui, split_amount: u64, ctx: &mut TxContext) {
+    transfer::transfer(stake.split(split_amount, ctx), ctx.sender());
 }
 ```
 
@@ -4409,9 +4389,9 @@ No direct callees.
 
 0 transitive dependencies (names unavailable).
 
-## Entry Points Reaching `staking_pool_specs::split_spec`
+## Entry Points Reaching `staking_pool_specs::split_staked_sui_spec`
 
-- **`staking_pool::split`**: `staking_pool::split`
+- **`staking_pool::split_staked_sui`**: `staking_pool::split_staked_sui`
 
 ## Relevant Structs
 
@@ -4419,24 +4399,5 @@ No relevant structs found.
 
 ---
 
-Review the spec for `staking_pool_specs::split_spec`. Produce a markdown review via `final_result(format_review_md(function, verdict, issues, analysis, strengths))`.
-
-## Assistant
-
-I'll review this spec against the writeup. Let me first check the function knowledge for ground-truth access info.
-
-### Code `toolu_01FVBoxZCgaVSNnyY2ENiBuj`
-
-```python
-from foxy.skills.project_env.api import get_project_root
-from foxy.skills.function_knowledge.api import get_knowledge
-
-project = get_project_root()
-k = get_knowledge(project)
-fn = k.item("staking_pool::split")
-foxy_inspect(fn.all_accesses)
-
-```
-
-> 18021 in, 180 out, 64254 cache read
+Review the spec for `staking_pool_specs::split_staked_sui_spec`. Produce a markdown review via `final_result(format_review_md(function, verdict, issues, analysis, strengths))`.
 
