@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-spec-review
+description: Review fungible staked SUI value spec against verification plan and source code.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:11:57.740302
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12746,3 +12746,10 @@ final_result(md)
 | cost | $1.0396 |
 | tokens | 165736 in / 1548 out |
 | cache | 128508 read / 17276 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::fungible_staked_sui_value_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/fungible_staked_sui_value_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/fungible_staked_sui_value_spec/review.meta.yaml
