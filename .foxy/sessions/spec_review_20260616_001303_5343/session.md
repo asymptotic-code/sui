@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-spec-review
+description: Review staked_sui_amount_spec against verification plan and implementation.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:13:03.534521
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12653,3 +12653,102 @@ error: invalid object declaration
 
 ---
 
+## Assistant
+
+The `all_accesses` lookup failed due to a vendor compilation issue, but I have everything I need from the prompt to assess this simple accessor. Let me produce the review directly.
+
+### Code `toolu_01F2MAQ1zYFkpMyqoWjRLz2M`
+
+```python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::staked_sui_amount_spec"
+
+analysis = (
+    "`staked_sui_amount` is a transparent one-line accessor returning "
+    "`staked_sui.principal.value()`. It has zero branches, zero aborts, and no side "
+    "effects, so abort coverage is correctly empty (writeup lists no aborts) and the "
+    "`no_opaque` flag is appropriate to keep the body inlined for callers.\n\n"
+    "The gap is the postcondition. The spec body simply calls the target and returns "
+    "its result with NO `ensures`. The writeup's primary postcondition — "
+    "`result == staked_sui.principal.value()` — is not verified. While this property is "
+    "definitionally true (the function IS that expression), an explicit `ensures` is what "
+    "lets opaque callers reason about the return value, and is the canonical contract for "
+    "a getter. With `no_opaque` present the body is inlined so callers can currently see "
+    "through it, but the spec still verifies nothing on its own: it is a tautological "
+    "pass-through. The principal value getter is consumed directly by `calculate_rewards` "
+    "(via `.amount()`), so pinning `result == staked_sui.principal.value()` documents the "
+    "exact quantity reward logic depends on.\n\n"
+    "The writeup's secondary postcondition — `result >= MIN_STAKING_THRESHOLD` — is, as the "
+    "writeup itself notes, a system-level invariant established by `request_add_stake` / "
+    "`split`, not something this accessor enforces. It would only be sound here as a "
+    "`requires` assumption, and is not load-bearing for this function; its absence is not a "
+    "real gap. The exposed principal value field is read-only via `&StakedSui`, so no "
+    "unchanged-field framing is needed."
+)
+
+issues = [
+    {
+        "description": (
+            "The spec has no `ensures`. It calls `staking_pool::staked_sui_amount(staked_sui)` "
+            "and returns the result without asserting `result == staked_sui.principal.value()`. "
+            "Add an `ensures` binding the returned u64 to the underlying principal balance value "
+            "(via a `#[test_only, ext(pure)]` accessor on the private `principal` field, then "
+            "`balance::value`) so the accessor's contract is actually verified rather than passing "
+            "as a tautology."
+        ),
+        "severity": "medium",
+        "confidence": "high",
+    },
+]
+
+strengths = [
+    "Correctly models the function as abort-free — no `asserts`/`requires`, matching a pure projection with zero branches.",
+    "Uses `no_opaque`, the right choice for a trivial getter so callers see the inlined body.",
+    "Does not overreach by encoding the MIN_STAKING_THRESHOLD system invariant as an ensures, which would be unsound for an isolated accessor.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict="has_gaps",
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+
+```
+
+> 149549 in, 1169 out, 64254 cache read, 17373 cache create
+
+### Result `toolu_01F2MAQ1zYFkpMyqoWjRLz2M`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::staked_sui_amount_spec`\n\n**Verdict:** \u25b3 Has Gaps\n\n## Issues\n\n- \u25cb **medium/high**: The spec has no `ensures`. It calls `staking_pool::staked_sui_amount(staked_sui)` and returns the result without asserting `result == staked_sui.principal.value()`. Add an `ensures` binding the returned u64 to the underlying principal balance value (via a `#[test_only, ext(pure)]` accessor on the private `principal` field, then `balance::value`) so the accessor's contract is actually verified rather than passing as a tautology.\n\n## Analysis\n\n`staked_sui_amount` is a transparent one-line accessor returning `staked_sui.principal.value()`. It has zero branches, zero aborts, and no side effects, so abort coverage is correctly empty (writeup lists no aborts) and the `no_opaque` flag is appropriate to keep the body inlined for callers.\n\nThe gap is the postcondition. The spec body simply calls the target and returns its result with NO `ensures`. The writeup's primary postcondition \u2014 `result == staked_sui.principal.value()` \u2014 is not verified. While this property is definitionally true (the function IS that expression), an explicit `ensures` is what lets opaque callers reason about the return value, and is the canonical contract for a getter. With `no_opaque` present the body is inlined so callers can currently see through it, but the spec still verifies nothing on its own: it is a tautological pass-through. The principal value getter is consumed directly by `calculate_rewards` (via `.amount()`), so pinning `result == staked_sui.principal.value()` documents the exact quantity reward logic depends on.\n\nThe writeup's secondary postcondition \u2014 `result >= MIN_STAKING_THRESHOLD` \u2014 is, as the writeup itself notes, a system-level invariant established by `request_add_stake` / `split`, not something this accessor enforces. It would only be sound here as a `requires` assumption, and is not load-bearing for this function; its absence is not a real gap. The exposed principal value field is read-only via `&StakedSui`, so no unchanged-field framing is needed.\n\n## Strengths\n\n- Correctly models the function as abort-free \u2014 no `asserts`/`requires`, matching a pure projection with zero branches.\n- Uses `no_opaque`, the right choice for a trivial getter so callers see the inlined body.\n- Does not overreach by encoding the MIN_STAKING_THRESHOLD system invariant as an ensures, which would be unsound for an isolated accessor.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | 6504d9e79699e64eaa159774cd5eeb95ea20d0d3940fe8a11ef8cf8ac9d6daa3 |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 21.70s |
+| ended_at | 2026-06-16T00:13:25.236897 |
+| cost | $1.0403 |
+| tokens | 166739 in / 1352 out |
+| cache | 128508 read / 17373 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::staked_sui_amount_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/staked_sui_amount_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/staked_sui_amount_spec/review.meta.yaml

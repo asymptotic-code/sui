@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-split-spec-review
+description: Review specification coverage for staking pool split function against verification plan.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:12:54.965042
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12692,3 +12692,109 @@ error: invalid object declaration
 
 ---
 
+## Assistant
+
+The `all_accesses` lookup failed because the project doesn't compile standalone (it's a Sui framework package). I'll proceed with source-level analysis, which is sufficient here — `split` is a self-contained object-split with no `StakingPool` state interaction.
+
+### Code `toolu_01TZXMKp4H9oZFAVwZgH8EcA`
+
+```python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::split_spec"
+verdict = "has_gaps"
+
+issues = [
+    {
+        "description": "The spec has zero ensures. None of the postconditions are verified: that the returned StakedSui has principal exactly equal to split_amount (result.principal.value() == split_amount), that self.principal.value() == old(self.principal.value()) - split_amount, and the principal conservation invariant self.principal.value() + result.principal.value() == old(self.principal.value()). The summary explicitly names principal conservation as the key invariant to verify, yet the spec proves nothing about the function's actual effect. As written, an implementation that split off the wrong amount (or corrupted the remaining balance) would still pass.",
+        "severity": "high",
+        "confidence": "high",
+    },
+    {
+        "description": "Metadata-preservation postconditions are unverified. The function copies pool_id and stake_activation_epoch into the new StakedSui and leaves self's pool_id / stake_activation_epoch unchanged. The spec should ensure result.pool_id == old(self.pool_id), result.stake_activation_epoch == old(self.stake_activation_epoch), self.pool_id == old(self.pool_id), and self.stake_activation_epoch == old(self.stake_activation_epoch). A bug copying the wrong field into the new object would go undetected.",
+        "severity": "medium",
+        "confidence": "high",
+    },
+]
+
+analysis = (
+    "`split_spec` targets `staking_pool::split` with `no_opaque` and covers the abort surface completely "
+    "but verifies none of the function's effects.\n\n"
+    "Abort coverage (correct and complete):\n"
+    "- `asserts(split_amount <= original_amount)` matches the source `assert!(split_amount <= original_amount, "
+    "EInsufficientSuiTokenBalance)`.\n"
+    "- `asserts(original_amount.to_int().sub(split_amount.to_int()).gte(MIN_STAKING_THRESHOLD.to_int()))` matches "
+    "`assert!(remaining_amount >= MIN_STAKING_THRESHOLD, EStakedSuiBelowThreshold)`. Using `.to_int().sub(...)` here is "
+    "the right choice — it sidesteps the u64 underflow that a naive `original_amount - split_amount` spec expression "
+    "would hit, while the first assert already guarantees `split_amount <= original_amount` so the subtraction is "
+    "semantically safe.\n"
+    "- `asserts(split_amount >= MIN_STAKING_THRESHOLD)` matches the third source assertion.\n\n"
+    "All three abort conditions in the writeup are present and correctly inverted, and there are no spurious asserts. "
+    "The `_Assume` direction (these asserts are exactly the non-abort condition) is meaningful here since the spec is "
+    "not `ignore_abort`.\n\n"
+    "Effect coverage (the gap): the spec ends with `staking_pool::split(self, split_amount, ctx)` and adds no "
+    "`ensures`. This is a self-custody object split with no StakingPool accounting side-effects, so the entire "
+    "correctness content lives in a handful of simple equalities — principal of the new object, decremented principal "
+    "of self, the conservation identity, and copied/unchanged metadata. Because `self` is `&mut StakedSui` and a brand "
+    "new StakedSui is returned, none of these are guaranteed by the type system; they must be stated explicitly. The "
+    "field accessors exist (`staked_sui_amount` for principal, `pool_id`, `stake_activation_epoch` / "
+    "`activation_epoch`), so the ensures are straightforward to write:\n"
+    "  let old_amount = staking_pool::staked_sui_amount(self);\n"
+    "  let old_pool_id = staking_pool::pool_id(self);\n"
+    "  let old_epoch = staking_pool::stake_activation_epoch(self);\n"
+    "  let result = staking_pool::split(self, split_amount, ctx);\n"
+    "  ensures(staking_pool::staked_sui_amount(&result) == split_amount);\n"
+    "  ensures(staking_pool::staked_sui_amount(self) == old_amount - split_amount);\n"
+    "  ensures(staking_pool::staked_sui_amount(self) + staking_pool::staked_sui_amount(&result) == old_amount);\n"
+    "  ensures(staking_pool::pool_id(&result) == old_pool_id);\n"
+    "  ensures(staking_pool::pool_id(self) == old_pool_id);\n"
+    "  ensures(staking_pool::stake_activation_epoch(&result) == old_epoch);\n"
+    "  ensures(staking_pool::stake_activation_epoch(self) == old_epoch);\n\n"
+    "Without these, the spec passes the prover (it is consistent with the implementation) but provides false "
+    "confidence — it establishes only that the function aborts under the right conditions, not that it does the "
+    "right thing when it doesn't abort."
+)
+
+strengths = [
+    "Abort conditions are complete and correctly inverted, including all three EStakedSuiBelowThreshold / EInsufficientSuiTokenBalance paths.",
+    "Uses Integer arithmetic (`.to_int().sub(...).gte(...)`) for the remaining-balance threshold check, correctly avoiding a spurious u64 underflow in the spec expression.",
+    "Captures `original_amount` once via the `staked_sui_amount` accessor and reuses it across asserts.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict=verdict,
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+
+```
+
+> 149542 in, 2116 out, 64254 cache read, 18201 cache create
+
+### Result `toolu_01TZXMKp4H9oZFAVwZgH8EcA`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::split_spec`\n\n**Verdict:** \u25b3 Has Gaps\n\n## Issues\n\n- \u25cf **high/high**: The spec has zero ensures. None of the postconditions are verified: that the returned StakedSui has principal exactly equal to split_amount (result.principal.value() == split_amount), that self.principal.value() == old(self.principal.value()) - split_amount, and the principal conservation invariant self.principal.value() + result.principal.value() == old(self.principal.value()). The summary explicitly names principal conservation as the key invariant to verify, yet the spec proves nothing about the function's actual effect. As written, an implementation that split off the wrong amount (or corrupted the remaining balance) would still pass.\n- \u25cb **medium/high**: Metadata-preservation postconditions are unverified. The function copies pool_id and stake_activation_epoch into the new StakedSui and leaves self's pool_id / stake_activation_epoch unchanged. The spec should ensure result.pool_id == old(self.pool_id), result.stake_activation_epoch == old(self.stake_activation_epoch), self.pool_id == old(self.pool_id), and self.stake_activation_epoch == old(self.stake_activation_epoch). A bug copying the wrong field into the new object would go undetected.\n\n## Analysis\n\n`split_spec` targets `staking_pool::split` with `no_opaque` and covers the abort surface completely but verifies none of the function's effects.\n\nAbort coverage (correct and complete):\n- `asserts(split_amount <= original_amount)` matches the source `assert!(split_amount <= original_amount, EInsufficientSuiTokenBalance)`.\n- `asserts(original_amount.to_int().sub(split_amount.to_int()).gte(MIN_STAKING_THRESHOLD.to_int()))` matches `assert!(remaining_amount >= MIN_STAKING_THRESHOLD, EStakedSuiBelowThreshold)`. Using `.to_int().sub(...)` here is the right choice \u2014 it sidesteps the u64 underflow that a naive `original_amount - split_amount` spec expression would hit, while the first assert already guarantees `split_amount <= original_amount` so the subtraction is semantically safe.\n- `asserts(split_amount >= MIN_STAKING_THRESHOLD)` matches the third source assertion.\n\nAll three abort conditions in the writeup are present and correctly inverted, and there are no spurious asserts. The `_Assume` direction (these asserts are exactly the non-abort condition) is meaningful here since the spec is not `ignore_abort`.\n\nEffect coverage (the gap): the spec ends with `staking_pool::split(self, split_amount, ctx)` and adds no `ensures`. This is a self-custody object split with no StakingPool accounting side-effects, so the entire correctness content lives in a handful of simple equalities \u2014 principal of the new object, decremented principal of self, the conservation identity, and copied/unchanged metadata. Because `self` is `&mut StakedSui` and a brand new StakedSui is returned, none of these are guaranteed by the type system; they must be stated explicitly. The field accessors exist (`staked_sui_amount` for principal, `pool_id`, `stake_activation_epoch` / `activation_epoch`), so the ensures are straightforward to write:\n  let old_amount = staking_pool::staked_sui_amount(self);\n  let old_pool_id = staking_pool::pool_id(self);\n  let old_epoch = staking_pool::stake_activation_epoch(self);\n  let result = staking_pool::split(self, split_amount, ctx);\n  ensures(staking_pool::staked_sui_amount(&result) == split_amount);\n  ensures(staking_pool::staked_sui_amount(self) == old_amount - split_amount);\n  ensures(staking_pool::staked_sui_amount(self) + staking_pool::staked_sui_amount(&result) == old_amount);\n  ensures(staking_pool::pool_id(&result) == old_pool_id);\n  ensures(staking_pool::pool_id(self) == old_pool_id);\n  ensures(staking_pool::stake_activation_epoch(&result) == old_epoch);\n  ensures(staking_pool::stake_activation_epoch(self) == old_epoch);\n\nWithout these, the spec passes the prover (it is consistent with the implementation) but provides false confidence \u2014 it establishes only that the function aborts under the right conditions, not that it does the right thing when it doesn't abort.\n\n## Strengths\n\n- Abort conditions are complete and correctly inverted, including all three EStakedSuiBelowThreshold / EInsufficientSuiTokenBalance paths.\n- Uses Integer arithmetic (`.to_int().sub(...).gte(...)`) for the remaining-balance threshold check, correctly avoiding a spurious u64 underflow in the spec expression.\n- Captures `original_amount` once via the `staked_sui_amount` accessor and reuses it across asserts.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | 160311722656007319faa2f275a916ec305f705771ffbe8df7d59ef39e7c857b |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 32.05s |
+| ended_at | 2026-06-16T00:13:27.016987 |
+| cost | $1.0732 |
+| tokens | 167563 in / 2296 out |
+| cache | 128508 read / 18201 create |
