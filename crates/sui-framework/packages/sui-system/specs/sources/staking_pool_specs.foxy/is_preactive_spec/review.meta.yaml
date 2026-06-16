@@ -1,0 +1,40 @@
+_provenance:
+  schema_version: 1
+  session: spec_review_20260616_001150_7301
+  session_path: /Users/cos/asymptotic/agent/clients/mysten/sui/.foxy/sessions/spec_review_20260616_001150_7301/session.md
+  produced_at: '2026-06-16T07:12:15.642534+00:00'
+  input:
+    project: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system
+    collection: spec
+    field: review
+    variant: null
+    key: staking_pool_specs::is_preactive_spec
+    module: staking_pool_specs
+    function: is_preactive_spec
+  model: claude-opus-4-8
+  effort: null
+  harness: foxy
+  foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
+  prompt_part_hashes:
+    base: 5fdb6c5e65d5df8a
+    core: 35fc153c53e2c232
+    file_ops: b76d200c47b2271e
+    function_knowledge: ec5c60d9b1e6f113
+    project_env: 21a3de2d42771978
+    spec_loop: 26d59a7f8c0f21db
+    spec_postcondition: c9935e5df9cbd57c
+    spec_precondition: 74781a107ed639cf
+    spec_review: e31ecea77dacc494
+    spec_scenario: d1ce03efba7186ff
+    sui_prover_guide: 9b7aaa77fb185386
+    _global: d51ad7ea3e489e086bb5a3afafb68e4ec14f73df22cea319c2f48291f0afe09b
+  budget:
+    timeout: 360
+    usage:
+      input_tokens: 165940
+      output_tokens: 1401
+      cache_read_tokens: 64254
+      cache_creation_tokens: 81722
+      cost_usd: 1.4076145000000002
+      total_input_tokens: 165940
+      total_output_tokens: 1401

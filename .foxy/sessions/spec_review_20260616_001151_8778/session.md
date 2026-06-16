@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-inactivity-spec-review
+description: Review and verify the is_inactive_spec specification against its implementation and verification plan.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:11:51.878017
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12667,3 +12667,99 @@ error: invalid object declaration
 
 ---
 
+## Assistant
+
+The accesses query failed due to a vendored compilation issue, but that doesn't affect this review. `is_inactive` is a trivial pure getter — it reads `pool.deactivation_epoch` and returns `is_some()`. I have everything I need from the source. Let me write the review.
+
+### Code `toolu_01Ez6nnfvt11oVbXhheEADRE`
+
+```python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::is_inactive_spec"
+verdict = "has_gaps"
+
+issues = [
+    {
+        "description": "The spec has no `ensures` clause. It targets `is_inactive` and calls it through, but never asserts `result == pool.deactivation_epoch.is_some()`. Without an `ensures`, the prover verifies nothing about the return value — the only thing checked is the (trivially true) abort-freedom of a pure getter. A buggy implementation that returned `false` unconditionally, or that tested `activation_epoch` instead of `deactivation_epoch`, would pass this spec unchanged. The whole point of specifying a predicate that callers branch on (gating stake operations, double-deactivation guards, fungible-conversion guards) is to give the prover the equation it can use opaquely; that equation is missing.",
+        "severity": "high",
+        "confidence": "high",
+    },
+    {
+        "description": "The spec relies on the default opaque treatment but provides no postcondition, so any caller that `include`s this spec to reason about `pool.is_inactive()` gains nothing — the return value is fully havoced. For the predicate to be useful downstream (e.g. proving `request_add_stake` aborts with EDelegationToInactivePool, or that `request_withdraw_stake` takes the immediate-processing branch), it must either carry `ensures(result == pool.deactivation_epoch.is_some())` or be marked `no_opaque` so its one-line body is inlined.",
+        "severity": "medium",
+        "confidence": "high",
+    },
+]
+
+analysis = (
+    "`is_inactive` is a trivial read-only getter: `pool.deactivation_epoch.is_some()`. "
+    "It takes an immutable `&StakingPool`, performs no mutation, and cannot abort, so there is "
+    "nothing to model on the aborts or requires side — the empty `aborts: []` / `requires: []` "
+    "in the plan is correct and the spec rightly omits asserts.\n\n"
+    "The gap is entirely on the ensures side. The plan lists four postconditions, all of which "
+    "reduce to one equation: `result == pool.deactivation_epoch.is_some()` (the other three — "
+    "the true/false witnesses and the no-mutation clause — are corollaries; no-mutation is also "
+    "guaranteed by the `&` type). The actual spec contains zero `ensures`, so it proves none of "
+    "them. The body `staking_pool::is_inactive(pool)` simply forwards the call; under the default "
+    "opaque contract the prover havocs the boolean result and learns nothing, so the spec passes "
+    "vacuously. This is the classic 'passes the prover but verifies nothing' situation: consistency "
+    "with the implementation is satisfied trivially, while correctness (the return value actually "
+    "tracks `deactivation_epoch`) is unchecked.\n\n"
+    "The fix is one line: add `ensures(result == pool.deactivation_epoch.is_some())` before "
+    "returning (exposing the private field via a `#[test_only, ext(pure)]` accessor or relying on "
+    "the inlined `$pure` body if `no_opaque` is used). Because the predicate is the linchpin that "
+    "many callers branch on, getting this equation into the spec — transparently — is what makes "
+    "the surrounding stake/withdraw/deactivate proofs possible."
+)
+
+strengths = [
+    "Correctly identifies that the function is abort-free and mutation-free — no spurious asserts or unchanged-field clauses on the immutable reference.",
+    "Targets the function directly and forwards the real call, so whatever ensures are added will be checked against the true implementation.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict=verdict,
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+foxy_inspect(md[:600])
+
+```
+
+> 148651 in, 1472 out, 64254 cache read, 17708 cache create
+
+### Result `toolu_01Ez6nnfvt11oVbXhheEADRE`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::is_inactive_spec`\n\n**Verdict:** \u25b3 Has Gaps\n\n## Issues\n\n- \u25cf **high/high**: The spec has no `ensures` clause. It targets `is_inactive` and calls it through, but never asserts `result == pool.deactivation_epoch.is_some()`. Without an `ensures`, the prover verifies nothing about the return value \u2014 the only thing checked is the (trivially true) abort-freedom of a pure getter. A buggy implementation that returned `false` unconditionally, or that tested `activation_epoch` instead of `deactivation_epoch`, would pass this spec unchanged. The whole point of specifying a predicate that callers branch on (gating stake operations, double-deactivation guards, fungible-conversion guards) is to give the prover the equation it can use opaquely; that equation is missing.\n- \u25cb **medium/high**: The spec relies on the default opaque treatment but provides no postcondition, so any caller that `include`s this spec to reason about `pool.is_inactive()` gains nothing \u2014 the return value is fully havoced. For the predicate to be useful downstream (e.g. proving `request_add_stake` aborts with EDelegationToInactivePool, or that `request_withdraw_stake` takes the immediate-processing branch), it must either carry `ensures(result == pool.deactivation_epoch.is_some())` or be marked `no_opaque` so its one-line body is inlined.\n\n## Analysis\n\n`is_inactive` is a trivial read-only getter: `pool.deactivation_epoch.is_some()`. It takes an immutable `&StakingPool`, performs no mutation, and cannot abort, so there is nothing to model on the aborts or requires side \u2014 the empty `aborts: []` / `requires: []` in the plan is correct and the spec rightly omits asserts.\n\nThe gap is entirely on the ensures side. The plan lists four postconditions, all of which reduce to one equation: `result == pool.deactivation_epoch.is_some()` (the other three \u2014 the true/false witnesses and the no-mutation clause \u2014 are corollaries; no-mutation is also guaranteed by the `&` type). The actual spec contains zero `ensures`, so it proves none of them. The body `staking_pool::is_inactive(pool)` simply forwards the call; under the default opaque contract the prover havocs the boolean result and learns nothing, so the spec passes vacuously. This is the classic 'passes the prover but verifies nothing' situation: consistency with the implementation is satisfied trivially, while correctness (the return value actually tracks `deactivation_epoch`) is unchecked.\n\nThe fix is one line: add `ensures(result == pool.deactivation_epoch.is_some())` before returning (exposing the private field via a `#[test_only, ext(pure)]` accessor or relying on the inlined `$pure` body if `no_opaque` is used). Because the predicate is the linchpin that many callers branch on, getting this equation into the spec \u2014 transparently \u2014 is what makes the surrounding stake/withdraw/deactivate proofs possible.\n\n## Strengths\n\n- Correctly identifies that the function is abort-free and mutation-free \u2014 no spurious asserts or unchanged-field clauses on the immutable reference.\n- Targets the function directly and forwards the real call, so whatever ensures are added will be checked against the true implementation.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | 611790d2e3fa5b313ae93f2c19c10fb6507560727b01877906ad025d64855098 |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 27.69s |
+| ended_at | 2026-06-16T00:12:19.563859 |
+| cost | $1.0474 |
+| tokens | 166164 in / 1667 out |
+| cache | 128508 read / 17708 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::is_inactive_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/is_inactive_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/is_inactive_spec/review.meta.yaml

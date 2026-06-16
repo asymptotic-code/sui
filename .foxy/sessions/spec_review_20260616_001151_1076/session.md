@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-spec-review
+description: Review specification for is_equal_staking_metadata_spec against verification plan and source code.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:11:51.107731
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12663,3 +12663,92 @@ error: invalid object declaration
 
 ---
 
+## Assistant
+
+The function knowledge query failed because the source package doesn't compile standalone (it's the Sui framework, needs system deps). This is fine — the function is a trivial pure boolean accessor. I have everything I need from the provided source and writeup to do the review.
+
+### Code `toolu_017fcnvdd3J1WhoRyhmyhtUH`
+
+```python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::is_equal_staking_metadata_spec"
+
+analysis = (
+    "`is_equal_staking_metadata` is a pure read-only predicate over two `&StakedSui` "
+    "references. Its entire behavior is the boolean conjunction "
+    "`(self.pool_id == other.pool_id) && (self.stake_activation_epoch == other.stake_activation_epoch)`. "
+    "The principal balance is deliberately excluded so that StakedSui receipts with the same pool and "
+    "activation epoch but different principal can be merged in `join_staked_sui`.\n\n"
+    "Aborts: none. The function performs no table access, arithmetic, or assertion, so there are no "
+    "abort paths and the spec correctly carries zero `asserts`. The `_Assume` and `_SpecNoAbortCheck` "
+    "checks pass vacuously.\n\n"
+    "Requires: none expected, none present — correct.\n\n"
+    "Ensures coverage: the single `ensures` is an exact equality between `result` and the full boolean "
+    "conjunction the implementation computes, expressed through the public accessors `pool_id(...)` and "
+    "`stake_activation_epoch(...)`. This is the strongest possible postcondition (an iff over both "
+    "fields), and it directly captures the writeup's primary requirement. Because the equality is exact, "
+    "it also subsumes the two derived conditions in the writeup: if `pool_id(self) != pool_id(other)` the "
+    "RHS is false so `result` must be false, and likewise for differing activation epochs. The accessors "
+    "match the actual struct fields read by the implementation, so there is no risk of the spec verifying "
+    "the wrong fields.\n\n"
+    "State preservation: both parameters are immutable references (`&StakedSui`), so the type system "
+    "already guarantees no mutation — per review guidelines, asserting unchanged fields on immutable refs "
+    "is not required and its absence is not a gap.\n\n"
+    "The spec is complete and correct for this trivial accessor. It uses public getters rather than "
+    "raw field access, which keeps it robust to internal struct layout; the only subtle point is that for "
+    "the equality to discharge, those accessors' `$pure` forms must remain inline (no conflicting accessor "
+    "spec included), which is the case here since the getters are plain field reads."
+)
+
+strengths = [
+    "Postcondition is an exact iff over both compared fields, the strongest formulation possible — it subsumes the two derived 'differing field implies false' cases without needing separate clauses.",
+    "Correctly carries zero asserts/requires, matching the function's abort-free, precondition-free nature.",
+    "Expresses the comparison through public accessors (pool_id, stake_activation_epoch) that mirror exactly the fields the implementation reads, avoiding any wrong-field verification.",
+]
+
+issues = []
+
+md = format_review_md(
+    function=function,
+    verdict="complete",
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+```
+
+> 148657 in, 1186 out, 64254 cache read, 17557 cache create
+
+### Result `toolu_017fcnvdd3J1WhoRyhmyhtUH`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::is_equal_staking_metadata_spec`\n\n**Verdict:** \u2714 Complete\n\nNo issues found \u2014 spec coverage is complete.\n\n## Analysis\n\n`is_equal_staking_metadata` is a pure read-only predicate over two `&StakedSui` references. Its entire behavior is the boolean conjunction `(self.pool_id == other.pool_id) && (self.stake_activation_epoch == other.stake_activation_epoch)`. The principal balance is deliberately excluded so that StakedSui receipts with the same pool and activation epoch but different principal can be merged in `join_staked_sui`.\n\nAborts: none. The function performs no table access, arithmetic, or assertion, so there are no abort paths and the spec correctly carries zero `asserts`. The `_Assume` and `_SpecNoAbortCheck` checks pass vacuously.\n\nRequires: none expected, none present \u2014 correct.\n\nEnsures coverage: the single `ensures` is an exact equality between `result` and the full boolean conjunction the implementation computes, expressed through the public accessors `pool_id(...)` and `stake_activation_epoch(...)`. This is the strongest possible postcondition (an iff over both fields), and it directly captures the writeup's primary requirement. Because the equality is exact, it also subsumes the two derived conditions in the writeup: if `pool_id(self) != pool_id(other)` the RHS is false so `result` must be false, and likewise for differing activation epochs. The accessors match the actual struct fields read by the implementation, so there is no risk of the spec verifying the wrong fields.\n\nState preservation: both parameters are immutable references (`&StakedSui`), so the type system already guarantees no mutation \u2014 per review guidelines, asserting unchanged fields on immutable refs is not required and its absence is not a gap.\n\nThe spec is complete and correct for this trivial accessor. It uses public getters rather than raw field access, which keeps it robust to internal struct layout; the only subtle point is that for the equality to discharge, those accessors' `$pure` forms must remain inline (no conflicting accessor spec included), which is the case here since the getters are plain field reads.\n\n## Strengths\n\n- Postcondition is an exact iff over both compared fields, the strongest formulation possible \u2014 it subsumes the two derived 'differing field implies false' cases without needing separate clauses.\n- Correctly carries zero asserts/requires, matching the function's abort-free, precondition-free nature.\n- Expresses the comparison through public accessors (pool_id, stake_activation_epoch) that mirror exactly the fields the implementation reads, avoiding any wrong-field verification.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | 091a7d1b65e56817a5cfbe5f110191a23ce31a46b44be83a864a8d448dfd7497 |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 23.13s |
+| ended_at | 2026-06-16T00:12:14.239274 |
+| cost | $1.4075 |
+| tokens | 166045 in / 1355 out |
+| cache | 64254 read / 81811 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::is_equal_staking_metadata_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/is_equal_staking_metadata_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/is_equal_staking_metadata_spec/review.meta.yaml

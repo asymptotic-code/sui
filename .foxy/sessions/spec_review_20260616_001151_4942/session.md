@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-spec-review
+description: Review staking pool specs for fungible staked SUI against verification plan and source code.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:11:51.494395
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12648,3 +12648,99 @@ error: invalid object declaration
 
 ---
 
+## Assistant
+
+The accesses lookup failed due to a compilation issue (likely a tooling/dependency setup problem unrelated to the spec). The function is trivial enough that source inspection is sufficient. Let me produce the review.
+
+The function `fungible_staked_sui_pool_id` is a pure one-line field accessor: `fungible_staked_sui.pool_id`. It returns the `pool_id: ID` field directly with no computation, no mutation, no abort paths. The spec correctly targets it with `no_opaque` (appropriate for a trivial getter so callers see the inline body), calls the function, and returns the result.
+
+### Code `toolu_01XBDyxL3SB9jL1BKD6CcqPk`
+
+```python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::fungible_staked_sui_pool_id_spec"
+
+issues = [
+    {
+        "description": "The spec invokes staking_pool::fungible_staked_sui_pool_id and returns its result, but adds no ensures(result == fungible_staked_sui.pool_id) postcondition. For a getter, the value contract is the only thing worth verifying; without it the spec proves nothing beyond abort-freedom (which is trivially true here). Because no_opaque is set the prover inlines the body, so callers still see result == field via inlining, but the spec itself does not assert the getter's defining property. Adding the explicit ensures (using a test_only/spec_only accessor for the private pool_id field) would make the spec meaningful rather than a tautology.",
+        "severity": "medium",
+        "confidence": "high",
+    },
+]
+
+analysis = (
+    "**Target.** `fungible_staked_sui_pool_id(&FungibleStakedSui): ID` is a one-line field accessor: "
+    "`fungible_staked_sui.pool_id`. It takes an immutable reference, performs no arithmetic, mutates no "
+    "state, and has no abort paths. The writeup correctly classifies it as low-complexity with empty "
+    "aborts/requires and a single ensures: `result == fungible_staked_sui.pool_id`.\n\n"
+    "**Aborts.** None. The function cannot abort (pure copy of a `copy`-able `ID` out of an immutable "
+    "reference), so the absence of `asserts` is correct and complete. There is nothing to cover here.\n\n"
+    "**Requires.** None needed — any well-typed `FungibleStakedSui` is a valid input. Correct.\n\n"
+    "**Ensures.** This is the one substantive gap. The writeup's only ensures — that the result equals the "
+    "stored `pool_id` — is *not* present in the spec body. The spec calls the function and returns its value "
+    "but states no postcondition. The spec is consistent with the implementation and passes the prover, but it "
+    "verifies nothing about the return value: it is effectively a tautology (call returns what call returns). "
+    "Because `no_opaque` is set, the prover inlines the body when verifying *callers*, so downstream specs that "
+    "rely on `fungible_staked_sui.pool_id()` still get `result == field` by inlining — which is presumably why "
+    "this getter spec was left value-free. That makes the omission low-impact in practice, but the spec itself "
+    "does not assert the getter's defining property, so I flag it as a medium/high gap rather than dismissing it. "
+    "Adding `ensures(result == module::get_pool_id(fungible_staked_sui))` via a `#[test_only, ext(pure)]` "
+    "accessor (since `pool_id` is a private field) would turn the spec from a no-op into a real contract.\n\n"
+    "**Collections / partial mutations.** N/A — no collection, no mutation, no blast radius to bound.\n\n"
+    "**Note on `no_opaque`.** Appropriate for a trivial getter: it keeps the body inline for callers so the "
+    "field-projection fact propagates without needing the getter's `$pure` to be opaque. Not an issue.\n\n"
+    "**Observation.** The sibling `pool_id(&StakedSui): ID` has identical structure; the same observation "
+    "(missing value ensures, mitigated by inlining) and the same fix apply to its spec."
+)
+
+strengths = [
+    "Correctly models a no-abort getter: no spurious asserts or requires are added where none are needed.",
+    "Uses no_opaque appropriately so the field-projection fact stays inline for callers of the getter.",
+    "Faithfully mirrors the function signature and target; the spec is consistent with the implementation and passes all three checks.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict="has_gaps",
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+foxy_inspect("review built")
+```
+
+> 148660 in, 1624 out, 64254 cache read, 17329 cache create
+
+### Result `toolu_01XBDyxL3SB9jL1BKD6CcqPk`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::fungible_staked_sui_pool_id_spec`\n\n**Verdict:** \u25b3 Has Gaps\n\n## Issues\n\n- \u25cb **medium/high**: The spec invokes staking_pool::fungible_staked_sui_pool_id and returns its result, but adds no ensures(result == fungible_staked_sui.pool_id) postcondition. For a getter, the value contract is the only thing worth verifying; without it the spec proves nothing beyond abort-freedom (which is trivially true here). Because no_opaque is set the prover inlines the body, so callers still see result == field via inlining, but the spec itself does not assert the getter's defining property. Adding the explicit ensures (using a test_only/spec_only accessor for the private pool_id field) would make the spec meaningful rather than a tautology.\n\n## Analysis\n\n**Target.** `fungible_staked_sui_pool_id(&FungibleStakedSui): ID` is a one-line field accessor: `fungible_staked_sui.pool_id`. It takes an immutable reference, performs no arithmetic, mutates no state, and has no abort paths. The writeup correctly classifies it as low-complexity with empty aborts/requires and a single ensures: `result == fungible_staked_sui.pool_id`.\n\n**Aborts.** None. The function cannot abort (pure copy of a `copy`-able `ID` out of an immutable reference), so the absence of `asserts` is correct and complete. There is nothing to cover here.\n\n**Requires.** None needed \u2014 any well-typed `FungibleStakedSui` is a valid input. Correct.\n\n**Ensures.** This is the one substantive gap. The writeup's only ensures \u2014 that the result equals the stored `pool_id` \u2014 is *not* present in the spec body. The spec calls the function and returns its value but states no postcondition. The spec is consistent with the implementation and passes the prover, but it verifies nothing about the return value: it is effectively a tautology (call returns what call returns). Because `no_opaque` is set, the prover inlines the body when verifying *callers*, so downstream specs that rely on `fungible_staked_sui.pool_id()` still get `result == field` by inlining \u2014 which is presumably why this getter spec was left value-free. That makes the omission low-impact in practice, but the spec itself does not assert the getter's defining property, so I flag it as a medium/high gap rather than dismissing it. Adding `ensures(result == module::get_pool_id(fungible_staked_sui))` via a `#[test_only, ext(pure)]` accessor (since `pool_id` is a private field) would turn the spec from a no-op into a real contract.\n\n**Collections / partial mutations.** N/A \u2014 no collection, no mutation, no blast radius to bound.\n\n**Note on `no_opaque`.** Appropriate for a trivial getter: it keeps the body inline for callers so the field-projection fact propagates without needing the getter's `$pure` to be opaque. Not an issue.\n\n**Observation.** The sibling `pool_id(&StakedSui): ID` has identical structure; the same observation (missing value ensures, mitigated by inlining) and the same fix apply to its spec.\n\n## Strengths\n\n- Correctly models a no-abort getter: no spurious asserts or requires are added where none are needed.\n- Uses no_opaque appropriately so the field-projection fact stays inline for callers of the getter.\n- Faithfully mirrors the function signature and target; the spec is consistent with the implementation and passes all three checks.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | 091b77cfd89d7f191659220414d6ed91d400319b57c441fa3cf9bca434964d1a |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 30.24s |
+| ended_at | 2026-06-16T00:12:21.738183 |
+| cost | $1.4164 |
+| tokens | 165798 in / 1815 out |
+| cache | 64254 read / 81583 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::fungible_staked_sui_pool_id_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/fungible_staked_sui_pool_id_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/fungible_staked_sui_pool_id_spec/review.meta.yaml

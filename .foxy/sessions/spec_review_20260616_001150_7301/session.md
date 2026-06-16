@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-spec-review
+description: Review spec for is_preactive_spec against verification plan and protocol context.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:11:50.730318
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12663,3 +12663,99 @@ error: invalid object declaration
 
 ---
 
+## Assistant
+
+The function knowledge tooling can't compile this project (it's the Sui framework which needs special build setup). This is fine — `is_preactive` is a trivial getter and I have the full source in the prompt. Let me proceed directly with the review.
+
+### Code `toolu_01SvZzArwCEFyNua2PTr8q8t`
+
+```python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::is_preactive_spec"
+verdict = "complete"
+
+issues = []
+
+analysis = (
+    "The target `is_preactive(pool: &StakingPool): bool` is a pure boolean projection of a "
+    "single `Option` field: it returns `pool.activation_epoch.is_none()`. The writeup lists "
+    "no aborts and no requires, which matches the implementation exactly — there is no "
+    "arithmetic, no table access, no borrow, and no branching that could abort. The spec "
+    "correctly omits any `asserts`/`requires`.\n\n"
+    "Ensures coverage: the writeup's primary postcondition is "
+    "`result == pool.activation_epoch.is_none()`, and the spec encodes precisely this:\n"
+    "    ensures(result == staking_pool::activation_epoch(pool).is_none());\n"
+    "Here `staking_pool::activation_epoch(pool)` is the public(package) getter returning "
+    "`pool.activation_epoch`, so `activation_epoch(pool).is_none()` is semantically identical "
+    "to the implementation's `pool.activation_epoch.is_none()`. This is an exact equality on "
+    "the boolean result — the strongest form available — not a loose inequality.\n\n"
+    "The writeup's other two ensures (`result == true implies activation_epoch == none()` and "
+    "`result == false implies activation_epoch.is_some()`) are logically redundant given the "
+    "biconditional already stated: `result == activation_epoch.is_none()` entails both "
+    "directions (`is_none()` and its negation `is_some()`). The single biconditional ensures is "
+    "therefore complete — adding the two implications would be strictly weaker restatements of "
+    "the same fact, so their absence is not a gap.\n\n"
+    "State changes: `pool` is an immutable reference (`&StakingPool`), so there are no writes "
+    "to verify and no frame conditions needed — the type system guarantees field preservation. "
+    "No `ignore_abort` or `no_opaque` attributes are present; the spec is proved in full "
+    "`prove` mode across all three checks (_Check, _Assume vacuous since no asserts, "
+    "_SpecNoAbortCheck trivial since the spec body only calls the pure getter).\n\n"
+    "The spec is both complete and correct for this getter — it captures exactly the intended "
+    "behavior with the tightest possible postcondition and no spurious checks."
+)
+
+strengths = [
+    "Encodes the exact biconditional `result == activation_epoch.is_none()`, which subsumes "
+    "both directional implications from the writeup in a single tight postcondition.",
+    "Correctly omits asserts/requires: the getter cannot abort, so abort modeling would be "
+    "spurious.",
+    "Uses the public `activation_epoch(pool)` getter rather than a hand-rolled field access, "
+    "keeping the spec aligned with the module's accessor surface.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict=verdict,
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+foxy_inspect(md[:600])
+
+```
+
+> 148651 in, 1222 out, 64254 cache read, 17468 cache create
+
+### Result `toolu_01SvZzArwCEFyNua2PTr8q8t`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::is_preactive_spec`\n\n**Verdict:** \u2714 Complete\n\nNo issues found \u2014 spec coverage is complete.\n\n## Analysis\n\nThe target `is_preactive(pool: &StakingPool): bool` is a pure boolean projection of a single `Option` field: it returns `pool.activation_epoch.is_none()`. The writeup lists no aborts and no requires, which matches the implementation exactly \u2014 there is no arithmetic, no table access, no borrow, and no branching that could abort. The spec correctly omits any `asserts`/`requires`.\n\nEnsures coverage: the writeup's primary postcondition is `result == pool.activation_epoch.is_none()`, and the spec encodes precisely this:\n    ensures(result == staking_pool::activation_epoch(pool).is_none());\nHere `staking_pool::activation_epoch(pool)` is the public(package) getter returning `pool.activation_epoch`, so `activation_epoch(pool).is_none()` is semantically identical to the implementation's `pool.activation_epoch.is_none()`. This is an exact equality on the boolean result \u2014 the strongest form available \u2014 not a loose inequality.\n\nThe writeup's other two ensures (`result == true implies activation_epoch == none()` and `result == false implies activation_epoch.is_some()`) are logically redundant given the biconditional already stated: `result == activation_epoch.is_none()` entails both directions (`is_none()` and its negation `is_some()`). The single biconditional ensures is therefore complete \u2014 adding the two implications would be strictly weaker restatements of the same fact, so their absence is not a gap.\n\nState changes: `pool` is an immutable reference (`&StakingPool`), so there are no writes to verify and no frame conditions needed \u2014 the type system guarantees field preservation. No `ignore_abort` or `no_opaque` attributes are present; the spec is proved in full `prove` mode across all three checks (_Check, _Assume vacuous since no asserts, _SpecNoAbortCheck trivial since the spec body only calls the pure getter).\n\nThe spec is both complete and correct for this getter \u2014 it captures exactly the intended behavior with the tightest possible postcondition and no spurious checks.\n\n## Strengths\n\n- Encodes the exact biconditional `result == activation_epoch.is_none()`, which subsumes both directional implications from the writeup in a single tight postcondition.\n- Correctly omits asserts/requires: the getter cannot abort, so abort modeling would be spurious.\n- Uses the public `activation_epoch(pool)` getter rather than a hand-rolled field access, keeping the spec aligned with the module's accessor surface.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | d51ad7ea3e489e086bb5a3afafb68e4ec14f73df22cea319c2f48291f0afe09b |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 22.48s |
+| ended_at | 2026-06-16T00:12:13.206703 |
+| cost | $1.4076 |
+| tokens | 165940 in / 1401 out |
+| cache | 64254 read / 81722 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::is_preactive_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/is_preactive_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/is_preactive_spec/review.meta.yaml
