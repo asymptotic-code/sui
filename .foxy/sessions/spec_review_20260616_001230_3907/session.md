@@ -4380,3 +4380,21 @@ No relevant structs found.
 
 Review the spec for `staking_pool_specs::pool_token_amount_spec`. Produce a markdown review via `final_result(format_review_md(function, verdict, issues, analysis, strengths))`.
 
+## Assistant
+
+I'll analyze this spec against the writeup.
+
+### Code `toolu_01JukBncz4GaDZMCTGEc4o4d`
+
+```python
+from foxy.skills.project_env.api import get_project_root
+from foxy.skills.function_knowledge.api import get_knowledge
+
+project = get_project_root()
+k = get_knowledge(project)
+fn = k.item("staking_pool::pool_token_amount")
+foxy_inspect(fn.all_accesses)
+```
+
+> 17124 in, 167 out, 64254 cache read
+

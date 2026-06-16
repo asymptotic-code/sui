@@ -12,9 +12,9 @@ parent_session: null
 name: null
 description: null
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
-started_at: 2026-06-16T00:12:29.188936
+started_at: 2026-06-16T00:12:33.633506
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
-prompt_part_hashes: {"base": "5fdb6c5e65d5df8a", "core": "35fc153c53e2c232", "file_ops": "b76d200c47b2271e", "function_knowledge": "ec5c60d9b1e6f113", "project_env": "21a3de2d42771978", "spec_loop": "26d59a7f8c0f21db", "spec_postcondition": "c9935e5df9cbd57c", "spec_precondition": "74781a107ed639cf", "spec_review": "e31ecea77dacc494", "spec_scenario": "d1ce03efba7186ff", "sui_prover_guide": "9b7aaa77fb185386", "_global": "8faf44bd2757ab2c0200fb28f4b5588e462813226edb42c40c9ee27107444b91"}
+prompt_part_hashes: {"base": "5fdb6c5e65d5df8a", "core": "35fc153c53e2c232", "file_ops": "b76d200c47b2271e", "function_knowledge": "ec5c60d9b1e6f113", "project_env": "21a3de2d42771978", "spec_loop": "26d59a7f8c0f21db", "spec_postcondition": "c9935e5df9cbd57c", "spec_precondition": "74781a107ed639cf", "spec_review": "e31ecea77dacc494", "spec_scenario": "d1ce03efba7186ff", "sui_prover_guide": "9b7aaa77fb185386", "_global": "44deae8aeda954e952722ab24d44cf2b2bfdef53d4d2f378298318e03f5e7caa"}
 ---
 
 ## System Prompt
@@ -3360,7 +3360,7 @@ These functions are already in the namespace — no imports needed. The namespac
 
 ## User
 
-Review the spec for `staking_pool_specs::pool_id_spec`. Compare the actual spec against the writeup (the verification plan), using the function source, callees, and protocol context to assess coverage.
+Review the spec for `staking_pool_specs::pool_token_exchange_rate_at_epoch_spec`. Compare the actual spec against the writeup (the verification plan), using the function source, callees, and protocol context to assess coverage.
 
 Produce a detailed markdown review using `format_review_md()` and return it via `final_result()`. The review format and guidelines are in your system prompt.
 
@@ -3468,46 +3468,95 @@ the genesis type.
 
 ## Writeup (Verification Plan)
 
-This is what should be verified about `staking_pool_specs::pool_id_spec`:
+This is what should be verified about `staking_pool_specs::pool_token_exchange_rate_at_epoch_spec`:
 
 ```yaml
-function: staking_pool_specs::pool_id_spec
+function: staking_pool_specs::pool_token_exchange_rate_at_epoch_spec
 complexity: low
-summary: Returns the pool_id field of a StakedSui receipt — the ID of the staking
-  pool this stake was deposited into.
-role: Read-only accessor on StakedSui used by callers to verify pool membership (e.g.
-  EWrongPool checks in request_withdraw_stake, withdraw_from_principal, redeem_fungible_staked_sui)
-  and by wallets/UIs to identify which validator a stake receipt belongs to.
+summary: Looks up the exchange rate for a given epoch in a staking pool's history.
+  Returns the initial 1:1 rate if the pool was preactive at the requested epoch, otherwise
+  clamps the epoch to the pool's deactivation epoch (if any) and scans backwards from
+  that epoch to find the latest recorded rate on or before the requested epoch.
+role: Core read-only helper called by staking-pool internals — withdraw_from_principal,
+  withdraw_rewards, redeem_fungible_staked_sui, convert_to_fungible_staked_sui, calculate_rewards,
+  and check_balance_invariants — to convert between SUI and pool tokens at the historically-correct
+  rate. Accuracy is essential for correct reward accounting across the entire staking
+  lifecycle.
 aborts: []
-requires: []
+requires:
+- pool is active (activation_epoch is Some) when epoch >= pool.activation_epoch
+- pool.exchange_rates contains an entry for pool.activation_epoch (guaranteed by activate_staking_pool)
+- pool.activation_epoch.borrow() is safe — must hold Some when pool is not preactive
+  at epoch; enforced by the is_preactive_at_epoch early-return guard
 ensures:
-- condition: result == staked_sui.pool_id
-  reason: The function is a direct field projection with no computation; the returned
-    ID must equal the stored pool_id field.
+- 'result == PoolTokenExchangeRate { sui_amount: 0, pool_token_amount: 0 } (initial_exchange_rate)
+  when pool.is_preactive_at_epoch(epoch)'
+- 'result == PoolTokenExchangeRate { sui_amount: 0, pool_token_amount: 0 } when pool
+  is active but the loop exits without finding an entry (unreachable branch per source
+  comment)'
+- result == pool.exchange_rates[e] where e is the maximum e in [pool.activation_epoch,
+  min(pool.deactivation_epoch.get_with_default(epoch), epoch)] such that pool.exchange_rates.contains(e),
+  when the pool is active and such an entry exists
+- result.sui_amount and result.pool_token_amount are the fields of the stored PoolTokenExchangeRate
+  at the resolved epoch e
+- result does not reflect any pending stakes or rewards not yet committed to exchange_rates
 observations:
-- pool_id is set once at stake creation (request_add_stake) and never mutated thereafter,
-  so the accessor is a pure read with no side effects.
-- The returned ID is used by multiple callers to assert pool membership before performing
-  mutations, making this a foundational correctness primitive for EWrongPool invariants.
+- The fallback initial_exchange_rate() return at the end of the loop is annotated
+  in the source as 'really should be unreachable' — it can only trigger if exchange_rates
+  has no entry at or after activation_epoch, which activate_staking_pool prevents
+  by inserting the initial rate at activation_epoch.
+- The epoch clamping via pool.deactivation_epoch.get_with_default(epoch) means that
+  for deactivated pools any query with epoch > deactivation_epoch returns the rate
+  recorded at deactivation_epoch, preserving historical accuracy.
+- The backwards scan is necessary because exchange_rates entries are only added at
+  epoch boundaries by process_pending_stakes_and_withdraws; epochs with no activity
+  have no entry and the scan finds the last recorded rate.
+- No arithmetic is performed on the returned value; the function is purely a table
+  lookup so overflow/underflow cannot occur within its body.
 ```
 
 ## Actual Spec
 
 ```move
-#[spec(prove, target=staking_pool::pool_id, no_opaque)]
-fun pool_id_spec(
-    staked_sui: &StakedSui,
-): ID {
-    staking_pool::pool_id(staked_sui)
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::pool_token_exchange_rate_at_epoch)]
+fun pool_token_exchange_rate_at_epoch_spec(
+    pool: &StakingPool,
+    epoch: u64,
+): PoolTokenExchangeRate {
+    requires(pool.is_preactive()
+        || staking_pool::exchange_rates(pool).contains(*staking_pool::activation_epoch(pool).borrow()));
+    staking_pool::pool_token_exchange_rate_at_epoch(pool, epoch)
 }
 ```
 
-Statement counts: 0 asserts, 0 requires, 0 ensures | Flags: no_opaque
+Statement counts: 0 asserts, 1 requires, 0 ensures
 
 ## Target Function
 
 ```move
-public fun pool_id(staked_sui: &StakedSui): ID { staked_sui.pool_id }
+public fun pool_token_exchange_rate_at_epoch(
+    pool: &StakingPool,
+    epoch: u64,
+): PoolTokenExchangeRate {
+    // If the pool is preactive then the exchange rate is always 1:1.
+    if (pool.is_preactive_at_epoch(epoch)) {
+        return initial_exchange_rate()
+    };
+    let clamped_epoch = pool.deactivation_epoch.get_with_default(epoch);
+    let mut epoch = clamped_epoch.min(epoch);
+    let activation_epoch = *pool.activation_epoch.borrow();
+
+    // Find the latest epoch that's earlier than the given epoch with an entry in the table
+    while (epoch >= activation_epoch) {
+        if (pool.exchange_rates.contains(epoch)) {
+            return pool.exchange_rates[epoch]
+        };
+        epoch = epoch - 1;
+    };
+    // This line really should be unreachable. Do we want an assert false here?
+    initial_exchange_rate()
+}
 ```
 
 ## Full Module (`staking_pool.move`)
@@ -4361,9 +4410,9 @@ No direct callees.
 
 0 transitive dependencies (names unavailable).
 
-## Entry Points Reaching `staking_pool_specs::pool_id_spec`
+## Entry Points Reaching `staking_pool_specs::pool_token_exchange_rate_at_epoch_spec`
 
-- **`staking_pool::pool_id`**: `staking_pool::pool_id`
+- **`staking_pool::pool_token_exchange_rate_at_epoch`**: `staking_pool::pool_token_exchange_rate_at_epoch`
 
 ## Relevant Structs
 
@@ -4371,25 +4420,5 @@ No relevant structs found.
 
 ---
 
-Review the spec for `staking_pool_specs::pool_id_spec`. Produce a markdown review via `final_result(format_review_md(function, verdict, issues, analysis, strengths))`.
-
-## Assistant
-
-I'll review the spec for `staking_pool_specs::pool_id_spec`.
-
-### Code `toolu_012VMEwH4p8uaQF31onjesrY`
-
-```python
-from foxy.skills.project_env.api import get_project_root
-from foxy.skills.function_knowledge.api import get_knowledge
-
-project = get_project_root()
-k = get_knowledge(project)
-fn = k.item("staking_pool::pool_id")
-foxy_inspect(fn.all_accesses)
-foxy_inspect(fn.signature)
-
-```
-
-> 16942 in, 192 out, 64254 cache read
+Review the spec for `staking_pool_specs::pool_token_exchange_rate_at_epoch_spec`. Produce a markdown review via `final_result(format_review_md(function, verdict, issues, analysis, strengths))`.
 
