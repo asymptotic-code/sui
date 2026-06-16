@@ -1,0 +1,22 @@
+function: staking_pool_specs::pending_stake_withdraw_amount_spec
+complexity: low
+summary: Pure accessor that returns the accumulated SUI withdrawal amount pending
+  for the current epoch from the staking pool. The value includes both principal and
+  rewards from all stake withdrawal requests made during this epoch, and is reset
+  to zero at each epoch boundary.
+role: Read-only getter exposing StakingPool.pending_total_sui_withdraw; used by validator
+  and off-chain tooling to observe how much SUI is queued to leave the pool this epoch
+  before process_pending_stakes_and_withdraws resets it.
+aborts: []
+requires: []
+ensures:
+- condition: result == staking_pool.pending_total_sui_withdraw
+  reason: Function body is a single field projection with no transformation.
+observations:
+- pending_total_sui_withdraw accumulates intra-epoch via request_withdraw_stake and
+  redeem_fungible_staked_sui; it is zeroed by process_pending_stake_withdraw at epoch
+  boundaries.
+- The returned value reflects the total SUI (principal + rewards) that will be deducted
+  from sui_balance at epoch boundary, not just principal.
+- For inactive or pre-active pools, withdrawals are processed immediately, so this
+  field may read zero even after a withdrawal in the same transaction.

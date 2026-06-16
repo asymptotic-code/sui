@@ -1,0 +1,202 @@
+project=/Users/cos/asymptotic/agent/clients/mysten/sui
+packages=['/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system', '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs']
+=== SPEC SOURCE ===
+#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, ignore_abort)]
+fun pending_stake_withdraw_amount_spec(
+    staking_pool: &StakingPool,
+): u64 {
+    staking_pool::pending_stake_withdraw_amount(staking_pool)
+}
+=== TARGET SOURCE ===
+None
+staking_pool.move:621:public fun pending_stake_withdraw_amount(staking_pool: &StakingPool): u64 {
+validator.move:574:public fun pending_stake_withdraw_amount(self: &Validator): u64 {
+}
+
+/// Returns the total withdrawal from the staking pool this epoch.
+public fun pending_stake_withdraw_amount(staking_pool: &StakingPool): u64 {
+    staking_pool.pending_total_sui_withdraw
+}
+
+spec file: crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move
+spec line_range: [84, 88]
+specs_pkg: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs
+module specs::staking_pool_specs;
+
+use sui::tx_context::TxContext;
+
+use sui_system::staking_pool::PoolTokenExchangeRate;
+
+use sui_system::staking_pool::StakingPool;
+
+use sui_system::staking_pool::StakedSui;
+
+use sui_system::staking_pool;
+use sui_system::staking_pool::FungibleStakedSui;
+use sui::object::ID;
+
+#[spec_only]
+use prover::prover::{asserts, ensures};
+#[spec_only]
+use prover::ghost;
+#[spec_only]
+use specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};
+
+const MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id, no_opaque)]
+fun fungible_staked_sui_pool_id_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): ID {
+    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_value, no_opaque)]
+fun fungible_staked_sui_value_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): u64 {
+    staking_pool::fungible_staked_sui_value(fungible_staked_sui)
+}
+
+// @VERIFY(⚙️/✅)
+#[spec(prove, target=staking_pool::is_equal_staking_metadata)]
+fun is_equal_staking_metadata_spec(
+    self: &StakedSui,
+    other: &StakedSui,
+): bool {
+    let result = staking_pool::is_equal_staking_metadata(self, other);
+    ensures(result == (
+        (staking_pool::pool_id(self) == staking_pool::pool_id(other)) &&
+        (staking_pool::stake_activation_epoch(self) == staking_pool::stake_activation_epoch(other))
+    ));
+    result
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::join_staked_sui)]
+fun join_staked_sui_spec(
+    self: &mut StakedSui,
+    other: StakedSui,
+) {
+    asserts(staking_pool::is_equal_staking_metadata(self, &other));
+    asserts(
+        staking_pool::staked_sui_amount(self)
+            .to_int()
+            .add(staking_pool::staked_sui_amount(&other).to_int())
+            .lte(std::u64::max_value!().to_int()),
+    );
+    staking_pool::join_staked_sui(self, other)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::is_inactive)]
+fun is_inactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_inactive(pool)
+}
+
+// @VERIFY(⚙️/✅)
+#[spec(prove, target=staking_pool::is_preactive)]
+fun is_preactive_spec(
+    pool: &StakingPool,
+): bool {
+    let result = staking_pool::is_preactive(pool);
+    ensures(result == staking_pool::activation_epoch(pool).is_none());
+    result
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::join_fungible_staked_sui)]
+fun join_fungible_staked_sui_spec(
+    self: &mut FungibleStakedSui,
+    other: FungibleStakedSui,
+) {
+    asserts(staking_pool::fungible_staked_sui_pool_id(self) == staking_pool::fungible_staked_sui_pool_id(&other));
+    asserts(
+        staking_pool::fungible_staked_sui_value(self).to_int()
+            .add(staking_pool::fungible_staked_sui_value(&other).to_int())
+            .lte(std::u64::max_value!().to_int()),
+    );
+    staking_pool::join_fungible_staked_sui(self, other)
+}
+
+
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=sta
+fun is_preactive_spec(
+    pool: &StakingPool,
+): bool {
+    let result = staking_pool::is_preactive(pool);
+    ensures(result == staking_pool::activation_epoch(pool).is_none());
+    result
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::join_fungible_staked_sui)]
+fun join_fungible_staked_sui_spec(
+
+=== getters in source for pending_total_sui_withdraw ===
+staking_pool.move:61:    pending_total_sui_withdraw: u64,
+staking_pool.move:126:        pending_total_sui_withdraw: 0,
+staking_pool.move:183:    pool.pending_total_sui_withdraw = pool.pending_total_sui_withdraw + total_sui_withdraw_amount;
+staking_pool.move:223:    pool.pending_total_sui_withdraw = pool.pending_total_sui_withdraw + sui_out.value();
+staking_pool.move:375:    pool.sui_balance = if (pool.sui_balance >= pool.pending_total_sui_withdraw) {
+staking_pool.move:376:        pool.sui_balance - pool.pending_total_sui_withdraw
+staking_pool.move:378:        let diff = pool.pending_total_sui_withdraw - pool.sui_balance;
+staking_pool.move:393:    pool.pending_total_sui_withdraw = 0;
+staking_pool.move:622:    staking_pool.pending_total_sui_withdraw
+staking_pool.move:763:public(package) fun increase_pending_total_sui_withdraw_for_testing(
+staking_pool.move:767:    pool.pending_total_sui_withdraw = pool.pending_total_sui_withdraw + delta
+sources/staking_pool_specs.move:113:#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, ignore_abort)]
+sources/staking_pool_specs.move:114:fun pending_stake_withdraw_amount_spec(
+sources/staking_pool_specs.move:117:    staking_pool::pending_stake_withdraw_amount(staking_pool)
+    staking_pool::pending_stake_amount(staking_pool)
+}
+
+#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, ignore_abort)]
+fun pending_stake_withdraw_amount_spec(
+    staking_pool: &StakingPool,
+): u64 {
+    staking_pool::pending_stake_withdraw_amount(staking_pool)
+}
+
+#[spec(prove, target=staking_pool::pool_id, ignore_abort, no_opaque)]
+
+// @VERIFY(🛡/✅)
+#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, no_opaque)]
+fun pending_stake_withdraw_amount_spec(
+    staking_pool: &StakingPool,
+): u64 {
+    staking_pool::pending_stake_withdraw_amount(staking_pool)
+}
+
+#[spec(prove, target=staking_pool::pool_id, ignore_abort, no_opaque)]
+None
+#1 prove-from-scratch/improve/attempt-1 (1 items) [running] 1480s
+#46 prove-join-fungible [error] 532s
+#47 prove-join-fungible [done] 532s
+#48 sui-prover: specs [error] 529s
+#49 prove-join-fungible-2 [error] 465s
+#50 sui-prover: specs [error] 462s
+#51 sui-prover: specs [error] 460s
+#52 sui-prover: specs [error] 439s
+#53 sui-prover: specs [done] 430s
+#54 sui-prover: specs [done] 421s
+#55 sui-prover: specs [done] 418s
+#56 prove-join_staked_sui [error] 277s
+#57 prove-join_staked_sui [done] 277s
+All three phases pass.
+#58 sui-prover: specs [error] 273s
+#59 sui-prover: specs [done] 262s
+#60 sui-prover: specs [done] 259s
+#61 prove-pending_stake_amount [error] 155s
+#62 prove-pending_stake_amount [done] 155s
+#63 sui-prover: specs [done] 152s
+#64 prove-pending_stake_withdraw_amount [error] 7s
+#65 prove-pending_stake_withdraw_amount [running] 7s
+#66 sui-prover: specs [running] 2s
+{'status': 'success', 'result': {'report': 'PASS pending_stake_withdraw_amount_spec (_Check, _Assume, _SpecNoAbortCheck all passed)\n\nTotal: 1 passed / 0 failed / 0 timeout', 'exit_code': 0, 'status': 'success'}, 'response': None, 'stop_reason': 'tool_use', 'turns': 2, 'tokens_used': 936, 'usage': {'input_tokens': 588, 'output_tokens': 348, 'cache_read_input_tokens': 390495, 'cache_creation_input_tokens': 116388}, 'total_usage': {'input_tokens': 588, 'output_tokens': 348, 'cache_read_input_tokens': 390495, 'cache_creation_input_tokens': 116388}, 'time_elapsed': 11.015012979507446, 'error': None, 'cost_usd': 0.5605875, 'harness': 'foxy', 'session_dir': '/Users/cos/asymptotic/agent/clients/mysten/sui/.foxy/sessions/d1_default_agent_prove-pending_stake_withdraw_amount_20260615_234328_5061'}

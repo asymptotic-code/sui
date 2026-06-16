@@ -110,7 +110,8 @@ fun pending_stake_amount_spec(
     staking_pool::pending_stake_amount(staking_pool)
 }
 
-#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, ignore_abort)]
+// @VERIFY(🛡/✅)
+#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, no_opaque)]
 fun pending_stake_withdraw_amount_spec(
     staking_pool: &StakingPool,
 ): u64 {

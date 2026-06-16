@@ -1,0 +1,44 @@
+_provenance:
+  schema_version: 1
+  session: spec_improve_20260615_234211_5941
+  session_path: /Users/cos/asymptotic/agent/clients/mysten/sui/.foxy/sessions/spec_improve_20260615_234211_5941/session.md
+  produced_at: '2026-06-16T06:43:54.604561+00:00'
+  input:
+    project: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system
+    collection: spec
+    field: improve
+    variant: null
+    key: staking_pool_specs::pending_stake_withdraw_amount_spec
+    module: staking_pool_specs
+    function: pending_stake_withdraw_amount_spec
+  model: claude-opus-4-8
+  effort: null
+  harness: foxy
+  foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
+  prompt_part_hashes:
+    base: 5fdb6c5e65d5df8a
+    core: 35fc153c53e2c232
+    file_ops: b76d200c47b2271e
+    function_knowledge: ec5c60d9b1e6f113
+    move_query: 1505e7004c926053
+    project_env: 21a3de2d42771978
+    spec_bitwise_encoding: 753b2ef167b841c0
+    spec_improve: 3f7d5b653c99a952
+    spec_knowledge: bba6d819aaeba484
+    spec_loop: 26d59a7f8c0f21db
+    spec_postcondition: c9935e5df9cbd57c
+    spec_precondition: 74781a107ed639cf
+    spec_scenario: d1ce03efba7186ff
+    sui_prover: e34120bb194de4f8
+    sui_prover_guide: 9b7aaa77fb185386
+    _global: 4f933335c0c6549cf241e48c116f3c11d3b9b1a274830eb71cf8370b71f8120f
+  budget:
+    timeout: 10800
+    usage:
+      input_tokens: 154272
+      output_tokens: 3780
+      cache_read_tokens: 3383499
+      cache_creation_tokens: 157015
+      cost_usd: 3.53895325
+      total_input_tokens: 154860
+      total_output_tokens: 4128

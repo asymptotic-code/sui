@@ -1,0 +1,30 @@
+_provenance:
+  schema_version: 1
+  session: d1_function_local_accesses_20260615_234400_5440
+  session_path: /Users/cos/asymptotic/agent/clients/mysten/sui/.foxy/sessions/d1_function_local_accesses_20260615_234400_5440/session.md
+  produced_at: '2026-06-16T06:44:07.393583+00:00'
+  input:
+    project: /Users/cos/asymptotic/agent/clients/mysten/sui
+    collection: function
+    field: local_accesses
+    variant: null
+    key: staking_pool_specs::pool_id_spec
+    module: staking_pool_specs
+    function: pool_id_spec
+  model: claude-sonnet-4-6
+  effort: null
+  harness: foxy
+  foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
+  prompt_part_hashes:
+    function_local_accesses: 6befc61053169412
+    _global: 550ca333122fa91857467a30ba42324dcecf631304e8ab83944a55ebbb4a5ebb
+  budget:
+    timeout: 60
+    usage:
+      input_tokens: 412
+      output_tokens: 152
+      cache_read_tokens: 0
+      cache_creation_tokens: 8007
+      cost_usd: 0.03354225
+      total_input_tokens: 412
+      total_output_tokens: 152

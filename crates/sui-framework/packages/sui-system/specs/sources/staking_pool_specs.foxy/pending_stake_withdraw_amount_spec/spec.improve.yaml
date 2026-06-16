@@ -1,0 +1,11 @@
+executed: true
+stdout: /var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_o5xeuuh9.txt
+to_foxy_logs: '{''status'': ''success'', ''result'': {''report'': ''PASS pending_stake_withdraw_amount_spec
+  (_Check, _Assume, _SpecNoAbortCheck all passed)\n\nTotal: 1 passed / 0 failed /
+  0 timeout'', ''exit_code'': 0, ''status'': ''success''}, ''response'': None, ''stop_reason'':
+  ''tool_use'', ''turns'': 2, ''tokens_used'': 936, ''usage'': {''input_tokens'':
+  588, ''output_tokens'': 348, ''cache_read_input_tokens'': 390495, ''cache_creation_input_tokens'':
+  116388}, ''total_usage'': {''input_tokens'': 588, ''output_tokens'': 348, ''cache_read_input_tokens'':
+  390495, ''cache_creation_input_tokens'': 116388}, ''time_elapsed'': 11.015012979507446,
+  ''error'': None, ''cost_usd'': 0.5605875, ''harness'': ''foxy'', ''session_dir'':
+  ''/Users/cos/asymptotic/agent/clients/mysten/sui/.foxy/sessions/d1_default_agent_prove-pending_stake_withdraw_amount_20260615_234328_5061''}'

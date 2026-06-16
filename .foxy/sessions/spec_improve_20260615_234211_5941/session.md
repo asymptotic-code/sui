@@ -1,20 +1,20 @@
 ---
 schema_version: 1
-agent: spec_writeup
-model: claude-sonnet-4-6
-max_tokens: 8192
+agent: spec_improve
+model: claude-opus-4-8
+max_tokens: 16384
 interactive: false
 effort: null
-timeout: 300
+timeout: 10800
 token_budget: null
 harness: foxy
 parent_session: null
-name: pending-stake-withdraw-spec-plan
-description: Creating a formal verification spec plan for the pending_stake_withdraw_amount function.
+name: staking-pool-withdraw-spec
+description: Improve pending_stake_withdraw_amount_spec with abort coverage and remove ignore directives.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
-started_at: 2026-06-15T23:41:46.632566
+started_at: 2026-06-15T23:42:11.594300
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
-prompt_part_hashes: {"base": "5fdb6c5e65d5df8a", "core": "35fc153c53e2c232", "file_ops": "b76d200c47b2271e", "function_knowledge": "ec5c60d9b1e6f113", "project_env": "21a3de2d42771978", "spec_writeup": "61585c0ab1a10352", "_global": "abd128c6867c1fc43db900d87efbb174b8911dae751ed2c553158ca2b1d7c76e"}
+prompt_part_hashes: {"base": "5fdb6c5e65d5df8a", "core": "35fc153c53e2c232", "file_ops": "b76d200c47b2271e", "function_knowledge": "ec5c60d9b1e6f113", "move_query": "1505e7004c926053", "project_env": "21a3de2d42771978", "spec_bitwise_encoding": "753b2ef167b841c0", "spec_improve": "3f7d5b653c99a952", "spec_knowledge": "bba6d819aaeba484", "spec_loop": "26d59a7f8c0f21db", "spec_postcondition": "c9935e5df9cbd57c", "spec_precondition": "74781a107ed639cf", "spec_scenario": "d1ce03efba7186ff", "sui_prover": "e34120bb194de4f8", "sui_prover_guide": "9b7aaa77fb185386", "_global": "4f933335c0c6549cf241e48c116f3c11d3b9b1a274830eb71cf8370b71f8120f"}
 ---
 
 ## System Prompt
@@ -75,7 +75,6 @@ Available skills (use load_skill("name") to load):
   meaningful_tag           [agent] Tag a Move function as meaningful by adding TAG=meaningful inside its spec's @VERIFY annotation
   meta_knowledge           Introspect and create `_knowledge` skills. A `_knowledge` skill is a declarative, lazy-resolving
   morning_brief            Daily morning execution routine — fetch remote refs, materialize the trailing window of dash_day_knowledge, clean up agent repo. Prints a short receipt; full summaries live in dash/.foxy/knowledge/day
-  move_query               Parse Move project and extract function metadata
   plans                    Manage project plans — list, read, triage, archive
   project_status           Per-project activity intake and summarisation. Scoped to operations on one project at a time.
   project_status_summary   [agent] Synthesize a markdown bullet summary of one project's activity (daily or weekly)
@@ -102,12 +101,9 @@ Available skills (use load_skill("name") to load):
   skill_writer             [agent] Create, validate, and scaffold foxy skills
   spec_fix_review_knowledge Persistent post-fix review state for issues discovered by
   spec_issue_knowledge     Per-issue collection built on top of `spec_knowledge` reviews. Each item is a single
-  spec_knowledge           Declarative access to spec pipeline data. Ephemeral fields are always fresh (re-computed on access). Cached fields persist to disk and are produced by agents on demand.
   specs_setup              Scaffold a sibling specs Move package next to the main package
   spot_knowledge           Enumerate every auditable location in a Move project -- every **spot** --
   struct_knowledge         Declarative access to Move struct metadata
-  sui_prover               Run Sui Move prover on a Move package
-  sui_prover_guide         [agent] Reference guide for writing Move specifications with the Sui Prover. Use when writing specs, understanding prover syntax, or debugging verification failures.
   sync_resolver            [agent] Resolve merge conflicts between client implementation and specs
   team_status              Per-member team activity summaries (intake + synthesis)
   team_status_summary      [agent] Synthesize a markdown bullet summary of one team member's daily activity
@@ -816,6 +812,389 @@ edit("sources/math.move", "fun old_name(", "fun new_name(")
 
 You are an expert Move smart contract assistant.
 
+# move_query - Move Package Analysis Skill
+
+> **Prefer knowledge skills for interactive work.** `function_knowledge`, `spec_knowledge`, and `struct_knowledge` provide richer semantic context (writeups, reviews, struct roles, access patterns) and cache results to disk. Reach for `move_query` directly only when you need raw bulk parsing, call graph queries, or compiler checks not covered by the knowledge layer.
+
+Unified skill for analyzing Move smart contract packages, providing function source extraction, metadata, and call graph analysis.
+
+## Auto-imported
+
+When this skill is loaded, the following are available directly in the agent namespace:
+- `parse_move_project`, `MoveTools`, `source_functions`, `test_functions`
+
+For other API functions, use explicit imports:
+```python
+from foxy.skills.move_query.api import MoveFunction, extract_module_name
+```
+
+## Features
+
+- **Function source extraction** - Get complete source code for any function
+- **Function metadata extraction** - Parse functions with attributes, comments, line ranges
+- **Function classification** - Distinguish source, test, spec, and test_only functions
+- **Call graph analysis** - Get callers, callees, and transitive closures
+- **Compiler integration** - Leverage Move compiler internals for precise analysis
+
+## Installation
+
+The `move-query` binary is required. Install from the in-tree source:
+
+```bash
+cargo install --path extern-tools/move-query --force
+```
+
+If the binary is missing from `PATH`, `MoveTools` methods return an error JSON (`{"error": ..., "exit_code": 127}`) and knowledge skills that depend on call-graph data raise `ProduceError` / `CollectionError`. Install the binary to fix it -- there is no fallback path.
+
+## Primary API - Function Sources & Metadata
+
+### parse_move_project(project_path: str = None) -> Dict[str, Any]
+
+Parse all functions from a Move project, extracting complete source code and metadata. This is the **recommended** method for getting function sources and information.
+
+When `project_path` is None (the default), it auto-resolves from the session environment using `get_project_root()`.
+
+```python
+from foxy.skills.move_query.api import parse_move_project
+
+# Auto-resolves project from session environment
+result = parse_move_project()
+
+# Or use explicit absolute path
+result = parse_move_project("/absolute/path/to/cetus-clmm")
+
+print(f"Found {result['count']} functions")
+for qname, func in result['functions'].items():
+    print(f"\n{qname} ({func['function_type']})")
+    print(f"  Location: {func['file_path']}:{func['line_start']}-{func['line_end']}")
+    print(f"  Visibility: {func['visibility']}")
+```
+
+**Returns:**
+```json
+{
+  "functions": {
+    "factory::pool_id": {
+      "function_name": "pool_id",
+      "qualified_name": "factory::pool_id",
+      "module": "factory",
+      "file_path": "cetus-clmm/sources/factory.move",
+      "line_start": 26,
+      "line_end": 28,
+      "visibility": "public",
+      "is_entry": false,
+      "function_type": "source",
+      "attributes": ["#[inline]"],
+      "spec_target": null,
+      "project": "cetus-clmm",
+      "source_code": "public fun pool_id(...): ID { ... }"
+    }
+  },
+  "count": 1,
+  "project": "cetus-clmm"
+}
+```
+
+**Note:** The `source_code` field contains the complete function source, including attributes and comments above the function.
+
+### Function Types
+- `source`: Regular source function
+- `spec`: Specification function (ends with `_spec` or has target attribute)
+- `spec_only`: Spec-only function (marked with `#[spec_only]` or in specs/ directory)
+- `test`: Test function (marked with `#[test]`)
+- `test_only`: Test-only function (marked with `#[test_only]`)
+
+### Examples
+
+**Extract source for a specific function:**
+```python
+result = parse_move_project()
+target_func = result['functions'].get('pool::create_pool')
+if target_func:
+    print(target_func['source_code'])
+```
+
+**Filter by visibility:**
+```python
+result = parse_move_project()
+public_funcs = [f for f in result['functions'].values() if f['visibility'] == 'public']
+```
+
+**Find entry functions:**
+```python
+result = parse_move_project()
+entry_funcs = [f for f in result['functions'].values() if f['is_entry']]
+```
+
+**Filter to source functions only (excludes tests and specs):**
+```python
+from foxy.skills.move_query.api import parse_move_project, source_functions
+
+result = parse_move_project()
+src = source_functions(result['functions'])
+```
+
+**Get test functions:**
+```python
+from foxy.skills.move_query.api import parse_move_project, test_functions
+
+result = parse_move_project()
+tests = test_functions(result['functions'])
+```
+
+**Find leaf functions:**
+```python
+from foxy.skills.move_query.api import MoveTools, parse_move_project
+from foxy.skills.project_env.api import get_packages
+import json
+
+pkg = get_packages()[0]  # or iterate over all packages
+tools = MoveTools(working_dir=pkg)
+result = parse_move_project(pkg)
+
+leaf_functions = []
+for func in result['functions'].values():
+    callees = json.loads(tools.get_callees(function=func['qualified_name']))
+    if not isinstance(callees, dict) and len(callees) == 0:
+        leaf_functions.append(func)
+
+print(f"Found {len(leaf_functions)} leaf functions")
+```
+
+A leaf function is one that has no callees. Execute move-query on a function to check its callees, and if the number of callees is 0, then it is a leaf function.
+
+## Working with Multi-Package Projects
+
+Call graph methods (`get_callers`, `get_callees`, `get_transitive_closure`) require a **package path** (directory with `Move.toml`), not a project root.
+
+For multi-package projects, first find which package contains the target function using `parse_move_project()` on each package from `get_packages()`, then use that package path for call graph analysis.
+
+## Call Graph API
+
+Use `MoveTools` for call graph queries. The constructor takes a **package path** (a directory containing `Move.toml`):
+
+```python
+from foxy.skills.move_query.api import MoveTools
+from foxy.skills.project_env.api import get_packages
+
+pkg = get_packages()[0]
+tools = MoveTools(working_dir=pkg)
+
+callers = tools.get_callers(function="pool::create_pool")
+callees = tools.get_callees(function="pool::create_pool")
+closure = tools.get_transitive_closure(function="pool::create_pool")
+```
+
+### Call Graph Methods
+
+All methods return JSON strings. Parse with `json.loads()`.
+
+#### get_callers(function: str, path: str = ".") -> str
+Get functions that call a specific function (parent functions / reverse dependencies).
+
+```python
+callers = tools.get_callers(function="pool::create_pool", path=".")
+# Returns: [{"name": "...", "file": "...", "line": N}, ...]
+```
+
+#### get_callees(function: str, path: str = ".") -> str
+Get functions that this function calls (child functions / forward dependencies).
+
+```python
+callees = tools.get_callees(function="pool::create_pool", path=".")
+# Returns: [{"name": "...", "file": "...", "line": N}, ...]
+```
+
+#### get_transitive_closure(function: str, path: str = ".") -> str
+Get transitive closure of all dependencies for a function, including their source code.
+
+**IMPORTANT:** `path` must be a **package directory** containing `Move.toml`. For multi-package projects, first find which package contains the function using `parse_move_project()` on each package from `get_packages()`.
+
+```python
+closure = tools.get_transitive_closure(function="pool::create_pool", path="./contracts/protocol")
+# Returns: {"dependencies": [{"name": "module::func", "body": "fun func() {...}"}, ...], "count": N}
+```
+
+Each dependency includes:
+- `name`: Fully qualified function name (e.g., "0x2::coin::mint")
+- `body`: Complete source code of the function (empty string for native/intrinsic functions)
+
+#### get_transitive_closure_names_only(function: str, path: str = ".") -> str
+Get transitive closure with only function names (no source code).
+
+```python
+closure = tools.get_transitive_closure_names_only(function="pool::create_pool", path=".")
+# Returns: {"dependencies": ["module::func1", "module::func2", ...], "count": N}
+```
+
+#### get_functions_topological(path: str = ".") -> list[str]
+Return all source functions in a package in **callee-before-caller** topological order. Leaf functions (those that call nothing, or only externals) come first; entry points come last.
+
+```python
+order = tools.get_functions_topological(path="./contracts/protocol")
+# ["module::leaf_helper", "module::mid_helper", ..., "module::entry_fn"]
+```
+
+Result is cached per package path for the life of the process. Call `invalidate_topological_cache(path)` after editing Move source if you need a fresh order.
+
+#### check_compilation(path: str = ".") -> str
+Check if a Move package compiles successfully. Returns compilation result with any errors.
+
+```python
+result = tools.check_compilation(path=".")
+# Returns:
+# {"success": true, "errors": []}  # if compilation succeeded
+# {"success": false, "errors": "error messages..."}  # if compilation failed
+```
+
+Use this to validate packages or extract compilation errors for debugging.
+
+**Error handling:**
+```python
+import json
+result = tools.get_callers("foo::bar")
+data = json.loads(result)
+if "error" in data:
+    print(f"Error: {data['error']}")
+else:
+    for func in data:
+        print(func["name"])
+```
+
+#### get_functions_spec_metadata(functions: Optional[List[Tuple[str, str]]] = None, path: str = ".") -> Dict
+Get spec metadata (inputs, outputs, imports) for functions. This is the **batch-optimized** method that compiles the project only once.
+
+- If `functions` is None or empty, returns metadata for ALL functions in the project (recommended for multiple specs)
+- If `functions` is provided, returns metadata only for those specific functions
+- Results are cached per project path for subsequent calls
+
+```python
+# Get metadata for ALL functions (compiles once, caches result)
+all_metadata = tools.get_functions_spec_metadata(path=".")
+# Returns: {"module::function": {...}, "module2::function2": {...}, ...}
+
+# Get metadata for specific functions
+metadata = tools.get_functions_spec_metadata(
+    functions=[("coin", "mint"), ("pool", "swap")],
+    path="."
+)
+
+# Access individual function metadata
+mint_details = all_metadata.get("coin::mint")
+```
+
+Each function's metadata structure:
+```json
+{
+  "import_target": {
+    "package": "package_name",
+    "module": "module_name",
+    "type_params": ["TypeParam"],
+    "transfer": false
+  },
+  "input_params": [
+    {
+      "name": "param_name",
+      "struct": "StructName",
+      "import_params": {
+        "package": "package_name",
+        "module": "module_name",
+        "name": "StructName"
+      }
+    }
+  ],
+  "output_params": [
+    {
+      "name": "result_0",
+      "struct": "StructName",
+      "import_params": {...}
+    }
+  ]
+}
+```
+
+### Package Queries
+
+#### get_sources(path: str = ".") -> str
+Get all source files and manifest from a package. Returns the binary's raw output as a JSON string.
+
+```python
+sources = tools.get_sources(path=".")
+```
+
+#### get_functions(path: str = ".") -> str
+Get all functions in a package as a flat list of `{"name", "file", "line"}` entries. For full source code, attributes, and metadata, use `parse_move_project()` instead -- this method exists for fast name-only listings.
+
+```python
+functions = tools.get_functions(path=".")
+# [{"name": "module::function", "file": "path/file.move", "line": 42}, ...]
+```
+
+## CLI Interface
+
+```bash
+# Get all source files and manifest
+move-query get-sources --path <package-path>
+
+# Get all functions
+move-query get-functions --path <package-path>
+
+# Get callers (parent functions)
+move-query get-callers --function <function-name> --path <package-path>
+
+# Get callees (child functions)
+move-query get-callees --function <function-name> --path <package-path>
+
+# Get transitive closure (with source code)
+move-query get-transitive-closure --function <function-name> --path <package-path>
+
+# Find struct by name (comma separated for multiple)
+move-query find-struct --name <struct1>,<struct2> --path <package-path>
+
+# Check compilation
+move-query check-compilation --path <package-path>
+
+# Get spec metadata for all functions (batch mode - compiles once)
+move-query get-functions-spec-metadata --path <package-path>
+
+# Get spec metadata for specific functions (comma-separated module::function format)
+move-query get-functions-spec-metadata --path <package-path> --functions coin::mint,pool::swap
+```
+
+Function names use fully qualified format: `module::function_name`
+
+## Response Formats
+
+### parse_move_project()
+Returns dict with keys: `functions` (dict keyed by qualified_name), `count` (int), `project` (str)
+
+Each function includes:
+- `source_code`: Complete function source with attributes/comments
+- `line_start`, `line_end`: Exact line range in source file
+- Full metadata (visibility, entry, type, attributes, etc.)
+
+### Call graph methods (get_callers, get_callees)
+Return arrays: `[{"name": "...", "file": "...", "line": N}, ...]`
+
+### get_transitive_closure()
+Returns dict: `{"dependencies": [{"name": "...", "body": "..."}, ...], "count": N}`
+
+### get_transitive_closure_names_only()
+Returns dict: `{"dependencies": ["name1", "name2", ...], "count": N}`
+
+### get_functions_spec_metadata()
+Returns dict keyed by `module::function`: `{"coin::mint": {"import_target": {...}, "input_params": [...], "output_params": [...]}, ...}`
+
+### Error responses (all methods)
+`{"error": "message", "exit_code": 1}`
+
+## Notes
+
+- All paths auto-resolve from session environment when not specified (fallback: current directory)
+- Function names use fully qualified format: `module::function_name`
+- The `move-query` binary must be on `PATH`. Install it from `extern-tools/move-query` (see Installation).
+
+
 # Function Knowledge
 
 ## Auto-imported
@@ -961,139 +1340,4390 @@ Skills under the `function_` umbrella (load with `load_skill("name")`):
 | `function_complexity` | Rate structural audit complexity of a function (Fibonacci scale) |
 | `function_local_accesses` | Identify struct field reads/writes in a function body (dispatched by `fn.local_accesses`) |
 
-You are a spec planner for Move smart contracts. You receive a rich prompt containing the project summary, the target function source, its full module, callees, dependency graph, entry points, and relevant structs. Your job is to analyze all of this and produce a spec plan.
+# Spec Knowledge
 
-# Task
+Declarative access to spec pipeline data. Ephemeral fields are always fresh (re-computed on access). Cached fields persist to disk and are produced by agents on demand.
 
-Read the prompt carefully — it contains everything you need. Produce a spec plan (as a Python dict) and return it via `final_result(spec_plan)`.
+## Auto-imported
 
-The spec plan captures:
-- What the function does semantically and its role in the protocol
-- Under what conditions it aborts
-- What preconditions callers must satisfy
-- What postconditions it guarantees
+When this skill is loaded, the following are available directly in the agent namespace:
+- `get_spec_knowledge` (aliased from `get_knowledge`)
 
-# Source Verification
+For other API functions, use explicit imports:
+```python
+from foxy.skills.spec_knowledge.api import SpecCollection, create_empty_spec, create_empty_specs_for_module
+```
 
-Before analyzing, confirm from the actual source:
-- **Exact parameter names, types, and count** as declared in the signature
-- **Exact return type(s)**
-- **Every `assert!()` call** — each one is an abort condition, even in simple functions
+## Key
 
-Use only what appears in the actual source. Do not infer parameters or behavior from the function name alone.
+The key is `spec_module::spec_function_name` -- the qualified name of the **spec function itself**.
 
-# Analysis Guidelines
+Examples: `"borrow_specs::borrow_spec"`, `"obligation_specs::accrue_debt_preserves"`, `"decimal_specs::pow_loop_inv"`
 
-## Abort conditions (→ asserts)
-
-Each abort maps to an `asserts(condition)` in the spec:
-- Explicit: `assert!(cond, ERROR)` → `asserts(cond)` — **never skip these**
-- Arithmetic: `a / b` → `asserts(b != 0)`, overflow checks
-- Bit ops: `x >> shift` → `asserts(shift < bit_width)`
-- Data structures: bounds checks, key existence
-- Include error code names when available (e.g., EInsufficientShares)
-
-## Preconditions (→ requires)
-
-Caller expectations that should hold:
-- Valid input ranges
-- Required object/account existence
-- Expected state before call
-
-## Postconditions (→ ensures)
-
-Each postcondition maps to an `ensures(condition)` in the spec:
-- Return value properties: `ensures(result == expected)`
-- State changes: `ensures(balance_after == balance_before - amount)`
-- Object creation/modification: what fields are set
-- Use `old(x)` notation for referencing pre-state values
-
-## Observations
-
-Non-formal semantics that may inform future specs:
-- Temporal aspects (queued vs immediate)
-- Relationships between values
-- Design intent not captured by formal constructs
-
-## Role assessment
-
-Use the entry points information and the project summary to understand how the function fits into the broader protocol. A function called from a liquidation entry point has different risk implications than a pure getter.
-
-# Using function_knowledge
-
-**Always look up `all_accesses` for the target function before writing the spec plan.** This is the ground truth for what struct fields the function reads and writes — do not infer field access from source code alone.
+Not valid: `"borrow::borrow"` (that's the source function, not the spec), `"borrow_spec"` (missing module), `"0x2::borrow_specs::borrow_spec"` (no address prefix).
 
 ```python
-from foxy.skills.function_knowledge.api import get_knowledge
+from foxy.skills.spec_knowledge.api import get_knowledge
+
 k = get_knowledge(project_path)
-fn = k.item("module::func_name")
-fn.all_accesses     # recursive union of reads/writes across entire callee graph
+spec = k.item("borrow_specs::borrow_spec")  # key = spec_module::spec_function_name
+
+a = spec.attributes            # ephemeral -- parsed #[spec] attributes (prove, skip, target, no_opaque, timeout, etc.)
+src = spec.source              # ephemeral -- the spec function's own source code
+t = spec.target                # ephemeral -- the TARGET source function (or None for spec_only)
+c = spec.callees               # ephemeral -- target's direct callees
+tc = spec.transitive_closure   # ephemeral -- target's transitive deps
+# tc["count"]      -> int
+# tc["functions"]  -> list of {"name": "module::func"}
+ec = spec.entry_chains         # ephemeral -- entry point chains reaching target
+st = spec.structs              # ephemeral (uses tc dep)
+wp = spec.writeup              # cached -- runs spec_writeup agent if missing
+rv = spec.review               # cached -- runs spec_review agent if missing (returns markdown string)
+sm = spec.summary              # cached -- runs spec_summary agent if missing
+# sm["one_liner"]  -> str, under 120 chars
+# sm["paragraph"]  -> str, scaled to complexity
+wr = spec.improve              # cached -- runs spec_improve agent if missing
+# wr["starting_state"]  -> str (stub | asserts_only | semantics | complete)
+# wr["final_state"]     -> str
+# wr["changes_made"]    -> list of str
+# wr["prover_final"]    -> str (pass | fail | timeout)
+fr = spec.flip_requires        # cached -- runs spec_flip_requires agent if missing; mutates the spec file in place
+# fr["converted"]            -> int (requires promoted to asserts)
+# fr["removed"]              -> int (requires deleted as unnecessary)
+# fr["macroed"]              -> int (requires wrapped in a documented macro fun)
+# fr["remaining_requires"]   -> int (bare requires left — should be 0)
+# fr["final_prover_status"]  -> str (pass | fail | timeout)
+ln = spec.lean                 # cached -- runs lean-backend on this spec
+# ln["status"]        -> "success" | "timeout" | "error"
+# ln["passed"]        -> bool (status == success and exit_code == 0)
+# ln["exit_code"]     -> int | None
+# ln["module"]        -> spec module name
+# ln["function"]      -> spec function name
+# ln["package_path"]  -> absolute Move package path that was invoked
+# ln["output_tail"]   -> last ~80 lines of lean-backend stdout/stderr
+# ln["error"]         -> str | None (populated on error/timeout)
+ir = spec.lean_ir              # ephemeral -- deterministic Lean IR locator
+# ir["status"]             -> "success" | "error"
+# ir["target_qualified"]   -> e.g. "u64::pow10_u64"
+# ir["lean_output_dir"]    -> per-module Lake project root under output/
+# ir["correctness_file"]   -> Correctness/<TargetPascal>.lean (the backend-emitted manifest)
+# ir["lean_module_file"]   -> the .lean file that contains `def <spec_func>` defs
+# ir["lean_namespace"]     -> e.g. "U64" (namespace of generated module)
+# ir["lean_import_path"]   -> e.g. "MoveStdlib.U64" (usable in `import ...`)
+# ir["proofs_file"]        -> Proofs/<ModuleStem>_<spec_func>.lean (scaffold target)
+# ir["generated_defs"]     -> [{kind: "spec"|"aborts"|"ensures", name, signature}, ...]
+pf = spec.proof_with_lean      # cached -- runs the spec_proof_with_lean agent
+# pf["lake_passed"]      -> bool
+# pf["theorems"]         -> [{"name": str, "kind": "aborts"|"ensures", "status": "proved"|"sorry"|"failed"}]
+# pf["changes_made"]     -> list[str] describing agent edits
+# pf["lake_runs"]        -> int (number of lake build invocations)
+# pf["lake_output_tail"] -> str (last ~40 lines of final lake output)
+# pf["issues"]           -> list[str] describing unresolved goals
+# pf["duration_seconds"] -> int
 ```
 
-`all_accesses` has four keys. Every entry is a uniform 3-tuple `[struct_or_parent, field_or_key, [instantiated_types]]`:
-- `reads` — static field reads
-- `writes` — static field writes
-- `dynamic_reads` — dynamic field / table reads (key in the 2nd slot)
-- `dynamic_writes` — dynamic field / table writes (key in the 2nd slot)
+## Available Fields
 
-The `instantiated_types` list captures the field/value type **as observed at each use site** after substituting the struct's generic parameters. Non-generic fields are trivial (`["u64"]`); generic fields pinned to concrete types show the substitution (`["Balance<SUI>"]`); multiple distinct instantiations within one function produce a multi-element list (`["Balance<SUI>", "Balance<USDC>"]`).
+| Field | Type | Cache | Dependencies | Description |
+|-------|------|-------|-------------|-------------|
+| `attributes` | JSON | no | none | Parsed `#[spec]` attributes: prove, skip, target, no_opaque, timeout, etc. |
+| `source` | Move | no | none | The spec function's own source code (delegates to `function_knowledge`) |
+| `target` | JSON | no | none | Target source function metadata + source (None for spec_only with no target) |
+| `callees` | JSON | no | target | Target's direct callees with inline source |
+| `transitive_closure` | JSON | no | target | Count and names of target's transitive deps |
+| `entry_chains` | JSON | no | target | Entry point call chains reaching target |
+| `requires` | JSON | no | source | Parsed requires/asserts from spec source |
+| `structs` | JSON | no | target, transitive_closure | Structs from dep modules with inline source |
+| `summary` | JSON | yes | source, target | One-liner + paragraph from `spec_summary` agent |
+| `writeup` | YAML | yes | target, callees, transitive_closure, entry_chains, structs | Spec writeup from `spec_writeup` agent |
+| `review` | Markdown | yes | source, writeup, target, callees, transitive_closure, entry_chains, structs | Detailed spec review from `spec_review` agent |
+| `improve` | YAML | yes | source, writeup, target, callees, transitive_closure, entry_chains, structs | Work report from `spec_improve` agent — what was changed, prover result, final state |
+| `flip_requires` | YAML | yes | source, target, callees, transitive_closure, entry_chains, structs, module_source | Runs `spec_flip_requires` agent to promote `requires` to `asserts` (or wrap surviving ones in documented macros); mutates the spec file in place |
+| `lean` | YAML | yes | none | Runs the `lean_backend` binary on this spec (`--modules`/`--functions` filtered) and records pass/fail + output tail |
+| `lean_ir` | JSON | no | none | Deterministic locator for this spec's Lean IR (package path, per-module output dir, `Correctness/<TargetPascal>.lean` manifest, the `.lean` file containing the spec defs, namespace, import path, proofs-file target, and the list of generated defs). Anchored off the spec key and the backend-emitted `Correctness/` manifest, not filesystem heuristics. |
+| `proof_with_lean` | YAML | yes | source, target, lean_ir | Consumes `lean_ir` for file locations, scaffolds `Proofs/<Module>_<spec>.lean` with theorem stubs, and runs an agent that writes proofs and iterates with `lake build` until it passes (or gives up with a report). Also emits two sibling files alongside the YAML: `spec.proof_with_lean.proof.html` (what was proved — generated defs + final theorem source) and `spec.proof_with_lean.trace.html` (the agent's path — work report, theorem statuses, lake tail, link to session transcript). The YAML records the agent's `session_dir` so the trace page is regenerable later. |
 
-Use this data to:
-- **Identify postcondition targets**: every field in `writes`/`dynamic_writes` is a candidate for an `ensures`
-- **Identify frame conditions**: fields read after a call that are not written must be preserved
-- **Spot abort paths**: dynamic reads/writes using table access patterns imply existence preconditions
+## spec_only Functions
 
-# Complexity Assessment
+Functions with `#[spec_only]` (loop invariants, helper predicates, scenario specs) have no target. For these:
+- `source` returns the spec_only function's source code
+- `target` returns `None`
+- `callees`, `transitive_closure`, `entry_chains`, `structs` return empty results
 
-**Low** (0–2 transitive deps):
-- Include: `summary`, `role`, plus any `aborts`/`ensures` present
-- Still report explicit `assert!()` calls and return value properties
+```python
+spec = k.item("obligation_specs::accrue_debt_preserves")
+spec.source  # the helper predicate's source
+spec.target  # None (no target)
+```
 
-**Medium** (3–10 transitive deps):
-- Include: `summary`, `role`, `aborts`, `requires`, `ensures`
+## Attributes Field
 
-**High** (10+ transitive deps):
-- Include all fields: `summary`, `role`, `aborts`, `requires`, `ensures`, `observations`, `dependency_hints`
+The `attributes` field parses the `#[spec(...)]` / `#[spec_only]` attribute into a structured dict that mirrors the raw flags without collapsing them:
 
-# Output Schema
+```python
+spec.attributes
+# {
+#     "prove": True,                    # prove flag present
+#     "skip": False,                    # skip flag present (can coexist with prove)
+#     "skip_reason": None,              # string from skip=b"reason", or None
+#     "target": "module::func",         # target function, or None
+#     "no_opaque": True,                # no_opaque flag present
+#     "timeout": None,                  # integer from timeout=N, or None
+#     "spec_only": False,               # has #[spec_only] attribute
+#     "focus": False,                   # focus flag present (single-spec debug mode)
+#     "ignore_abort": False,            # ignore_abort flag present (skip abort coverage)
+#     "uninterpreted": ["mod::func"],   # list of uninterpreted functions
+#     "include": ["specs::other_spec"], # list of include = paths (other specs composed in)
+#     "boogie_opt": ["vcsSplit..."],    # list of boogie options
+#     "extra_bpl": ["../../file.bpl"],  # list of extra BPL files
+# }
+```
 
-Return via `final_result(spec_plan)` as a Python dict:
+Flags are independent — a spec can have both `prove` and `skip` (meaning it was written to be proven but is currently skipped). Filter with boolean combinations:
+
+```python
+k = get_knowledge(project_path)
+
+skipped = [key for key in k.keys() if k.item(key).attributes["skip"]]
+proven = [key for key in k.keys() if k.item(key).attributes["prove"] and not k.item(key).attributes["skip"]]
+no_prove = [key for key in k.keys()
+            if not k.item(key).attributes["prove"]
+            and not k.item(key).attributes["skip"]
+            and not k.item(key).attributes["spec_only"]
+            and k.item(key).attributes["target"]]
+```
+
+## Remote vs local prover
+
+Specs run on the **cloud prover** by default (via `sui-prover --cloud`, which the cron pipeline uses). Individual specs can opt out by adding `run_on = b"local"` to their `#[spec(...)]` annotation; that attribute forces the local prover for just that spec and is only needed when the spec cannot run in the cloud (local `extra_bpl`, interactive iteration, etc.). Prefer the default and only reach for `run_on = b"local"` when you truly need it.
+
+## Batch Parallelism — per-module mutex for file-mutating fields
+
+`improve` and `flip_requires` both **mutate the spec file in place**. Multiple
+agents editing the same `*_specs.move` file concurrently silently overwrite
+each other's `ensures` / `asserts`.
+
+`SpecCollection.submit_batch` enforces a per-module mutex for these fields
+automatically: specs in the same spec module (e.g. `i64_specs::*`) run as one
+sequential chain, while different modules run in parallel.
+
+```python
+# 31 specs across 4 modules → 4 parallel chains, each chain sequential inside
+batch = k.submit_batch("improve", keys=spec_keys, label="bulk-improve")
+```
+
+To override (rare — only when you know the field does not mutate the file):
+
+```python
+batch = k.submit_batch("improve", keys=spec_keys, serialize_by=False)  # full parallel
+batch = k.submit_batch("improve", keys=spec_keys, serialize_by=lambda k: k)  # one-per-group
+```
+
+For other fields (`writeup`, `review`, `summary`) that only write into the
+per-spec `.foxy/` cache directory, parallelism is unrestricted by default —
+each spec writes to its own file.
+
+## Storage
+
+Cached fields are colocated with spec source files:
+```
+{spec_file_dir}/{stem}.foxy/{spec_func_name}/spec.{field}.{ext}
+```
+
+Example: `contracts/specs/sources/user/borrow_specs.foxy/borrow_spec/spec.writeup.yaml`
+
+Use `spec.path("writeup")` to discover the actual path at runtime:
+
+```python
+spec.path("writeup")   # actual path
+spec.exists("writeup")  # check without producing
+```
+
+Ephemeral fields (`attributes`, `source`, `target`, `callees`, `transitive_closure`, `entry_chains`, `requires`, `structs`) are not written to disk.
+
+## Scaffolding — Creating Empty Spec Stubs
+
+Use `Collection.create()` to scaffold an empty spec for a source function that doesn't have one yet.
+The key passed to `create()` is the **target function key** (`module::function_name`), not a spec key.
+It returns the spec key of the newly created spec.
+
+```python
+from foxy.skills.spec_knowledge.api import get_knowledge
+from foxy.skills.project_env.api import get_project_root
+
+k = get_knowledge(get_project_root())
+
+# Check if a spec exists for a source function
+k.has_key("pool_specs::swap_spec")  # bool -- key must be the spec key
+
+# Scaffold an empty spec from a target function key
+spec_key = k.create("pool::swap")
+# Returns "pool_specs::swap_spec"
+# Writes scaffold to specs/sources/pool_specs.move
+
+# Now accessible as a normal spec item
+spec = k.item(spec_key)
+spec.source  # the generated empty scaffold
+```
+
+The scaffold has `#[spec(prove, target=pool::swap, ignore_abort)]` and calls the target function
+with its correct signature. It's an `ignore_abort` stub — a valid starting point for `spec_improve`
+to build on.
+
+### Batch scaffolding
+
+```python
+from foxy.skills.function_knowledge.api import get_knowledge as get_fk
+
+fk = get_fk(get_project_root())
+sk = get_knowledge(get_project_root())
+
+for fn_key in fk.keys():
+    module, func = fn_key.rsplit("::", 1)
+    spec_key = f"{module}_specs::{func}_spec"
+    if not sk.has_key(spec_key):
+        sk.create(fn_key)
+```
+
+### Low-level scaffolding API
+
+Two public functions are also available for callers that need direct file placement control:
+
+```python
+from foxy.skills.spec_knowledge.api import create_empty_spec, create_empty_specs_for_module
+
+# Single function
+result = create_empty_spec(
+    module="pool",
+    function="swap",
+    target_location="./my-project",   # Move.toml location
+    spec_location="./specs/sources",  # where to write the .move file
+    force=False,                      # True = replace existing
+)
+# result: {success, spec_code, file_path, action, imports_added}
+
+# All functions in a module
+result = create_empty_specs_for_module(
+    module_name="pool",
+    target_location="./my-project",
+    spec_location="./specs/sources",
+    force=False,
+)
+# result: {success, total, inserted, skipped_duplicates, failed, results}
+```
+
+## Item Operations
+
+```python
+spec.exists("writeup")       # check disk without producing
+spec.path("writeup")         # Path to file (works before file exists)
+spec.is_stale("writeup")     # True if a cached dep changed (ephemeral deps are always fresh)
+spec.get("writeup", force=True)       # force regeneration
+spec.get("writeup", stale_ok=False)   # regenerate if stale
+```
+
+## Related Skills
+
+Skills under the `spec_` umbrella (load with `load_skill("name")`):
+
+| Skill | Purpose |
+|-------|---------|
+| `spec_fixer` | Adapt specs after client code changes (renamed functions, changed signatures) |
+| `spec_improve` | Improve a spec from stub to complete (dispatched by `spec.improve`) |
+| `spec_review` | Review spec quality and gaps (dispatched by `spec.review`) |
+| `spec_flip_requires` | Promote `requires` to `asserts` in a spec; wrap surviving ones in documented macros (dispatched by `spec.flip_requires`) |
+| `spec_writeup` | Plan verification approach (dispatched by `spec.writeup`) |
+| `spec_summary` | Summarize function and verified properties (dispatched by `spec.summary`) |
+| `spec_proof_with_lean` | Prove a spec in Lean 4 against generated IR (dispatched by `spec.proof_with_lean`) |
+| `spec_precondition` | Reference: writing `asserts`/`requires` for abort coverage |
+| `spec_postcondition` | Reference: writing `ensures` for function behavior |
+| `spec_loop` | Reference: writing loop invariants and quantifiers |
+| `spec_scenario` | Reference: writing multi-step scenario specs |
+
+
+# sui_prover - Sui Move Formal Verification Skill
+
+Run formal verification on Move packages using the Sui Prover.
+
+## No specs yet? Scaffold first.
+
+If `run_sui_prover` returns output containing `"No specifications found in the project. Nothing to verify."`, the project has source code but no spec functions yet. **Do not stop there** — bootstrap a specs package and continue:
+
+```python
+docs = load_skill("specs_setup")
+foxy_inspect(docs)
+from foxy.skills.specs_setup.api import setup_specs_package
+
+scaffold = setup_specs_package()                     # auto-detects main package
+foxy_inspect(scaffold)
+
+# Now the project has main_pkg/specs/. Author specs (spec_knowledge.create per
+# function, or hand-write *_specs.move under specs/sources/) and re-run:
+result = await run_sui_prover(scaffold["specs_path"])
+```
+
+The scaffolder creates `<main_pkg>/specs/` with `Move.toml` wired to depend on the main package, removes the auto-generated `tests/` folder, and registers the package in `.foxy/project.toml` so `get_packages()` picks it up. See `specs_setup/SKILL.md`.
+
+## Bitwise-heavy code? Set up `specs-bv/` without asking.
+
+The integer encoding cannot relate `x & MASK` to `x mod 2^k`, cannot model arithmetic right shift, and cannot derive `(x >> (w-1)) as u8 ∈ {0, 1}` for wide `x`. When a project contains code that depends on those relationships — ripple-carry adders (`while (carry != 0) { sum ^= carry; carry = (a & b) << 1; }`), two's-complement signed integers backed by a `bits: uN` field, `&`-masked low/high extractors, arithmetic right shift on `Ixx` — the right move is the bitvector encoding via a sibling `specs-bv/` package run with `--no-bv-int-encoding`.
+
+**Do this autonomously when you see the symptoms; do not stop and ask the user.** Symptoms that trigger it:
+
+- A `_Check` goal fails with `code should not abort` pointing at a `&` / `|` / `<<` / `>>` line, or at an `as uN` cast that follows one.
+- A `_Assume` counter-example shows the prover assigning a nonsense value to a bitwise-mask result (e.g. `((sum & LO_64_MASK) as u64) = 1` when `sum = 2^64`).
+- The target body contains a ripple-carry adder loop, a `bits: uN`-backed signed integer struct, or `(v.bits >> (w-1)) as u8`.
+- A spec times out specifically inside a bitwise mixing chain (not a generic timeout — one localized to bitwise/shift ops).
+
+When any of those fire, follow this playbook end to end without prompting:
+
+1. **Create `<project>/specs-bv/`** next to `specs/`. Standalone Move package — **no dependency on the main package**. `Move.toml` declares one address (e.g. `<project>_specs_bv = "0x0"`).
+2. **Register it in `.foxy/project.toml`** under `[packages]`.
+3. **Redeclare** the struct (just the `bits` field) and the function(s) you're proving locally in `specs-bv/sources/<module>.move`. Strip everything you don't need. Keep `module integer_library_specs_bv::<module>` (or your project's analogue) as the module path.
+4. **Write the spec in the same file**, phrased entirely on `.bits` (no `to_int()` / `Integer`). For ripple-carry adders, declare a loop invariant `(n1.bits + n2.bits) mod 2^w == (sum + carry) mod 2^w` (cast both sides up by one width) **immediately before** the `while` — the prover rejects invariants placed inside the loop body.
+5. **Run** `( cd specs-bv && sui-prover --cloud --no-bv-int-encoding )`. The main `specs/` run keeps `--cloud` without `--no-bv-int-encoding` — the flag is invocation-wide and slow on plain arithmetic.
+6. **In `specs/`**, the matching spec keeps `ignore_abort` (the int-encoding placeholder) with a brief comment pointing at the BV file. Do not strip the `prove` flag wholesale — the int-encoded spec still provides signature/linkage checks. Only drop `prove` if the spec adds zero value beyond what the BV version proves.
+
+Only stop and ask when (a) the BV port itself fails after a genuine attempt with a loop invariant in place, or (b) the proof needs a `prelude_extra.bpl` Boogie glue (e.g. `$AShr'Bv32'` for arithmetic right shift) you cannot write without their input. The user opted into "prove this project" — bitvector encoding for bitwise code is the proper tool, not a separate decision.
+
+Known BV limits to accept gracefully (still `ignore_abort` after porting):
+
+- **Nonlinear multiplication on wide bit-vectors** (`u64 → u128` widening multiply, `overflowing_mul` on `math_u64` / `math_u128`). Z3 cannot dispatch `bv128 = bv64 * bv64` within practical timeouts. Keep the algebraic spec in `specs/` (e.g. `prod <= MAX ==> (r as u_wide) == prod`) and document the limit.
+- **Long signed-int operation chains** (`add` / `sub` / `mul` / `div` / `mod` / `abs` / `shr` on `i32`/`i64`/`i128`) that compound multiple bitwise primitives. Prove the load-bearing core (`wrapping_add`, `sign`, `or`, `and`, `shl`) in `specs-bv/`; chain operations are implied by the core but bundling them blows past the timeout.
+- **Arithmetic right shift on `Ixx`** — needs `public native fun ashr(...)` + `procedure {:inline 1} $0_<mod>_ashr` in `prelude_extra.bpl`. Ask before writing the Boogie glue.
+
+See `sui_prover_guide` → "Bitvector encoding (`--no-bv-int-encoding`)" for the full playbook including writing rules and Boogie glue patterns.
+
+## Auto-imported
+
+When this skill is loaded, the following are available directly in the agent namespace:
+- `run_sui_prover`
+
+For other API functions, use explicit imports:
+```python
+from foxy.skills.sui_prover.api import SuiProver, check_prover_success
+```
+
+## API
+
+```python
+from foxy.skills.sui_prover.api import run_sui_prover
+```
+
+## Function Signature
+
+```python
+async def run_sui_prover(
+    path: str,
+    args: List[str] = None,
+    timeout: int = 300,
+    env: Dict[str, str] = None,
+    label: str = None,
+    model: str = "claude-sonnet-4-6",
+) -> dict
+```
+
+**Parameters:**
+- `path` - ABSOLUTE path to directory containing Move.toml
+- `args` - Arguments to pass to sui-prover (default: `["--timeout", "60", "--force-timeout", "--skip-spec-no-abort"]`)
+- `timeout` - Hard timeout in seconds for process termination (default: 300)
+- `env` - Additional environment variables (merged with defaults)
+- `label` - Label for the fork (default: "sui-prover")
+- `model` - Model for the analysis fork (default: "claude-sonnet-4-6")
+
+**Returns:** Fork result dict with `result` containing a compact structured analysis
+
+**Behavior:**
+- Forks the agent via `fork` -- the parent continues working immediately
+- The fork runs sui-prover, analyzes the full output, and returns a compact report: one line per spec (PASS/FAIL with phase, error, source location, counterexample values), plus totals
+- All diagnostic details needed to fix failures are preserved, but verbose prover noise is stripped
+
+**Always use `run_sui_prover` instead of `_run_sui_prover_sync`.** The fork handles the heavy output parsing so the parent context stays clean. Never run the prover inline — it floods the conversation with raw traces.
+
+**One spec per call when iterating.** When verifying multiple specs, issue one `run_sui_prover` call per spec with a single `--functions <name>` flag, not a single call that batches many `--functions` flags or targets many specs at once. Batched runs buffer all output until the whole batch finishes, so the human watching the session sees nothing for minutes. One-spec-per-call gives live incremental output after each spec and makes failures obvious immediately. Iterate in Python:
+
+```python
+for name in spec_short_names:
+    result = await run_sui_prover(
+        path,
+        args=["--timeout", "60", "--force-timeout",
+              "--skip-spec-no-abort", "--skip-fun-no-abort",
+              "--functions", name],
+        timeout=240,
+        label=f"prove-{name}",
+    )
+    foxy_inspect(result.get("response", "")[-2000:])
+```
+
+### Iteration vs. final-verdict flags — known trap
+
+`--skip-spec-no-abort` and `--skip-fun-no-abort` weaken verification: they skip
+the phases that prove "this spec never aborts" and "this function never aborts".
+They are convenient during iteration because the no-abort phases are often the
+slowest and least informative when you are still writing ensures.
+
+But they create a real footgun: **a spec that "passes" with `--skip-spec-no-abort`
+may fail when the same flags are dropped.** Concretely, if an agent removes
+`ignore_abort` from a spec attribute (telling the prover "this function does not
+abort") and then iterates with `--skip-spec-no-abort` (telling the prover "skip
+the check that verifies that claim"), the resulting "pass" is a false positive
+— the very obligation the agent took on was not verified.
+
+**Rule:** when an iteration verdict drives a final state (commit, cache, "done"
+notification), the iteration must use **at least** the flag set the project's
+CI uses. Dropping a `--skip-*` flag for the final batch run is too late — the
+agent has already written code based on the weaker verdict.
+
+Practical guidance:
+
+- Use `--skip-spec-no-abort` only when keeping `ignore_abort` on the spec, or
+  when you have written abort-coverage `asserts` AND verified them with the
+  flag removed at least once.
+- Mirror the project's CI flag set. If CI does not pass `--skip-spec-no-abort`,
+  iteration should not pass it either.
+- Treat `--skip-*` flags as "diagnostic mode" — fine for exploring a slow proof,
+  not fine for "the spec is done".
+
+### Sync escape hatch
+
+For direct blocking execution (used by CLI), use `_run_sui_prover_sync`:
+
+```python
+from foxy.skills.sui_prover.api import _run_sui_prover_sync
+
+result_json = _run_sui_prover_sync(path, args=None, timeout=300, env=None)
+```
+
+Returns a JSON string with one of these shapes:
+
+Success:
+```json
+{
+    "status": "success",
+    "output": "combined stdout and stderr from sui-prover",
+    "exit_code": 0
+}
+```
+
+**Important:** `status: "success"` only means the process ran. Check `exit_code` to determine if verification actually passed (exit_code != 0 means verification failed).
+
+Timeout:
+```json
+{
+    "status": "timeout",
+    "message": "Prover execution timed out after 300 seconds",
+    "partial_output": "output captured before timeout"
+}
+```
+
+Interrupted (Ctrl-C):
+```json
+{
+    "status": "interrupted",
+    "message": "Prover execution interrupted by user (Ctrl-C)",
+    "partial_output": "output captured before interruption"
+}
+```
+
+Error:
+```json
+{
+    "status": "error",
+    "error": "sui-prover not found in PATH"
+}
+```
+
+**Default environment variables:**
+```python
+{
+    "DOTNET_GCHeapHardLimit": "6442450944",  # 6GB heap limit
+    "DOTNET_GCServer": "0",                  # Workstation GC mode
+    "DOTNET_GCRetainVM": "0",                # Don't retain VM
+    "DOTNET_GCConserveMemory": "9",          # Aggressive memory conservation
+}
+```
+
+## Cloud Mode (`--cloud`)
+
+**Always pass `--cloud` in `args`.** Cloud mode offloads verification to a shared proving cluster — dramatically faster than local prover, runs proof goals in parallel, and doesn't consume local CPU/memory. Include it in every `run_sui_prover` call:
+
+```python
+args = ["--timeout", "60", "--force-timeout", "--skip-spec-no-abort", "--cloud"]
+```
+
+Heavy specs that genuinely cannot run in the cloud opt out **at the spec level**, not at the call site — annotate the spec with `#[spec(..., run_on = b"local")]` (documented in the Prover attributes section). Leave `--cloud` in `args`; the prover reads per-spec `run_on` and runs those specs locally while everything else goes to the cloud.
+
+Drop `--cloud` only when:
+- The cloud endpoint is unreachable and verification is blocking
+- You need local-only features: `--keep-temp`, `--generate-only`, `--dump-bytecode`, or `extra_bpl`
+- The user explicitly requests local execution
+
+### Cloud Configuration
+
+Cloud mode reads credentials from `~/.asymptotic/sui_prover.toml`. If this file is missing or incomplete, sui-prover fails with an error like "cloud config not set" / "missing url" / "missing key" when `--cloud` is used.
+
+**Fix:** create `~/.asymptotic/sui_prover.toml` with the shared cluster config:
+
+```toml
+url = "https://hdhs3sbtlk22w5ceivvbuege4i0devap.lambda-url.us-west-2.on.aws/"
+key = "test_password"
+concurrency = 20
+```
+
+```python
+from pathlib import Path
+
+cfg_dir = Path.home() / ".asymptotic"
+cfg_dir.mkdir(parents=True, exist_ok=True)
+cfg_path = cfg_dir / "sui_prover.toml"
+if not cfg_path.exists():
+    cfg_path.write_text(
+        'url = "https://hdhs3sbtlk22w5ceivvbuege4i0devap.lambda-url.us-west-2.on.aws/"\n'
+        'key = "test_password"\n'
+        'concurrency = 20\n'
+    )
+```
+
+Fields:
+- `url` — cloud prover endpoint
+- `key` — shared auth token
+- `concurrency` — max parallel proof goals sent from this client (20 is a sensible default)
+
+The config lives **with the prover**, not inside any project. It is read once per invocation from `~/.asymptotic/sui_prover.toml`, so a single write bootstraps every future run on the machine. Once the file exists, re-run the same `run_sui_prover(...)` call that previously failed — no arg changes needed.
+
+## sui-prover Flags
+
+- `--timeout <seconds>` - Verification timeout in seconds (default: 300)
+- `--force-timeout` - Force kill boogie process if boogie vc timeout is broken (should always be used with `--timeout` unless user explicitly requests otherwise)
+- `--verbose` / `-v` - Display detailed verification progress
+- `--split-paths <n>` / `-s <n>` - Split verification into separate proof goals for each execution path. Not used by default; try adding if verification times out or gets stuck
+- `--generate-only` / `-g` - Only generate Boogie code without running prover
+- `--no-counterexample-trace` - Don't display counterexample trace
+- `--skip-spec-no-abort` - Skip checking spec functions that do not abort (should always be included unless user explicitly requests otherwise)
+- `--cloud` - Run verification on the shared cloud cluster instead of locally (should always be included — see [Cloud Mode](#cloud-mode--cloud))
+- `--modules <MODULES>` - Specify module names to target (comma-separated)
+- `--functions <FUNCTIONS>` - Specify function names to target (comma-separated)
+
+**Default Behavior:**
+- If neither `--modules` nor `--functions` are provided, sui-prover runs over all specs in the package
+- If `--modules` is provided without `--functions`, sui-prover runs over all specs in the specified module(s)
+- If both `--modules` and `--functions` are provided, sui-prover runs only for the specified function spec(s) within the specified module(s)
+
+**Default Arguments:**
+By default, the following arguments are always included (unless the user explicitly requests otherwise):
+- `--timeout <value>` with `--force-timeout` - Ensures proper timeout handling
+- `--skip-spec-no-abort` - Skips checking spec functions that do not abort
+- `--cloud` - Runs on the cloud prover (see [Cloud Mode](#cloud-mode--cloud))
+
+**Useful Flag for Prover Internals**
+Use these options to enable deeper analysis and procedures for analysis.
+
+- `--dump-bytecode` - dumps `*.bytecode` files in the project directory where this is run, detailing analysis passes that ran on the bytecode, for example:
+
+```
+...
+bytecode_11_reaching_def_analysis.bytecode
+bytecode_12_livevar_analysis.bytecode
+...
+```
+
+- `--keep-temp --boogie-file-mode function` - generate `*.bpl` containing Boogie intermediate verification language code for move functions. **Important** the `*.bpl` files will be in an `output` subdirectory that the prover ran on.
+- `--enable-conditional-merge-insertion` - enables a Boogie bytecode pass that transforms Boogie bytecode into SSA-like form with phi nodes
+
+Users can request to remove these defaults or add additional flags as needed.
+
+Always run `sui-prover --help` to see all available flags for your installation.
+
+## Working with Specs
+
+**Key concept:** sui-prover runs on a **package** (directory with `Move.toml`), not a project. Specs typically live in a dedicated `specs/` package separate from `sources/`.
+
+When verifying specific specs:
+1. Locate the spec file (use Glob to search `specs/**/*.move`)
+2. Find its package root (walk up to the `Move.toml`)
+3. Run sui-prover on that specific package with `--modules` and/or `--functions` flags
+
+Use `get_packages()` from `project_env` to discover available packages.
+
+### Spec naming: ProduceError pitfall
+
+If the prover reports `Failed to produce 'source' for '<name>_spec': Function <module>::<name>_spec not found`, the spec function name does not match any function in the module. The `_spec` suffix must match the **exact** name of the function being specified. Before writing a spec, always read the source file to confirm the exact function name. Do not guess or infer names from context.
+
+## Prover attributes
+`sui-prover` understands syntax like `#[spec(...)]` as directives for controlling prover behavior and analysis. You should know about these uses, which may be combined:
+
+### Standalone `spec` syntax: `#[spec]`
+
+The `spec` attribute is used to specify that a function is a specification.
+
+When the `spec` attribute is on a function called `<function_name>_spec`, the Move Prover will use the specification instead of the original function when verifying other functions that call `<function_name>`.
+
+In this case the spec function must:
+
+1. have the same name as the original function, but with `_spec` appended -- if this is not the case, the spec will only be used for checking a scenario (see below)
+2. have the same signature as the original function
+3. call the original function -- the value returned by the spec is usually the value returned by the original function, but this is not required
+
+### `#[spec(prove)]`
+
+Used to specify that a function spec to be verified by the Move Prover. A spec without `prove` will not be checked by the prover. I it will be used when called as part of proving other functions—see [how specs compose in our FAQ](https://www.notion.so/1d5159bbd66d80b3bd4ee7de42fd7ead?pvs=21).
+
+Adding the `focus` attribute to a spec/scenario (`#[spec(prove, focus)`) will make the prover only attempt to prove this particular spec. `focus` can be used for several specs simultaneously**.**
+
+### `#[spec(skip)]`
+
+Skips spec verification. Optionally accepts a string reason (e.g., skip = b"known issue").
+
+###  `#[spec(target=foo:bar)]`
+
+Specifies the function to which the spec belongs (module `foo` function `bar).
+
+### `#[spec(no_opaque)]`
+
+Prevents this spec from being used by other specs during verification (useful for getters and specific isolated cases).
+
+### `#[spec(boogie_opt=b"..")]`
+
+Adds custom Boogie per-spec options. These override default settings if they match.
+
+| Option | When to use |
+|--------|-------------|
+| `vcsSplitOnEveryAssert` | Many calculations — splits verification conditions |
+| `vcsMaxKeepGoingSplits:N` | Limits verification condition splits |
+| `useArrayAxioms` | Table access and loops |
+| `vcsCores:1` | Single-core for deterministic behavior |
+| `proverOpt:O:smt.QI.EAGER_THRESHOLD=100` | Tune quantifier instantiation |
+| `proverOpt:O:smt.MBQI=false` | Disable model-based quantifier instantiation |
+| `proverOpt:O:smt.random_seed=N` | Try different seeds when proof is seed-sensitive |
+
+Combine multiple options:
+```move
+#[spec(prove, target=module::func, boogie_opt=b"vcsSplitOnEveryAssert useArrayAxioms")]
+```
+
+**Recommended combo for `forall!` specs** (invariant preservation, loop invariants with quantifiers):
+```move
+boogie_opt = b"vcsSplitOnEveryAssert useArrayAxioms proverOpt:O:smt.MBQI=false vcsCores:1"
+```
+- `smt.MBQI=false` disables model-based quantifier instantiation — essential for `forall!` to work reliably
+- `vcsCores:1` limits parallelism for deterministic behavior with quantifiers
+
+### `#[spec(timeout)]`
+
+Sets a maximum verification timeout for the spec.
+
+### `#[spec(run_on = b"local")]`
+
+Forces this single spec to run on the **local** prover even when `run_sui_prover` is invoked with `--cloud`. Use this **only for heavy specs** that genuinely cannot run in the cloud (e.g. specs that need local `extra_bpl` files, very large proof goals that exceed the cloud worker's budget, or interactive iteration with local prover flags).
+
+```move
+#[spec(prove, target=pool::complex_swap, run_on = b"local")]
+public fun complex_swap_spec(...) { ... }
+```
+
+The rest of the specs in the same run still go to the cloud — only the annotated spec runs locally. Default is cloud; only add this attribute when a spec is demonstrably too heavy or cloud-incompatible.
+
+### `#[spec_only]`
+
+Similar to `test_only`, `spec_only` makes any annotated code (module, function, etc.) only be visible to the prover. The code will not appear under regular compilation, nor in test mode.
+
+### `#[ext(no_abort)]`
+
+Similar to  `#[spec(prove)]` this top-level attribute is applied to regular functions to verify that **they do not abort** during execution.
+
+It can be combined with  `#[spec_only]`, which is particularly useful when working with **quantifiers** or **external loop invariants**.
+
+### `#[ext(pure)]`
+
+Attempt translation of a Move function to a Boogie function (rather than a Boogie procedure). A Boogie function is a pure function in which no jumps or side-effects exist. Conversely, Boogie procedures may contain jumps and are the default translation output of functions unless `#[ext(pure)]` is specified
+
+### `#spec(prove, focus)]`
+
+The `focus` attribute is an **optional** approach that can be used when the user explicitly requests it (e.g., "add focus for function X" or "run sui-prover with focus on these functions"). 
+
+The `focus` attribute can be added to spec/scenario attributes to make the prover only attempt to prove those particular specs:
+
+```move
+#[spec(prove, focus)]
+public fun swap(pool: &mut Pool, amount: u64): u64 {
+    // ...
+}
+```
+
+Multiple specs can have `focus` applied simultaneously, and the prover will attempt to prove all focused specs in a single run.
+
+**When to use focus:**
+- Only when the user explicitly asks to add focus attributes or use focus-based verification
+- When the user wants to verify specific functions without using `--modules`/`--functions` flags
+
+**Implementation pattern for focusing (only when explicitly requested):**
+1. **Locate spec file and package root** - Follow the steps in [Working with Specs](#working-with-specs) to find the correct spec file and package root.
+2. **Add focus attribute** - Temporarily edit the spec file to add `focus` to the target spec attribute(s).
+3. **Run Verification** - Run `run_sui_prover()` on the identified package root.
+4. **Restore** - Restore the original spec file.
+
+This allows targeted verification of specific functions without running the entire suite, but should only be used when the user explicitly requests it.
+
+## Spec Composition
+
+### How do `spec`s compose?
+
+The Move Prover will use the spec of a function to verify other functions that call it.
+
+For example, if we have a function `foo` that calls `bar`, and we have a spec `bar_spec` for `bar`, the Move Prover will use `bar_spec` to verify `foo`.
+
+Marking a spec with `#[spec(prove)]` will make the prover attempt to prove it.
+Leaving out the `prove` attribute will make the prover use the spec to verify other functions, but not attempt to prove it.
+
+## Usage Examples
+
+### Basic Verification (fork, non-blocking)
+
+```python
+from foxy.skills.sui_prover.api import run_sui_prover
+
+# Forks the agent -- parent continues working, fork runs prover and analyzes results
+result = await run_sui_prover("/absolute/path/to/my_package")
+# result["response"] contains the analysis, result["result"] contains structured data
+```
+
+### Custom Flags
+
+```python
+from foxy.skills.sui_prover.api import run_sui_prover
+
+result = await run_sui_prover(
+    path="/absolute/path/to/my_package",
+    args=["--timeout", "60", "--force-timeout", "--skip-spec-no-abort", "--verbose"],
+)
+```
+
+### Verifying Specific Modules
+
+```python
+from foxy.skills.sui_prover.api import run_sui_prover
+
+result = await run_sui_prover(
+    path="/absolute/path/to/my_package",
+    args=["--timeout", "60", "--force-timeout", "--skip-spec-no-abort", "--modules", "<name_of_the_module>"],
+)
+```
+
+### Verifying Specific Functions
+
+```python
+from foxy.skills.sui_prover.api import run_sui_prover
+
+result = await run_sui_prover(
+    path="/absolute/path/to/my_package",
+    args=["--timeout", "60", "--force-timeout", "--skip-spec-no-abort", "--modules", "<name_of_the_module>", "--functions", "<name_of_the_function>"],
+)
+```
+
+### Multiple Modules and Functions
+
+```python
+from foxy.skills.sui_prover.api import run_sui_prover
+
+result = await run_sui_prover(
+    path="/absolute/path/to/my_package",
+    args=["--timeout", "60", "--force-timeout", "--skip-spec-no-abort", "--modules", "<module_1>,<module_2>"],
+)
+```
+
+## Understanding Prover Output
+
+The prover returns verification results in the `output` field:
+
+**Success:**
+```
+Verified 15 functions in 12.3s
+```
+
+**Abort not covered:**
+```
+error: abort not covered by any of the `aborts_if` clauses
+   ┌─ sources/pool.move:42:5
+   │
+42 │     public fun swap_exact_amount_in(...) {
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+```
+
+**Postcondition failure:**
+```
+error: post-condition does not hold
+   ┌─ sources/pool.move:38:9
+   │
+38 │         ensures result > 0;
+   │         ^^^^^^^^^^^^^^^^^^
+```
+
+**Timeout:**
+```
+error: timeout verifying function
+   ┌─ sources/complex.move:100:5
+```
+
+## Installation
+
+```bash
+# Install sui-prover (part of Sui toolchain)
+cargo install --git https://github.com/MystenLabs/sui.git sui-prover
+
+# Check available flags for your version
+sui-prover --help
+```
+
+## Notes
+
+- **CRITICAL: `sui-prover` is already installed and on PATH.** Never search for it with `find`, `which`, or `locate`. Never attempt to install it. Just call `run_sui_prover()` or `_run_sui_prover_sync()` directly — they invoke `sui-prover` by name.
+- **CRITICAL: The `==>` implication operator is NOT supported.** Do not generate specs using `==>`. Use `if`/`else` or `assert!()` with boolean logic instead. For example, instead of `requires a > 0 ==> b > 0`, write the equivalent logic using standard Move control flow.
+- **CRITICAL:** Path must be absolute. Relative paths will fail with an error.
+- Prover requires valid Move package with Move.toml at the specified path
+- The path must contain Move source files (typically in `sources/` directory)
+- Specifications must be embedded in the .move files using Move Specification Language (MSL)
+- When targeting specific specs, first locate them before running sui-prover
+- Default hard timeout is 300 seconds (5 minutes) - process is force-killed if exceeded
+- Prover uses Boogie and Z3 for verification (managed via .NET runtime)
+- **Non-blocking:** `run_sui_prover` forks the agent -- the parent continues working while the fork runs the prover and analyzes results
+- **Command visibility:** The fork prints the exact sui-prover command and working directory before execution
+- **Output streaming:** The fork streams sui-prover output to stdout incrementally as verification runs
+- **Interruptible:** Press Ctrl-C to interrupt prover execution at any time
+
+## Fork behavior
+
+`run_sui_prover` automatically forks the agent via `fork`. The fork:
+1. Runs the prover (blocking, up to `timeout` seconds)
+2. Analyzes the full output into a compact structured report
+3. Returns the report via `final_result` — one line per spec with all failure details
+
+The parent agent continues working immediately and receives a `[FORK DONE]` notification when the fork completes with the compact analysis.
+
+**IMPORTANT: Do not call `run_sui_prover` or `fork` from inside a fork.** Fork depth is capped at 1. If you are already running as a fork (the prompt starts with `[FORK CONTEXT]`), use `_run_sui_prover_sync` directly instead.
+
+## Troubleshooting
+
+**Unexpected argument errors:**
+```
+error: unexpected argument '--some-flag' found
+```
+
+If you encounter this, your sui-prover version may not support that flag. Check available flags:
+```bash
+sui-prover --help
+```
+
+Then update your `args` parameter to only use supported flags. The default args (`["--timeout", "60", "--force-timeout", "--skip-spec-no-abort"]`) work with current sui-prover versions.
+
+**Exit code 2 with no clear error:**
+This usually means verification failed but output may not clearly indicate why. Try adding `--verbose` to the args for more detailed output.
+
+**Cloud config not set / missing url / missing key:**
+The cloud prover needs `~/.asymptotic/sui_prover.toml` with `url`, `key`, and `concurrency`. If verification fails because this file is missing or incomplete, create it and re-run — see [Cloud Mode → Cloud Configuration](#cloud-configuration). Do **not** react to this error by dropping `--cloud` / switching to local mode; the fix is to write the config, not abandon cloud verification.
+
+**Known false positive: postconditions on shared objects not returned to caller.**
+When a spec asserts postconditions on a shared object (e.g., a Pool passed by `&mut` reference) that is not returned by the function, the prover may report a postcondition failure even though the code is correct. This is a Boogie axiom limitation — the prover cannot track mutations to shared objects that remain in the caller's scope. Ignore them.
+
+
+# Sui Prover Specification Guide
+
+## Quick Reference: Core Functions
+
+Import with `use prover::prover::*`:
+
+| Function | Description |
+|----------|-------------|
+| `requires(condition)` | Precondition that must hold before execution |
+| `ensures(condition)` | Postcondition that must hold after execution |
+| `asserts(condition)` | Assert condition is true, or function aborts |
+| `clone!(&var)` | Capture variable's value at this point for later comparison |
+| `forall!<T>(\|x\| predicate(x))` | Universal quantification |
+| `exists!<T>(\|x\| predicate(x))` | Existential quantification |
+| `boogie_split_here()` | Emit `assume {:split_here} true;` — cut the VC at this point |
+| `boogie_focus()` | Emit `assume {:focus} true;` — split into "paths-through-here" vs "not-through-here" VCs |
+| `boogie_allow_path_isolation()` | Mark the next `if` with `{:allow_path_isolation}`; pair with `boogie_opt = b"{:isolate_paths}"` |
+
+Import with `use prover::vector_iter::*`:
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `all!<T>(&vec, \|x\| pred(x))` | `bool` | All elements satisfy predicate |
+| `any!<T>(&vec, \|x\| pred(x))` | `bool` | Any element satisfies predicate |
+| `count!<T>(&vec, \|x\| pred(x))` | `u64` | Count elements satisfying predicate |
+| `map!<T, U>(&vec, \|x\| f(x))` | `&vector<U>` | Transform vector elements |
+| `filter!<T>(&vec, \|x\| pred(x))` | `&vector<T>` | Filter vector elements |
+| `find!<T>(&vec, \|x\| pred(x))` | `&Option<T>` | Find first matching element |
+| `find_index!<T>(&vec, \|x\| pred(x))` | `Option<u64>` | Find index of first match |
+| `find_indices!<T>(&vec, \|x\| pred(x))` | `vector<u64>` | Find all matching indices |
+| `sum_map!<T, U>(&vec, \|x\| f(x))` | `Integer` | Sum of f(x) over elements |
+
+All above have `_range!` variants: `all_range!(&vec, start, end, |x| ...)`.
+
+Native functions (not macros):
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `sum<T>(&vec)` | `Integer` | Sum of vector elements |
+| `sum_range<T>(&vec, start, end)` | `Integer` | Sum of elements in range |
+
+Index-range functions (no vector input):
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `range_map!<T>(start, end, \|i\| f(i))` | `&vector<T>` | Generate vector from index range |
+| `range_count!(start, end, \|i\| pred(i))` | `u64` | Count indices satisfying predicate |
+| `range_sum_map!(start, end, \|i\| f(i))` | `Integer` | Sum of f(i) over index range |
+
+Import with `use prover::ghost::*`:
+
+| Function | Description |
+|----------|-------------|
+| `ghost::declare_global_mut<Key, T>()` | Declare ghost variable |
+| `ghost::global<Key, T>()` | Read current value |
+| `ghost::borrow_mut<Key, T>()` | Get mutable reference |
+
+## Quick Reference: Mathematical Types (Spec-Only)
+
+### `std::integer::Integer`
+Arbitrary-precision mathematical integer. The bridge between bounded uN bit-patterns and unbounded math. **Stay in `Integer`-space inside every `ensures` and `asserts`**; cast in at the boundary with `.to_int()` / `.to_signed_int()` and cast out with `.to_uN()`.
+
+- **In from uN (unsigned)**: `42u64.to_int()` (value-preserving, lifts u64 → mathematical integer).
+- **In from uN (two's-complement)**: `bits.to_signed_int()` (interprets a uN bit-pattern as signed int in `[-(2^(W-1)), 2^(W-1) - 1]`). Use this for `bits: uN` fields in signed-int structs — see "Two's-complement signed integers in the int encoding" below.
+- **Out to uN**: `n.to_u32()` / `.to_u64()` / `.to_u128()`. **Implicitly does `mod 2^W`** — i.e. truncates a wider integer to its low W bits without aborting on overflow. This is exactly the postcondition shape for `wrapping_*` / `overflowing_*`: `result == n1.to_int().add(n2.to_int()).to_u64()`.
+- **Arithmetic**: `add`, `sub`, `mul`, `div`, `mod`, `neg`, `abs`, `div_trunc`, `mod_trunc`, `div_round_up`.
+  - `div` / `mod` are the mathematical (floor for positives, language-defined for negatives) variants.
+  - `div_trunc` / `mod_trunc` are truncated-toward-zero, matching the Move source semantics for signed integers. **Use these for signed `div` / `mod` specs.**
+  - `div_round_up` matches the `checked_div_round(.., true)` rounding helper pattern.
+- **Math**: `sqrt`, `pow`.
+- **Compare**: `lt`, `gt`, `lte`, `gte`.
+- **Bitwise**: `bit_or`, `bit_and`, `bit_xor`, `bit_not`, `shl`, `shr`.
+- **Predicates**: `is_pos`, `is_neg`.
+- **Range predicates (signed)**: `n.is_i32()`, `n.is_i64()`, `n.is_i128()`. Each is `true` iff `n` is in `[-(2^(W-1)), 2^(W-1) - 1]`. **The canonical signed-overflow guard** — use directly as the abort precondition for `add` / `sub` / `mul` / `div` / `abs` / `neg_from` on `IN`:
+  ```move
+  asserts(num1.to_int().add(num2.to_int()).is_i32());     // signed-add doesn't overflow
+  asserts(v.to_int().abs().is_i32());                     // |v| representable (rules out INT_MIN)
+  asserts(num1.to_int().mul(num2.to_int()).is_i32());     // signed-mul fits
+  ```
+- **Type max constants**: `std::u32::max_value!()`, `std::u64::max_value!()`, `std::u128::max_value!()`. These are `Integer`-valued in spec context (no `to_int()` needed) — pair with `.lte` for the unsigned overflow guard:
+  ```move
+  asserts(a.to_int().add(b.to_int()).lte(std::u64::max_value!().to_int()));
+  ```
+
+### `std::real::Real`
+- Convert: `42u64.to_real()`
+- Arithmetic: `add`, `sub`, `mul`, `div`, `neg`
+- Math: `sqrt`, `exp`
+- Compare: `lt`, `gt`, `lte`, `gte`
+- Convert back: `to_integer`
+
+### `std::q32::Q32`, `std::q64::Q64`, `std::q128::Q128`
+Signed fixed-point types with 32/64/128 fractional bits.
+
+- Convert: `42u64.to_q64()`, `my_integer.to_q64()`, `my_real.to_q64()`
+- From fraction: `std::q32::quot(num.to_int(), den.to_int())`
+- Arithmetic: `add`, `sub`, `mul`, `div`, `neg`, `abs`, `sqrt`, `pow`
+- Compare: `lt`, `gt`, `lte`, `gte`
+- Rounding: `floor`, `ceil`, `round` (return Integer)
+- Predicates: `is_pos`, `is_neg`, `is_int`
+- From unsigned fixed-point: `my_uq64_64.to_q64()`, `my_fp32.to_q32()`
+- `std::q32::quot(num, den)` — NOT `Q32::quot(...)` (Q32 is a struct, not enum)
+- `use fun` aliases (e.g., `PriceFeed.to_q32()`) must be re-imported in each spec module
+
+### `std::q_wad::Q_wad`
+Signed fixed-point type with 18 decimal fractional digits (WAD, scale = 10^18).
+
+- Convert: `42u64.to_q_wad()`, `my_integer.to_q_wad()`, `my_real.to_q_wad()`
+- From fraction: `std::q_wad::quot(num.to_int(), den.to_int())`
+- Arithmetic: `add`, `sub`, `mul`, `div`, `neg`, `abs`, `sqrt`, `pow`
+- Compare: `lt`, `gt`, `lte`, `gte`, `min`, `max`
+- Rounding: `floor`, `ceil`, `round`, `to_int` (return Integer)
+- Predicates: `is_pos`, `is_neg`, `is_int`
+- Range checks: `in_range_u128`, `in_range_u256`
+- Raw access: `raw` (get underlying Integer), `from_raw`
+
+### `std::q_ray::Q_ray`
+Signed fixed-point type with 27 decimal fractional digits (RAY, scale = 10^27).
+Same API as `Q_wad` but with higher precision.
+
+**Q type usage notes:**
+- `use fun` aliases (e.g., `.to_q32()`, `.to_q_wad()`) must be re-imported in each spec module
+- For exact ops (add/sub): use `==`
+- For truncating ops (mul/div/create_from_rational): use within-epsilon checks
+- Epsilon for Q32 = 1 ULP = `std::q32::quot(1.to_int(), 4_294_967_296u64.to_int())`
+
+**Custom fixed-point types (e.g., project-specific Decimal):**
+Builtin `.to_q32()` only works for `FixedPoint32`. For custom types, define a local conversion:
+```move
+#[spec_only]
+use fun decimal_to_q_wad as Decimal.to_q_wad;
+#[spec_only]
+fun decimal_to_q_wad(d: Decimal): std::q_wad::Q_wad {
+    std::q_wad::from_raw(d.to_scaled_val().to_int())
+}
+```
+Then use in specs: `ensures(result.to_q_wad() == a.to_q_wad().add(b.to_q_wad()))`
+
+## Quick Reference: Attributes
+
+### `#[spec(...)]`
+| Parameter | Description |
+|-----------|-------------|
+| `prove` | Verify this specification. **Required** — without it, spec silently passes without checking |
+| `target = <PATH>` | Target external function |
+| `include = <PATH>` | Include another spec module's behavior (makes its `prove`-flagged specs opaque) |
+| `ignore_abort` | Don't check abort conditions. Prefer fixing root causes over using this |
+| `no_opaque` | Inline called function bodies in proofs |
+| `skip` | Skip verification (axiom-assumed). Optional reason: `skip = b"reason"` |
+| `focus` | Verify only focused specs (useful for debugging) |
+| `uninterpreted = <PATH>` | Strip body definition from a pure function. Requires `#[ext(pure)]` on target |
+| `interpreted = <PATH>` | Per-spec override: re-inline a function marked `#[ext(uninterpreted)]` globally |
+| `extra_bpl = b"path.bpl"` | Load additional Boogie axiom file. Repeatable: `extra_bpl = b"a.bpl", extra_bpl = b"b.bpl"` to load multiple files |
+| `boogie_opt = b"options"` | Pass options directly to Boogie (e.g., `b"/timeLimit:300 /errorLimit:1"`) |
+| `run_on = "local"` | Per-spec override: run locally even when `--cloud` is configured |
+
+### `#[ext(...)]`
+| Parameter | Description |
+|-----------|-------------|
+| `pure` | Pure function, usable in spec expressions |
+| `no_abort` | Function never aborts |
+| `axiom` | Axiomatically defined function |
+| `uninterpreted` | Globally strip body definition from this pure function (per-spec override with `interpreted =`) |
+
+### `#[spec_only(...)]`
+| Parameter | Description |
+|-----------|-------------|
+| (none) | Spec-only item |
+| `(axiom)` | Axiom definition |
+| `(inv_target = <TYPE>)` | Datatype invariant |
+| `(loop_inv(target = <FUNC>))` | External loop invariant |
+| `(loop_inv(target = <FUNC>, label = N))` | Loop invariant for Nth loop (0-indexed) |
+| `(include = specs::foo_specs)` | On a module: makes foo_specs's `prove`-flagged specs opaque in _Check mode |
+
+---
+
+# Project Setup & Running the Prover
+
+## Directory structure
+Specs live in a separate package: `specs/sources/` with its own `Move.toml` that depends on the source package.
+
+## ALWAYS run from specs/
+```bash
+cd /path/to/project/specs && sui-prover
+```
+Running from the project root silently fails — specs not found, "Function does not exist" errors. The `specs/Move.toml` is a separate package. Default `--path` is `.`, so no need to specify it.
+
+## Use `--trace` when debugging
+Always include `--trace` when iterating on specs. Shows the call trace to the location of the condition failure.
+```
+🔄 test::double_spec_Check
+    ⊢  $42_test_double$verify
+    📌 split 1/2: prover::ensures does not hold (at ./sources/test.move:11)
+       → double (at ./sources/test.move:20)
+       → add_spec (at ./sources/test.move:7)
+    📌 split 2/2: prover::ensures does not hold (at ./sources/test.move:21)
+✅ test::double_spec_Check
+```
+The `→` arrows show the call chain leading to each assert — useful when one spec calls another (e.g., `double_spec` calls `add` whose spec is `add_spec`).
+
+## Use `-v` / `--verbose` to see spec composition
+`--verbose` shows the spec dependency tree — which callee specs the target relies on:
+```
+🔄 test::quad_spec_Check
+✅ test::quad_spec_Check
+└── 🎯test::quad
+   └── test::double_spec
+```
+Here `quad_spec` verifies `quad` (🎯), whose body calls `double` — used opaquely via `double_spec`. The tree stops at `double_spec` because the prover uses its postconditions, not its implementation (won't descend to `add_spec`).
+
+## Run prover invocations sequentially
+Don't run multiple sui-prover instances in parallel — resource-intensive.
+
+## CLI reference
+```bash
+sui-prover                              # Run from specs directory (default --path is .)
+sui-prover --trace                      # Show call trace to condition failure location; also lists timeouts at the end (always use when debugging)
+sui-prover --verbose                    # Detailed output
+sui-prover --timeout 60                 # Set timeout in seconds (default 45)
+sui-prover --force-timeout              # Kill Boogie if its internal timeout breaks (always pair with --timeout)
+sui-prover --functions <pattern>        # Filter functions; pattern is <function>, <module>::<function>, or <package>::<module>::<function> (repeatable)
+sui-prover --modules <pattern>          # Filter modules; pattern is <module> or <package>::<module> (repeatable)
+sui-prover --keep-temp                  # Keep generated .bpl files for inspection
+sui-prover --generate-only              # Generate Boogie only (no solving)
+sui-prover --dump-bytecode              # Dump bytecode
+sui-prover --skip-spec-no-abort         # Skip SpecNoAbortCheck
+sui-prover --skip-fun-no-abort          # Skip fun no-abort checking
+sui-prover --split-paths <N>            # Split verification paths
+sui-prover --no-bv-int-encoding         # Encode integers as bitvectors (for specs with heavy shifts/bitwise carry; see Bitvector encoding section)
+sui-prover --cloud                      # Use cloud backend (requires prior config)
+sui-prover --stats                      # Coverage statistics
+```
+
+## Debugging workflow
+
+1. Add `#[spec(prove, focus)]` to the spec you're working on
+2. Run `sui-prover`
+3. Read the error:
+   - **"code aborts"** → missing asserts. Add asserts for all abort paths in the function and nested calls
+   - **"ensures does not hold"** → postcondition is wrong or too strong. Check the logic, look at the counterexample
+   - **"assert does not hold"** → the asserts conditions are too strong. Check the logic, look at the counterexample
+   - **Timeout** → complexity issue. Try `uninterpreted`, `boogie_opt`, or simplifying. If the function is dominated by bitwise / shift ops (carry-chain adders, arithmetic right shift, bit-mask packing), also consider moving the spec to a sibling `specs-bv` package proved with `--no-bv-int-encoding` (see Bitvector encoding section)
+4. Once passing with `focus`, remove `focus` and verify full suite
+
+---
+
+# The Three Verification Checks
+
+Every spec generates three `.bpl` files — one per `AssertsMode`. All three must pass.
+
+## 1. `_Check` — Main verification
+
+- `asserts` → `requires` (assumed as preconditions)
+- `ensures` → asserted
+- Abort points → `assert !$abort_flag`
+- Callee bodies **inlined**, except `prove`-flagged specs from `include`d modules which are opaque (havoced + postconditions assumed via their Opaque procedures)
+
+## 2. `_Assume` — Asserts are necessary for abort-freedom
+
+For specs **without** `asserts` calls (and without `ignore_abort`): passes vacuously (no verification procedure emitted).
+
+For specs **with** `asserts` calls: the $verify procedure runs the implementation with abort points assumed away (`assume !$abort_flag`), `asserts` dropped from the body, `ensures` dropped, then **calls the `$asserts` inline procedure** which asserts the `asserts` conditions.
+
+This checks: **if the code doesn't abort, do the `asserts` conditions hold?** i.e., `¬abort → P`.
+
+Combined with _Check (which checks `P → ¬abort ∧ Q`), together they prove:
+- `P ⟺ ¬abort` — the asserts conditions are exactly when the function doesn't abort
+- `P → Q` — under non-abort conditions, the postconditions hold
+
+For specs **with** `ignore_abort`: same as above, but `ensures` are also **asserted** (not dropped). This additionally checks that postconditions hold on all non-aborting paths.
+
+## 3. `_SpecNoAbortCheck` — Can spec code abort?
+
+- `ensures` and `asserts` → `requires` (assumed, not checked)
+- Target call havoced, postconditions assumed
+- Abort points → `assert !$abort_flag`
+- Checks that the spec body code itself doesn't abort
+
+---
+
+# Writing Specs: requires / ensures / asserts
+
+## `asserts` — proves abort on violation
+Use when the code actually checks the condition (e.g., `assert!(condition)`, overflow checks, permission checks). Stronger than `requires` — proves the function **will abort** if violated.
+
+## `requires` — assumes condition holds
+Use for invariants callers must maintain but aren't runtime-checked. With `ignore_abort`, the distinction with `asserts` is moot and `requires` better documents intent.
+
+## `ensures` — postcondition
+Must hold after execution. For opaque specs, **every** property the caller needs must be explicitly ensured — nothing is assumed preserved automatically.
+
+## `ignore_abort` — last resort
+Never add `ignore_abort` unless explicitly asked. Specs should prove abort-freedom via `asserts`. Using `ignore_abort` skips the abort-freedom proof and weakens the verification.
+
+## `clone!` for before/after comparisons
+```move
+let old_vault = clone!(&vault);
+// ... mutations happen ...
+ensures(vault.balance() >= old_vault.balance());
+```
+`clone!(&mut_ref)` captures a snapshot; returns `&T`. Import from `prover::prover`.
+
+## Overflow/underflow asserts with `.to_int()`
+Use arbitrary-precision `Integer` arithmetic in asserts to check bounds:
+```move
+// addition overflow
+asserts(a.to_int().add(b.to_int()).lte(std::u64::max_value!().to_int()));
+
+// subtraction underflow
+asserts(a.to_int().gte(b.to_int()));
+
+// multiplication overflow
+asserts(a.to_int().mul(b.to_int()).lte(std::u64::max_value!().to_int()));
+
+// division by zero
+asserts(divisor != 0);
+```
+
+## `df::exists_with_type` and `bag::contains_with_type`
+For dynamic field and bag access, use the typed variants — the untyped `df::exists_` / `bag::contains` don't connect with `borrow` in the prover:
+```move
+// WRONG: prover can't connect exists_ to borrow
+asserts(df::exists_<Key>(&self.id, key));
+let val = df::borrow<Key, Value>(&self.id, key);
+
+// CORRECT: typed variant connects
+asserts(df::exists_with_type<Key, Value>(&self.id, key));
+let val = df::borrow<Key, Value>(&self.id, key);
+```
+Same for bags: use `bag::contains_with_type<K, V>` not `bag::contains<K>`.
+
+## Early return guards
+When the implementation has `if (x == 0) { return }`, asserts for code after the guard must be conditional:
+```move
+fun process_spec(a: u64, b: u64) {
+    if (a != 0) {
+        asserts(b.to_int().div(a.to_int()).lte(std::u64::max_value!().to_int()));
+    };
+    module::process(a, b);
+}
+```
+
+## Conditional ensures
+Use `if (condition) { ensures(...) }` for branch-specific postconditions:
+```move
+// Idempotency: when already up-to-date, nothing changes
+if (forall!<TypeName>(|t| borrow_index_matches(*t, old_debts, market))) {
+    ensures(forall!<TypeName>(|t| debt_unchanged(*t, old_debts, new_debts)));
+};
+```
+
+---
+
+# Pure Functions
+
+## Basics
+Mark with `#[ext(pure)]`. Makes functions usable in spec expressions.
+
+## `test_only` vs `spec_only` for helpers
+- `#[test_only, ext(pure)]` — add to **implementation modules** for private field accessors. Visible in tests AND specs. This is the standard way to expose private struct fields to specs.
+- `#[spec_only, ext(pure)]` — add to **spec modules** for spec-only helpers (predicates, computations). Visible only to the prover. Cannot be placed in implementation modules.
+
+## Accessor specs make `$pure` opaque
+When a getter function (e.g., `get_field()`) has a spec (even `skip`), its `$pure` Boogie function becomes **uninterpreted** (no `{:inline}` body). Without a spec, `$pure` gets `{:inline}` with direct field access. This means the prover can't connect `get_field(result)` to `result.field_name`.
+
+**Fix**: Move getter specs into a separate spec module file. Don't include that module from specs that need the getters' `$pure` to be inline.
+
+## Functions that are NOT pure
+- `wit_table::borrow` — use `old_bs.get_table().borrow(t)` instead (`get_table` is `#[test_only, ext(pure)]`, `table::borrow` is built-in pure)
+- `obligation.collateral_types()` / `obligation.debt_types()` — call `wit_table::keys` which has branching. Pass vector as parameter instead.
+- Functions with loops cannot be `ext(pure)` (branching is fine)
+- An `#[ext(pure)]` function cannot call a function that has a loop invariant attached (even if that callee is itself marked `ext(pure)`). The loop-invariant function must be called from non-pure code; expose the post-loop result to specs via a different route.
+
+---
+
+# Include & Opacity Mechanism
+
+## What `include` does
+`include` tells the prover to pull in specs from another module and use them as **opaque abstractions** for their target functions.
+
+Two levels:
+- **Module-level**: `#[spec_only(include = specs::foo_specs)]` on a module — all specs in `foo_specs` are included for every spec in this module.
+- **Function-level**: `#[spec(prove, include = specs::foo_specs::bar_spec)]` on a spec — only `bar_spec` is included for this spec.
+
+## Why it matters
+Without `include`, a spec from another module is **not known** to the prover. The target function's body is inlined directly — the prover sees the full implementation. This can be slow (Z3 expands everything) or necessary (if you need implementation details).
+
+With `include`, the included spec's target function becomes **opaque**: the prover havoces the call's return values and assumes the spec's `ensures` postconditions. The implementation body is not seen. This is faster (postconditions are simpler than full implementations) but requires the postconditions to be strong enough.
+
+## The opacity rule
+A callee is opaque when ALL of these hold:
+1. The callee has a spec (with or without `prove`)
+2. That spec is `include`d in the verifying module/function
+3. The spec does NOT have `no_opaque`
+
+Otherwise the callee's implementation is **inlined** (transparent).
+
+## Performance impact
+Critical for complex math. Example: without include, Z3 tries to connect bitvector arithmetic with Q32 pure functions (times out). With include, Z3 uses Q32 postconditions directly (2s vs timeout).
+
+---
+
+# Loop Invariants
+
+## Bool pattern
+```move
+#[spec_only(loop_inv(target = my_spec))]
+#[ext(no_abort)]
+fun loop_inv(i: u64, n: u64, sum: u128): bool {
+    i <= n && sum == (i as u128) * ((i as u128) + 1) / 2
+}
+```
+
+## Void pattern (with ensures)
+```move
+#[spec_only(loop_inv(target = my_spec))]
+#[ext(no_abort)]
+fun loop_inv(i: u64, n: u64, s: u128) {
+    ensures(i <= n);
+    ensures(s == (i as u128) * ((i as u128) + 1) / 2);
+}
+```
+
+Void loop invariants use `ensures` for each condition instead of returning a single `bool` with conditions joined by `&&`. This is more flexible — each condition is a separate assertion, so failure messages pinpoint which condition broke. Cannot mix: a bool-returning loop invariant must NOT use `ensures` (this is a compile error).
+
+- Parameters must match loop variables exactly
+- For multiple loops in one function, use `label = N` (0-indexed)
+
+## Old state with `__old_` prefix
+For values captured before the loop, prefix the parameter name with `__old_`:
+```move
+#[spec_only(loop_inv(target = my_spec))]
+#[ext(no_abort)]
+fun loop_inv(market: &Market, __old_market: &Market, i: u64): bool {
+    // market is current value, __old_market is value at loop entry
+    market.total_debt() >= __old_market.total_debt()
+}
+```
+- Use `&T` not `&mut T` for mutable references in loop invariant parameters
+
+## The complete loop invariant chain
+For loop specs with opaque callees, every link must be present:
+
+1. **`requires`** on the outer spec (precondition assumed)
+2. **Loop invariant holds on entry** (prover checks)
+3. **Callee's `requires` are satisfied** by loop invariant (prover checks)
+4. **Callee's `ensures` provide properties back** (opaque spec assumed)
+5. **Loop invariant preserved after body** (prover checks)
+6. **Outer `ensures` follow** from loop invariant after loop exit (prover checks)
+
+If any link is missing, verification fails.
+
+## Frame conditions for callees
+Opaque callee specs must explicitly `ensures` every property the loop invariant depends on. Nothing is assumed preserved:
+```move
+ensures(vault.get_vault_paused() == old_vault.get_vault_paused());
+ensures(vault.get_vault_rate() == old_rate);
+ensures(vault.get_withdrawal_queue().len() == old_vault.get_withdrawal_queue().len() - 1);
+```
+
+## Include and loop invariants interaction
+When including callee specs with `requires` preconditions about unconstrained state, `_Assume` mode can't establish those `requires` after havoc. Fix: remove the `include` (callee gets inlined in `_Check`, and its `requires` aren't demanded in `_Assume`).
+
+## `all!`/`sum_map!` in loop invariants
+Using `all!`/`sum_map!` wrappers in loop invariants causes `_Assume` regression (Z3 timeout). Wrappers work fine in spec `requires`/`ensures` — only keep inline expressions in loop invariants.
+
+## Loop havoc
+Boogie havoces all mutable variables modified in the loop body. After havoc, the prover only knows what the loop invariant states — all other relationships are lost.
+
+**Havoced:** all local mutable variables modified in the loop.
+**Not havoced:** immutable references (`&T`), values not modified in the loop, `__old_` snapshots.
+
+If an abort guard inside the loop depends on a relationship between a havoced variable and an unhavoced one, the prover can't verify it without a loop invariant that re-establishes the relationship.
+
+Example — semantically safe but unprovable without invariant:
+```move
+let keys = vec_map::keys(&map);
+while (keys.length() > 0) {
+    let key = keys.pop_back();       // keys is havoced
+    let val = vec_map::get(&map, &key);  // aborts if key not in map
+    // prover lost the knowledge that keys came from vec_map::keys(&map)
+}
+```
+
+## Safe-up-to-i invariant (asserts-completeness across a loop)
+When a function with a loop has a function-level `asserts`, the prover checks two directions:
+- **`_Check`**: under `asserts`, the body never aborts.
+- **`_Assume`**: when `!asserts`, the function MUST abort.
+
+`_Assume` is the subtle one — the loop is summarized by one symbolic body iteration, so the invariant must encode enough to derive a contradiction at loop exit when `!asserts`. Diagnostic: `prover::ensures does not hold` pointing at the `asserts` line in a function with a loop.
+
+The fix is the **safe-up-to-i invariant**: a clause that is **vacuous at iteration 0** and **collapses to the asserts at loop exit**. As the loop runs, it carries "the per-iteration safety condition has held for all completed iterations".
+
+For a forall asserts, use a `j >= i` guard:
+```move
+asserts(forall!(|j| safe(*j, v)));
+
+invariant!(|| {
+    ensures(i <= v.length());
+    ensures(forall!(|j| j >= i || safe(*j, v)));   // safe-up-to-i
+});
+```
+At `i = 0` the forall is vacuous; at `i = v.length()` it equals the asserts and contradicts `!asserts`, so the prover concludes the loop must have aborted.
+
+For a scalar asserts (e.g. `asserts(n <= 100)` with body `assert!(i < 100)`), the safe-up-to-i analog is just a scalar bound:
+```move
+ensures(i <= 100);   // vacuous at i=0; equals asserts at i=n
+```
+
+For mutating quantified state, apply the guard to a cloned snapshot (`old_v`), and add a separate `element_state` invariant relating current `v` to `old_v`:
+```move
+let old_v = clone!(v);
+invariant!(|| {
+    ensures(forall!(|j| element_state(*j, i, v, old_v)));
+    ensures(forall!(|j| j >= i || safe(*j, old_v)));   // safe-up-to-i on the stable witness
+});
+```
+
+For nested loops, express the outer asserts as a forall over the outer iteration index and accumulate the safe-up-to-i form in the outer invariant.
+
+Pitfall: writing `forall!(|j| safe(*j, v))` (no guard) in the invariant. That's exactly the asserts; under `!asserts` it cannot hold on loop entry because nothing abort-able runs before the loop. The `j >= i` guard is what splits the obligation across iterations.
+
+---
+
+# Quantifiers & Lambdas
+
+## Lambda syntax
+The lambda MUST be a single `#[ext(pure)]` function call — `|t| f(*t, ...)`. Complex block expressions (`|t| { ... }`) are rejected:
+> "Invalid quantifier macro pattern: expected a lambda function, but found an inlined expression"
+
+## `forall!` / `exists!` quantifier variable type
+The Boogie quantifier variable type is the **first parameter** of the helper function:
+```move
+// x has type TypeName in the Boogie quantifier
+fun f(t: TypeName, old_bs: &WitTable, new_bs: &WitTable): bool { ... }
+forall!<TypeName>(|t| f(*t, old_bs, new_bs))
+```
+For `all!`/`any!` (vector-based), the quantifier variable is always `int` (an index into the vector).
+
+## Lambda parameter must not be used as a function argument
+The lambda parameter cannot be passed directly to external function calls:
+```move
+// BROKEN: "lambda parameter is used externally"
+exists!<u64>(|j| helper(*j, i, u[*j], v[i]))
+```
+
+**Fix**: Wrap in an `#[ext(pure)]` helper function that does the external calls:
+```move
+#[spec_only, ext(pure)]
+fun request_owner_has_account(r: &Request, vault: &Vault): bool {
+    vault.has_account(r.owner())
+}
+all!(&requests, |r| request_owner_has_account(r, vault))
+```
+
+Note: `#[ext(pure)]` functions can call non-pure functions (e.g., `vector::borrow`, `table::borrow`) as long as:
+- No mutable references are involved
+- Aborts are guarded (e.g., `borrow` is preceded by a `contains` check)
+
+---
+
+# Speed & Optimization
+
+## `uninterpreted` functions — the biggest speedup
+```move
+#[spec(prove, target = ..., uninterpreted = module::pure_function)]
+```
+Strips body definition so Z3 doesn't expand pure functions. Typical speedup: **300s+ to 5s**.
+
+Requires the function to be `#[ext(pure)]`.
+
+**Caveat**: If the struct is mutated between the `requires` and the point where the uninterpreted function is evaluated (e.g., loop entry after a field mutation), the prover can't tell the function would return the same value. Don't mark a function uninterpreted if its input struct changes between pre/post states.
+
+### Layered proof strategy
+
+| Layer | What | How |
+|-------|------|-----|
+| 0 | Leaf functions | Prove with full expansion |
+| 1 | Helper wrappers | Prove with leaf uninterpreted |
+| 2 | Mid-level functions | Prove with wrappers uninterpreted |
+| 3 | Top-level evaluators | Prove with everything below uninterpreted |
+
+## `extra_bpl` for Boogie-level axioms
+Provide Boogie-level axioms the int encoding cannot derive itself. The file can be wired per-spec (`extra_bpl = b"file.bpl"` in the `#[spec]` attribute) or **project-wide** as `specs/prelude_extra.bpl` next to `Move.toml` — sui-prover auto-loads `prelude_extra.bpl` from the package root.
+
+This is **the workhorse for bitwise-heavy code that should NOT escape to `specs-bv/`** — masking, XOR-as-complement, OR with the sign bit, sign-bit extraction via shift, and the u8 truth table feeding the signed-overflow detector. Reach for these axioms FIRST; the BV package is the fallback for the genuinely solver-hostile cases (ripple-carry adder, arithmetic right shift).
+
+### Canonical `prelude_extra.bpl` for two's-complement / bitmask code
+
+The following set covers `(x ^ MAX_uN)`, `(x | 2^(W-1))`, `(x & LO_MASK)`, `(x & HI_MASK)`, `(x >> (W-1)) as u8`, and the `u8` AND truth table needed by `(sign(a) & sign(b) & u8_neg(sign(sum)))`-style signed-overflow detectors. Copy verbatim into `specs/prelude_extra.bpl`; trim widths you don't use.
+
+```boogie
+// ----- XOR with the type's all-ones mask = arithmetic complement
+axiom (forall x: int :: {$xorInt'u8'(x, $MAX_U8)}    $xorInt'u8'(x, $MAX_U8)    == $MAX_U8    - x);
+axiom (forall x: int :: {$xorInt'u32'(x, $MAX_U32)}  $xorInt'u32'(x, $MAX_U32)  == $MAX_U32   - x);
+axiom (forall x: int :: {$xorInt'u64'(x, $MAX_U64)}  $xorInt'u64'(x, $MAX_U64)  == $MAX_U64   - x);
+axiom (forall x: int :: {$xorInt'u128'(x, $MAX_U128)} $xorInt'u128'(x, $MAX_U128) == $MAX_U128 - x);
+
+// ----- OR with the sign-bit constant = addition when the input lacks that bit
+const $POW_TWO_31:  int;  axiom $POW_TWO_31  == 2147483648;                               // 2^31
+const $POW_TWO_63:  int;  axiom $POW_TWO_63  == 9223372036854775808;                      // 2^63
+const $TWO_POW_127: int;  axiom $TWO_POW_127 == 170141183460469231731687303715884105728;  // 2^127
+
+axiom (forall x: int :: {$orInt'u32'(x, $POW_TWO_31)}
+    $orInt'u32'(x, $POW_TWO_31)  == if x < $POW_TWO_31  then x + $POW_TWO_31  else x);
+axiom (forall x: int :: {$orInt'u64'(x, $POW_TWO_63)}
+    $orInt'u64'(x, $POW_TWO_63)  == if x < $POW_TWO_63  then x + $POW_TWO_63  else x);
+axiom (forall x: int :: {$orInt'u128'(x, $TWO_POW_127)}
+    $orInt'u128'(x, $TWO_POW_127) == if x < $TWO_POW_127 then x + $TWO_POW_127 else x);
+
+// ----- AND with the LO/HI half-masks = mod / divmod by the width's half-power
+const $LO_64_MASK: int;  axiom $LO_64_MASK == 18446744073709551615;                       // 2^64 - 1
+const $HI_64_MASK: int;  axiom $HI_64_MASK == 340282366920938463444927863358058659840;    // 2^128 - 2^64
+const $TWO_POW_64: int;  axiom $TWO_POW_64 == 18446744073709551616;                       // 2^64
+
+axiom (forall x: int :: {$andInt'u128'(x, $LO_64_MASK)} $andInt'u128'(x, $LO_64_MASK) == x mod $TWO_POW_64);
+axiom (forall x: int :: {$andInt'u128'(x, $HI_64_MASK)} $andInt'u128'(x, $HI_64_MASK) == (x div $TWO_POW_64) * $TWO_POW_64);
+
+const $LO_128_MASK: int; axiom $LO_128_MASK == 340282366920938463463374607431768211455;                                          // 2^128 - 1
+const $HI_128_MASK: int; axiom $HI_128_MASK == 115792089237316195423570985008687907852929702298719625575994209400481361428480;  // 2^256 - 2^128
+const $TWO_POW_128: int; axiom $TWO_POW_128 == 340282366920938463463374607431768211456;                                          // 2^128
+
+axiom (forall x: int :: {$andInt'u256'(x, $LO_128_MASK)} $andInt'u256'(x, $LO_128_MASK) == x mod $TWO_POW_128);
+axiom (forall x: int :: {$andInt'u256'(x, $HI_128_MASK)} $andInt'u256'(x, $HI_128_MASK) == (x div $TWO_POW_128) * $TWO_POW_128);
+
+// ----- Right shift by (W-1) = div by 2^(W-1) (sign extraction `(v.bits >> 127) as u8`)
+axiom (forall x: int :: {$shr(x, 127)} $shr(x, 127) == x div $TWO_POW_127);
+axiom (forall x: int :: {$shr(x, 128)} $shr(x, 128) == x div $TWO_POW_128);
+
+// ----- u8 AND truth table for {0, 1, 254, 255}
+// Covers (sign(a) & sign(b) & u8_neg(sign(sum))) + (u8_neg(sign(a)) & u8_neg(sign(b)) & sign(sum))
+// where sign() returns 0 or 1 and u8_neg() returns 254 or 255.
+axiom ($andInt'u8'(0,   0) == 0);     axiom ($andInt'u8'(0,   1) == 0);
+axiom ($andInt'u8'(0, 254) == 0);     axiom ($andInt'u8'(0, 255) == 0);
+axiom ($andInt'u8'(1,   0) == 0);     axiom ($andInt'u8'(1,   1) == 1);
+axiom ($andInt'u8'(1, 254) == 0);     axiom ($andInt'u8'(1, 255) == 1);
+axiom ($andInt'u8'(254,   0) == 0);   axiom ($andInt'u8'(254,   1) == 0);
+axiom ($andInt'u8'(254, 254) == 254); axiom ($andInt'u8'(254, 255) == 254);
+axiom ($andInt'u8'(255,   0) == 0);   axiom ($andInt'u8'(255,   1) == 1);
+axiom ($andInt'u8'(255, 254) == 254); axiom ($andInt'u8'(255, 255) == 255);
+```
+
+**Mangled-name pattern.** Boogie's bitwise primitives are mangled by type: `$xorInt'uN'`, `$orInt'uN'`, `$andInt'uN'`, `$shl(x, k)`, `$shr(x, k)`. The `'uN'` tag matches the Move operand type at the call site — `(n & LO_64_MASK)` on a `u128` becomes `$andInt'u128'(n, LO_64_MASK)` in Boogie, so the matching axiom must target `$andInt'u128'`.
+
+**Triggers matter.** The `{...}` annotation on each `forall` is the trigger pattern; Z3 instantiates the axiom every time it sees a matching term. Without triggers, Z3 won't find the axiom at the right place. With triggers, you may need `EAGER_THRESHOLD=100` on hot specs (see `boogie_opt` recipes below).
+
+**Coverage.** Once this prelude is in `specs/prelude_extra.bpl`, the int encoding can discharge:
+- `(sum & LO_64_MASK) as u64 == sum mod 2^64` (wrap-around in `math_uN::overflowing_*` / `carry_add`)
+- `(n & HI_64_MASK) >> 64 == n / 2^64` (hi/lo half extraction)
+- `(v.bits >> (W-1)) as u8 ∈ {0, 1}` (sign extraction)
+- `u32_neg(v) == MAX_U32 - v`, `u8_neg(v) == 255 - v` (XOR complement helpers)
+- `(u32_neg(v) + 1) | (1 << 31)` (the `neg_from` two's-complement constructor)
+- `(sign(a) & sign(b) & u8_neg(sign(sum))) + ...` (the branchless signed-overflow detector used by `add` / `sub`)
+
+What it does NOT cover: ripple-carry adder loops (no loop invariant in axioms), arithmetic right shift on signed (needs `native fun ashr` + Boogie procedure binding), and nonlinear bv-wide multiplication. Those go to `specs-bv/`.
+
+### Per-spec extra_bpl
+
+For domain-specific axioms (e.g. a CLMM math helper), use the attribute form:
+```move
+#[spec(prove, target = ..., extra_bpl = b"clmm_math.bpl")]
+```
+The `.bpl` file lives alongside spec sources and is loaded only for this spec — useful for axioms you don't want global.
+
+## `boogie_opt` reference
+
+| Option | What it does |
+|--------|-------------|
+| `vcsSplitOnEveryAssert` | Split verification conditions on every assert |
+| `vcsMaxKeepGoingSplits:N` | Enable path splitting (N >= 2 to activate; no splitting without it) |
+| `{:isolate_paths}` | Function-level path isolation: every `ensures`/`asserts` in the spec gets `{:isolate "paths"}`. Pair with `boogie_allow_path_isolation()` inside the body to mark which `if` branches to isolate |
+| `useArrayAxioms` | Use array axioms (helps with table access and loops) |
+| `vcsCores:1` | Single-core for deterministic behavior |
+| `prune:1` | Drop unreachable functions (per-struct/per-table `$IsEqual` etc.) before SMT emission. May help by deleting unused functions; may also hurt if a proof relied on a now-pruned function. A/B before keeping. |
+| `proverOpt:O:smt.MBQI=false` | Disable model-based quantifier instantiation |
+| `proverOpt:O:smt.QI.EAGER_THRESHOLD=N` | Tune eager quantifier instantiation threshold |
+| `proverOpt:O:smt.QI.LAZY_THRESHOLD=N` | Tune lazy quantifier instantiation threshold |
+| `proverOpt:O:smt.random_seed=N` | Try different seeds when proof is seed-sensitive |
+
+Combine multiple: `boogie_opt = b"vcsSplitOnEveryAssert useArrayAxioms"`
+
+**Recommended combo for `forall!`/iterator specs:**
+```move
+boogie_opt = b"vcsSplitOnEveryAssert useArrayAxioms proverOpt:O:smt.MBQI=false"
+```
+`smt.MBQI=false` is essential for `forall!` to work reliably.
+
+### Recipes for the patterns the prelude axioms drive
+
+When `specs/prelude_extra.bpl` is loaded, certain spec shapes need Z3 nudged to actually use the axioms. The hot recipes:
+
+| Recipe | Where to use it |
+|---|---|
+| `boogie_opt = b"vcsSplitOnEveryAssert vcsFinalAssertTimeout:300"` | Chain-arithmetic with both an abort precondition and a value postcondition under one spec — `iN::mul`, similar wide multiplications. The split decouples the abort dispatch from the postcondition dispatch. |
+| `boogie_opt = b"vcsSplitOnEveryAssert proverOpt:O:smt.QI.EAGER_THRESHOLD=100"` | `iN::shl` and other shift specs whose ensures invoke the `Integer.shl(...).to_uN().to_signed_int()` chain. Eager instantiation forces the axiom triggers to fire before Z3 gives up. |
+| `boogie_opt = b"proverOpt:O:smt.QI.EAGER_THRESHOLD=100"` | Mask / hi-lo extractors (`math_u128::lo`, `from_lo_hi`). The `$andInt'u128'(x, LO_64_MASK) == x mod TWO_POW_64` trigger needs eager firing because the spec body is short and Z3 otherwise defers. |
+| `boogie_opt = b"vcsSplitOnEveryAssert useArrayAxioms proverOpt:O:smt.MBQI=false"` | `forall!` / iterator specs (unchanged from above). |
+
+**Diagnosis cue.** If `_Check` times out on a spec that uses the prelude axioms, raise `EAGER_THRESHOLD` first (`100`, then `200`). If the spec has multiple assertions, add `vcsSplitOnEveryAssert`. Combine only when both fail individually.
+
+CLI alternative: `--split-paths <N>` adds `vcsSplitOnEveryAssert` + `verifySeparately` + `vcsMaxKeepGoingSplits:N` globally.
+
+## Bitvector encoding (`--no-bv-int-encoding`)
+
+The default integer encoding loses precision on bitwise ops (`&`, `|`, `^`, `<<`, `>>`) — Z3 treats them as uninterpreted and times out. The `--no-bv-int-encoding` flag switches the encoding to SMT bit-vectors so those ops are native. **Despite the name, it turns BV encoding ON.** It is invocation-wide and slower for plain arithmetic, so apply it only to the few specs that need it via a **sibling package**.
+
+### Reach for it when
+
+**Before reaching for BV, try `specs/prelude_extra.bpl` first.** A 60-line Boogie axiom file (XOR-as-complement, OR-with-sign-bit, AND-with-mask, shr-by-(W-1), u8 AND truth table — see the canonical set under `extra_bpl`) makes the int encoding handle ~80% of bitwise constructs: bitmask wrap-around `(x & MASK) as uN`, sign extraction `(v.bits >> (W-1)) as u8`, `neg_from`'s OR-with-sign-bit, the branchless signed-overflow detector in `add` / `sub`, and the hi/lo half extractors. **These all stay in `specs/`** — BV is overkill for them.
+
+The genuine BV cases are narrow:
+
+- The function is a **ripple-carry adder** — `while (carry != 0) { sum ^= carry; carry = (a & b) << 1; }`. The loop invariant `(num1 + num2) mod 2^w == (sum + carry) mod 2^w` (cast both sides up by one width) is a per-step relation, not an algebraic fact you can pre-axiomatize. **No prelude axiom rescues this — go BV.**
+- The function is **arithmetic right shift** on a two's-complement value (`shr` on `IN`) — int encoding has no `ashr` semantics. Even with axioms, the OR-with-mask in the signed branch can't be cleanly tied to a mathematical `Integer.shr` without a native binding. **Go BV with `native fun ashr` backed by Boogie's `$AShr'BvN'`.**
+- A spec is dominated by bitwise mixing and the int-encoded run still times out **after the prelude axioms are in place**.
+
+If the property is algebraic (overflow conditions, comparisons, conversions, mul/div), **stay in the default `specs/` package** — those are easier to write, compose with the rest of the suite, and prove faster under int encoding.
+
+### Set it up without asking
+
+When you are running under "prove this project" (or any spec-improvement loop) and one of the symptoms above fires, set up `specs-bv/` and port the symptomatic spec **without prompting the user**. The decision to use bitvector encoding for genuinely bitwise code is a tool selection inside an authorized task, not a separate scope question. Follow the playbook below end to end and report results. Stop to ask only when (a) a `prelude_extra.bpl` Boogie glue (`$AShr'BvN'`, custom intrinsic) is required, or (b) the BV port itself fails after a real attempt with a correctly placed loop invariant.
+
+When ports run into Z3 limits — chiefly **nonlinear multiplication on wide bit-vectors** (e.g. `bv128 = bv64 * bv64`) and **long signed-op chains that compound multiple bitwise primitives** — prove the load-bearing core (`wrapping_add`, `sign`, `or`, `and`, `shl`, masked extractors) and leave the dependent operations as `ignore_abort` in `specs/`, with a comment naming the limit. That is the documented limitation, not a gap.
+
+### Setup playbook
+
+1. **Create a sibling package** `specs-bv/` next to `specs/`:
+   ```
+   project/
+     sources/                     <- main package
+     specs/                       <- int-encoded specs (most things)
+     specs-bv/
+       Move.toml                  <- standalone, no dep on the main package
+       sources/<module>.move      <- one Move file per source module
+       prelude_extra.bpl          <- optional, for native fn glue (e.g. ashr)
+   ```
+   `Move.toml`:
+   ```toml
+   [package]
+   name = "<Project>SpecsBV"
+   edition = "2024.beta"
+   [addresses]
+   <project>_specs_bv = "0x0"
+   ```
+
+2. **In the BV package, redeclare locally** the struct and the source function you're proving. The BV package does **not** depend on the main package — it gives the bitvector encoding a clean view of just what's needed. Strip the type to its `bits` field:
+   ```move
+   public struct I32 has copy, drop, store { bits: u32 }
+   ```
+
+3. **In the main `specs/` package, declare the BV-bound spec without `prove`** so the int-encoded run skips it, with a comment pointing at the sibling:
+   ```move
+   /*
+    ⚠️ Proved in a separate package as it requires a custom prover configuration.
+   */
+   #[spec(target = wrapping_add)]   // no `prove`
+   public fun wrapping_add_spec(num1: I32, num2: I32): I32 { ... }
+   ```
+
+4. **Run both packages, with different flags:**
+   ```bash
+   cd specs    && sui-prover
+   cd specs-bv && sui-prover --no-bv-int-encoding
+   ```
+
+### Writing rules for BV specs
+
+- Phrase everything on `.bits`, not on `to_int()` / `Integer`. The whole point is to stay in bit-vector land.
+- Wrap-arithmetic post-condition pattern: cast up by one width, add, mod by `2^w`, cast back.
+  ```move
+  ensures(result.bits == (((num1.bits as u64) + (num2.bits as u64)) % (1 << 32)) as u32);
+  ```
+- For a ripple-carry adder loop, attach an `invariant!` that equates `(num1 + num2) mod 2^w` with `(sum + carry) mod 2^w` (cast both sides up by one width to express the addition without overflow):
+  ```move
+  invariant!(|| {
+      ensures(
+          ((num1.bits as u64) + (num2.bits as u64)) % (1 << 32)
+              == ((sum    as u64) + (carry    as u64)) % (1 << 32),
+      );
+  });
+  ```
+- For arithmetic right shift, declare a native intrinsic in Move and back it with Boogie's `$AShr'BvN'` in `prelude_extra.bpl`. The Boogie procedure name is `$<address>_<module>_<function>`; for `0x0` it's `$0_<module>_<function>`:
+  ```move
+  public native fun ashr(x: u32, y: u32): u32;
+
+  #[spec(prove, target = shr)]
+  public fun shr_spec(v: I32, shift: u8): I32 {
+      asserts(shift < 32);
+      let result = shr(v, shift);
+      ensures(result.bits == ashr(v.bits, shift as u32));
+      result
+  }
+  ```
+  ```boogie
+  procedure {:inline 1} $0_i32_ashr($t0: bv32, $t1: bv32) returns ($ret0: bv32) {
+    $ret0 := $AShr'Bv32'($t0, $t1);
+  }
+  ```
+
+### What stays in `specs/`
+
+Everything else: overflow predicates (`add`, `sub`, `mul`, `div`), comparisons, type conversions, `cmp`/`eq`, `or`/`and` over short widths, abort conditions stated against `Integer`. Int encoding is the right model whenever the proof can be discharged algebraically.
+
+
+## User-controlled path splitting (`{:isolate_paths}` + `boogie_allow_path_isolation()`)
+A key lever for handling timeouts. Splits the VC on **paths** — orthogonal to `vcsSplitOnEveryAssert`, which splits on **boogie assert checks** — and the two compose: using `vcsSplitOnEveryAssert` together with `{:isolate_paths}` yields one VC per (assert × path) pair, each much simpler than the unsplit VC.
+
+Two-part pattern:
+
+1. On the spec, enable function-level path isolation:
+   ```move
+   #[spec(prove, boogie_opt = b"{:isolate_paths}")]
+   ```
+   Every `ensures`/`asserts` in the spec body gets `{:isolate "paths"}` on its Boogie assert.
+
+2. Inside the function body (spec or implementation), mark the `if`s you want split by calling `boogie_allow_path_isolation()` immediately before them:
+   ```move
+   boogie_allow_path_isolation();
+   if (cond) { ... } else { ... };
+   ```
+   Each marked `if` is annotated `{:allow_path_isolation}`, so Boogie forks the VC on its branches.
+
+Combine with `vcsSplitOnEveryAssert` when one alone isn't enough:
+```move
+#[spec(prove, boogie_opt = b"vcsSplitOnEveryAssert {:isolate_paths}")]
+```
+
+When to reach for it:
+- A spec times out and `vcsSplitOnEveryAssert` alone doesn't help.
+- The timeout concentrates around a specific branching structure (match/if-else ladder, conditional update block).
+- You want targeted splits at specific `if`s rather than the global `--split-paths` hammer.
+
+`boogie_split_here()` / `boogie_focus()` are statement-level cousins — cut the VC at a specific program point (`split_here`) or split "paths through here" vs "not" (`focus`). Reach for them when the problem isn't a branch but a specific statement you want to isolate.
+
+## Z3 non-determinism
+Z3 is non-deterministic — the same spec can fail in 7s or pass in 300s across runs. Use generous timeouts (300s+) for complex specs with loops.
+
+---
+
+# Advanced Patterns
+
+## Lemma functions for injecting proof hints
+Create empty-bodied functions with specs to inject facts at specific program points:
+```move
+fun lemma_div_defined<T,R>(vault: &Vault<T,R>, shares: u64) {}
+```
+With a spec that has `requires` and `ensures`. Because the body is empty, the spec is trivially satisfiable. Call the lemma right before the point where the prover needs the fact.
+
+- **Source code lemma** (in main module): Can be called mid-function to inject hints at exact program points.
+- **Spec-only lemma**: Keeps source clean but can only be called from spec code.
+
+## Ghost state for tracking side effects
+For functions using `transfer::public_transfer` or other side-effecting operations:
+```move
+ghost::declare_global_mut<SpecTransferAddress, address>();
+ghost::declare_global_mut<SpecTransferAddressExists, bool>();
+```
+
+## Wrapping arithmetic in specs
+For operations that intentionally wrap (e.g., reward calculations), use spec-only `w_add`/`w_sub` helpers.
+
+## Two's-complement signed integers in the int encoding
+
+When a project has a hand-rolled signed integer (`I32 { bits: u32 }`, `I64 { bits: u64 }`, `I128 { bits: u128 }`), the canonical spec language is `Integer` via two extension fns: a `to_int` that interprets the bit pattern as two's-complement, and a `to_uN` that reverses it with implicit mod 2^W.
+
+### Spec-side `to_int` extension
+
+```move
+#[spec_only]
+fun to_int(v: I32): Integer { v.as_u32().to_signed_int() }
+#[spec_only]
+use fun to_int as I32.to_int;
+```
+
+`v.as_u32().to_signed_int()` lifts the `bits` field as a u32 then interprets it as a signed integer in `[-(2^31), 2^31 - 1]`. After the `use fun`, every spec writes `v.to_int()` and gets the mathematical signed value back. **The body must be a one-liner** so the prover can unfold it.
+
+### Canonical spec shapes for the IN family
+
+Every `IN` function has a standard postcondition shape once `to_int` is in scope. The patterns below all verify under the **int encoding** with the bitwise `prelude_extra.bpl` axioms above (XOR / OR with sign bit / AND mask / shr by W-1 / u8 AND table). Only `wrapping_add` (ripple-carry adder loop) and `shr` (arithmetic right shift) escape to `specs-bv/`.
+
+| Function | Shape |
+|---|---|
+| `zero` | `ensures(result.to_int() == 0u32.to_int())` |
+| `from_uN(v)` | `ensures(result.to_int() == v.to_signed_int())` (raw bit-pattern, may be negative) |
+| `from(v)` | `asserts(v.to_int().is_iN()); ensures(result.to_int() == v.to_int())` |
+| `neg_from(v)` | `asserts(v.to_int().neg().is_iN()); ensures(result.to_int() == v.to_int().neg())` |
+| `add` | `asserts(num1.to_int().add(num2.to_int()).is_iN()); ensures(result.to_int() == num1.to_int().add(num2.to_int()))` |
+| `sub` | `asserts(num1.to_int().sub(num2.to_int()).is_iN()); ensures(result.to_int() == num1.to_int().sub(num2.to_int()))` |
+| `mul` | `asserts(p.is_iN()); ensures(result.to_int() == p)` where `p = num1.to_int().mul(num2.to_int())`. **Needs `boogie_opt = b"vcsSplitOnEveryAssert vcsFinalAssertTimeout:300"`** to dispatch the abort + ensures conjunction. |
+| `div` (trunc semantics) | `asserts(n != 0); asserts(q.is_iN()); ensures(result.to_int() == q)` where `q = num1.to_int().div_trunc(num2.to_int())` |
+| `mod` (trunc semantics) | `asserts(n != 0); ensures(result.to_int() == v.to_int().mod_trunc(n.to_int()))` |
+| `abs` | `asserts(v.to_int().abs().is_iN()); ensures(result.to_int() == v.to_int().abs())` |
+| `abs_uN` | `ensures(result.to_int() == v.to_int().abs())` (returns unsigned; no abort) |
+| `wrapping_add` | `ensures(result.to_int() == num1.to_int().add(num2.to_int()).to_uN().to_signed_int())` — **but tag as `#[spec(target=...)]` only (no `prove`)** and prove the same shape in `specs-bv/`. |
+| `wrapping_sub` | `ensures(result.to_int() == num1.to_int().sub(num2.to_int()).to_uN().to_signed_int())` |
+| `shl` | `asserts(shift < N); ensures(result.to_int() == v.to_int().shl(shift.to_int()).to_uN().to_signed_int())`. **Needs `boogie_opt = b"vcsSplitOnEveryAssert proverOpt:O:smt.QI.EAGER_THRESHOLD=100"`.** |
+| `shr` (arithmetic) | `asserts(shift < N); ensures(result.to_int() == v.to_int().shr(shift.to_int()))` — **`#[spec(target=...)]` only**; prove in `specs-bv/` via `native fun ashr` + Boogie procedure (see Bitvector section). |
+| `sign` | `if (v.to_int().is_neg()) ensures(result == 1u8); else ensures(result == 0u8);` |
+| `is_neg` | `ensures(result == v.to_int().is_neg())` |
+| `cmp` | three-way: `if (a.lt(b)) ensures(result == 0); else if (a == b) ensures(result == 1); else ensures(result == 2);` |
+| `eq`/`lt`/`gt`/`lte`/`gte` | `ensures(result == num1.to_int().<op>(num2.to_int()))` |
+| `or`/`and` | `ensures(result.to_int() == num1.to_int().bit_or(num2.to_int()))` etc. |
+| `uN_neg(v)` (bitwise NOT helper) | `ensures(result == std::uN::max_value!() - v)` |
+| `u8_neg(v)` | `ensures(result == std::u8::max_value!() - v)` |
+
+### Why this works
+
+The signed-overflow detector in `add` / `sub` reduces to a u8 AND chain on operands in `{0, 1, 254, 255}` — exactly what the u8 truth table in `prelude_extra.bpl` axiomatizes. `sign(v)` reduces to `(v.bits >> (W-1))` — covered by the shr-by-(W-1) axiom. `neg_from` reduces to `(complement + 1) | sign_bit` — covered by the OR-with-sign-bit axiom. With the axioms present, Z3 dispatches all of them in the default int encoding.
+
+### Decision rule: int + axioms vs. BV
+
+| Symptom | Where the spec belongs |
+|---|---|
+| Bitmask + cast (`(x & MASK) as uN`) | **`specs/` with `prelude_extra.bpl`** |
+| Sign extraction (`(v.bits >> (W-1)) as u8`) | **`specs/` with `prelude_extra.bpl`** |
+| OR-with-sign-bit constructor (`neg_from`) | **`specs/` with `prelude_extra.bpl`** |
+| Signed-overflow detector (the AND chain) | **`specs/` with `prelude_extra.bpl`** |
+| Ripple-carry adder loop (`while (carry != 0) { sum ^= carry; carry = (a & b) << 1; }`) | **`specs-bv/`** (loop invariant on `(a + b) mod 2^W == (sum + carry) mod 2^W`) |
+| Arithmetic right shift on a two's-complement value (`shr` on `IN`) | **`specs-bv/`** (`native fun ashr` + Boogie procedure) |
+| `iN::wrapping_add` / `iN::shr` ensures stated in `specs/` | Use `#[spec(target = wrapping_add)]` (no `prove`) — declares the postcondition for callers, BV package discharges it |
+
+Reach for `specs-bv/` only when the symptom is on the bottom rows. Everything else is provable with axioms.
+
+## Native spec functions
+Declare functions with no Move body — their semantics are defined entirely by Boogie axioms (via `extra_bpl`):
+```move
+#[spec_only]
+public native fun is_valid_tcp(s: &String): bool;
+
+#[spec_only]
+public native fun is_disjoint_vector<T>(v: &vector<T>): bool;
+```
+Use when a property can't be expressed in Move but can be axiomatized in Boogie.
+
+## `asserts_of` for selective ignore_abort acceptance
+Reference whether another function's `asserts` conditions held:
+```move
+asserts(asserts_of(b"function_name"));
+```
+Returns a bool that's true when the named function's abort conditions were satisfied. The caller spec does NOT need to be marked `ignore_abort` — `asserts_of` lets a regular spec selectively accept a specific callee's `ignore_abort` without disabling its own abort reasoning.
+
+Supports qualified names: `b"function"`, `b"module::function"`, `b"package::module::function"`. Use a qualified form when the bare name is ambiguous across modules.
+
+---
+
+# Error Messages & Fixes
+
+| Error | Meaning | Fix |
+|-------|---------|-----|
+| "lambda parameter is used externally" | Lambda captures variable passed to external function | Wrap in `#[ext(pure)]` helper function |
+| "Function does not exist" | Running prover from wrong directory | Run from `specs/` directory |
+| "expected a lambda function, but found an inlined expression" | Complex block expression in quantifier lambda | Use single function call in lambda |
+| Timeout (300s+) | Z3 expanding too many function bodies | Add `uninterpreted` declarations; use `boogie_opt = b"vcsSplitOnEveryAssert"` |
+
+---
+
+# Helper Pure Function Patterns
+
+## 1. Single-element predicates
+For quantifier lambdas (`all!`, `any!`, `forall!`):
+```move
+#[spec_only, ext(pure)]
+public fun is_valid_collateral(ct: &TypeName, obligation: &Obligation): bool {
+    obligation.get_collaterals().contains(*ct)
+}
+// Usage: all!(types, |ct| is_valid_collateral(ct, obligation))
+```
+
+## 2. Quantifier wrappers
+Named wrappers around `all!`/`sum_map!` — these are what you mark `uninterpreted` in callers:
+```move
+#[spec_only, ext(pure)]
+public fun all_valid_collaterals(types: &vector<TypeName>, ob: &Obligation): bool {
+    all!<TypeName>(types, |ct| is_valid_collateral(ct, ob))
+}
+```
+
+## 3. Value computation helpers
+Mirror implementation logic with safe defaults (pure functions must not abort):
+```move
+#[spec_only, ext(pure)]
+public fun get_price_or_zero(oracle: &XOracle, t: TypeName): std::q32::Q32 {
+    if (oracle.prices().contains(t)) {
+        oracle.prices().borrow(t).to_q32()
+    } else { 0u64.to_q32() }
+}
+```
+
+## 4. Struct invariant predicates
+Composable validity checks — leaf → mid-level → top-level:
+```move
+#[spec_only, ext(pure)]
+public fun valid_interest_model(model: &InterestModel): bool {
+    model.base_rate().to_q32().lte(model.max_rate().to_q32())
+}
+
+#[ext(pure)]
+public fun system_inv(self: &System): bool {
+    self.pending_set().is_in_good_state()
+    && all_validators_are_ok(self.get_validators())
+}
+```
+
+## 5. State preservation predicates
+For `clone!`/old state comparisons — verify fields are unchanged or monotonically change:
+```move
+#[spec_only, ext(pure)]
+public fun accrue_debt_preserves(
+    t: TypeName, old_debts: &WitTable, new_debts: &WitTable,
+): bool {
+    if (old_debts.contains(t)) {
+        new_debts.contains(t) && {
+            let old_amount = old_debts.get_table().borrow(t).get_amount();
+            let new_amount = new_debts.get_table().borrow(t).get_amount();
+            new_amount >= old_amount
+        }
+    } else { !new_debts.contains(t) }
+}
+```
+
+## 6. Validation predicates
+Multi-field preconditions for `requires`:
+```move
+#[spec_only, ext(pure)]
+fun has_valid_price(ct: &TypeName, oracle: &XOracle, clock: &Clock): bool {
+    let prices = oracle.prices();
+    prices.contains(*ct) && {
+        let price = prices.borrow(*ct);
+        price.last_updated() == clock.timestamp_ms() / 1000
+        && price.to_q32() != 0u64.to_q32()
+    }
+}
+```
+
+## 7. Pure alternatives to non-pure functions
+When implementation functions abort (e.g., `option::borrow`), create pure equivalents:
+```move
+#[ext(pure)]
+fun is_equal_some_and_value<T>(a: &Option<T>, b: &T): bool {
+    a.is_some() && a.borrow_with_default(b) == b
+}
+```
+
+## 8. Collection access helpers
+Safe table/queue/vector access with defaults:
+```move
+#[spec_only, ext(pure)]
+public fun borrow_or_default<T: copy + drop + store>(table: &Table<K, T>, key: K): T {
+    if (table.contains(key)) { *table.borrow(key) }
+    else { default<T>() }
+}
+```
+
+## 9. Native pure functions
+BPL-backed helpers for struct field updates that can't be expressed in Move:
+```move
+#[ext(pure)]
+public native fun with_next_epoch_address(
+    self: &ValidatorInfo, addr: Option<String>,
+): &ValidatorInfo;
+```
+Requires a corresponding definition in an `extra_bpl` file.
+
+---
+
+# Verification Status Tracking
+
+Projects use `@VERIFY(stage/status)` annotations:
+
+**Stages:** STUB -> ASSERTS -> SEMANTICS -> REVIEW
+
+**Status per stage:** WIP, Issue (typically timeout), Done
+
+All three checks must pass: `_Check`, `_Assume`, `_SpecNoAbortCheck`.
+
+**Progress markers** (in spec file comments):
+
+| Marker | Meaning |
+|--------|---------|
+| 🫙 / ✅ | Empty spec |
+| ⚙️ / 🌀 | In progress |
+| ⚙️ / ✅ | Done / passing |
+| 🛡️ / ⚠️ | Issue with abort modeling |
+
+---
+
+# Known Prover Bugs
+
+## UID tracking after struct destructuring (may be fixed)
+When a function destructures a struct to extract a UID and then calls `dynamic_field::remove` on that local UID, the prover fails with:
+```
+error[E0022]: UID object type not found: 5
+```
+If still broken: skip the function — `skip` attribute does NOT help. Omit the spec entirely with a comment.
+
+# Spec Precondition
+
+Writing preconditions (`asserts` and `requires`) to cover all abort paths before calling the target function.
+
+## Core Principle
+
+**Asserts before execution** — place ALL precondition asserts BEFORE calling the target function. An assert after a function call that could abort is too late.
+
+## `asserts` vs `requires`
+
+| Keyword | What it does | When to use |
+|---------|--------------|-------------|
+| `asserts` | Verified by prover — proves these conditions cause aborts | Covering abort paths in function under test |
+| `requires` | Assumed by prover — narrows the input space | Constraining valid inputs (e.g., "only called with liquidity > 0") |
+
+Different purposes: `asserts` verifies abort behavior, `requires` defines the valid input domain the prover reasons about.
+
+## Overflow/Underflow Checks
+
+Use `.to_int()` for arbitrary precision arithmetic:
+
+```move
+// For: a + b
+asserts(a.to_int().add(b.to_int()).lte(std::u64::max_value!().to_int()));
+
+// For: a - b (underflow)
+asserts(a.to_int().gte(b.to_int()));
+
+// For: a * b
+asserts(a.to_int().mul(b.to_int()).lte(std::u64::max_value!().to_int()));
+
+// For: a * b / c (intermediate overflow)
+let result = a.to_int().mul(b.to_int()).div(c.to_int());
+asserts(result.lte(std::u64::max_value!().to_int()));
+```
+
+**Prefer direct `.to_int()` expressions** over rearranged algebraic forms:
+```move
+// PREFERRED: Direct mathematical expression
+asserts(a.to_int().mul(b.to_int()).add(HALF.to_int()).lte(max.to_int()));
+
+// AVOID: Rearranged form with special cases
+asserts(a == 0 || b == 0 || a <= (max - HALF) / b);
+```
+
+## Division
+
+Assert non-zero divisor:
+```move
+asserts(divisor != 0);
+```
+
+## Table Access
+
+Assert existence before borrow:
+```move
+asserts(table.contains(key));
+let value = table.borrow(key);
+```
+
+**Exception:** if implementation guards with `if (!table.contains) { return }`, no assert needed — the code won't abort.
+
+### `bag::contains_with_type` Pattern
+
+`bag::contains<K>` does NOT connect with `bag::borrow<K, V>` in the prover:
+```move
+// WRONG
+asserts(bag::contains(&bag, key));
+let value = bag::borrow<K, V>(&bag, key);
+
+// CORRECT
+asserts(bag::contains_with_type<K, V>(&bag, key));
+let value = bag::borrow<K, V>(&bag, key);
+```
+
+### `object_bag::contains_with_type` Pattern
+
+Same rule for `sui::object_bag::ObjectBag` — heterogeneous storage, so contains and borrow must agree on `<K, V>`. For `object_bag::add`, three asserts cover the abort sources — key-not-present (typed) and length-non-overflow:
+```move
+// WRONG — produces opaque "Error parsing module path" diagnostic
+asserts(!object_bag::contains(active, fresh_id));
+object_bag::add(active, fresh_id, proposal);
+
+// CORRECT
+asserts(!object_bag::contains_with_type<ID, Proposal<UpdateGuardian>>(active, fresh_id));
+asserts(object_bag::length(active) < std::u64::max_value!());
+object_bag::add(active, fresh_id, proposal);
+```
+
+### `df::exists_with_type` / `dof::exists_with_type` Patterns
+
+Same pattern for `sui::dynamic_field` (`df`) and `sui::dynamic_object_field` (`dof`) — use the typed `exists_with_type<K, V>` variant:
+```move
+// WRONG
+if (!df::exists_<Key>(&self.id, key)) { return };
+let val = df::borrow<Key, Value>(&self.id, key);
+
+// CORRECT
+if (!df::exists_with_type<Key, Value>(&self.id, key)) { return };
+let val = df::borrow<Key, Value>(&self.id, key);
+```
+
+`dof::exists_with_type<K, V>` works the same way for `dynamic_object_field`.
+
+## Early Return Guards
+
+When implementation has `if (x == y) { return }`, all asserts for code after the early return must be inside `if (x != y) { ... }` in the spec:
+
+```move
+// Implementation:
+// fun process(a: u64, b: u64) {
+//     if (a == 0) { return };
+//     let result = expensive_calc(b / a);  // would abort if a == 0
+// }
+
+// Spec:
+fun process_spec(a: u64, b: u64) {
+    if (a != 0) {
+        asserts(b.to_int().div(a.to_int()).lte(std::u64::max_value!().to_int()));
+    };
+    module::process(a, b);
+}
+```
+
+Use `.to_int()` subtraction in spec-level computations to avoid underflow asserts.
+
+## Branching Logic
+
+Avoid duplicating asserts across branches — use if/else as an expression:
+
+```move
+let ir_value = if (cond_a) {
+    asserts(/* branch A preconditions */);
+    val_a
+} else {
+    asserts(/* branch B preconditions */);
+    val_b
+};
+asserts(ir_value.mul(x).lte(max));  // common assertion using branch result
+```
+
+## Reusing Asserts from Proven Specs
+
+When your function calls another function with a proven spec, copy all asserts from that spec:
+
+```move
+// If inner_func_spec has:
+//   asserts(x > 0);
+//   asserts(y.to_int().mul(z.to_int()).lte(max.to_int()));
+
+// Your caller spec must include the same asserts before calling
+fun caller_spec(...) {
+    asserts(x > 0);  // from inner_func_spec
+    asserts(y.to_int().mul(z.to_int()).lte(max.to_int()));  // from inner_func_spec
+    module::caller(...);
+}
+```
+
+## `requires(forall!)` for Invariant Assumptions
+
+For complex functions operating on collections (tables, WitTables), use `requires(forall!<TypeName>(...))` to assume invariants hold on entry. This narrows the prover's search space:
+
+```move
+#[spec(prove, target = market::accrue_all_interests, ignore_abort,
+    boogie_opt = b"vcsSplitOnEveryAssert useArrayAxioms proverOpt:O:smt.MBQI=false")]
+fun accrue_all_interests_spec(self: &mut Market, now: u64) {
+    // Assume invariants hold at function entry
+    requires(forall!<TypeName>(|t| has_valid_revenue_factor(*t, self)));
+    requires(forall!<TypeName>(|t| market_reserve_solvent(*t, self)));
+
+    let old_market = clone!(self);
+    market::accrue_all_interests(self, now);
+
+    // Prove invariants still hold after the call
+    ensures(forall!<TypeName>(|t| has_valid_revenue_factor(*t, self)));
+    ensures(forall!<TypeName>(|t| market_reserve_solvent(*t, self)));
+}
+```
+
+The invariant predicates must be `#[spec_only, ext(pure)]` functions:
+
+```move
+#[spec_only, ext(pure)]
+public fun has_valid_revenue_factor(t: TypeName, market: &Market): bool {
+    if (market.interest_models().contains(t)) {
+        interest_model::revenue_factor(
+            market.interest_models().table().borrow(t)
+        ).get_raw_value() <= (1u64 << 32)
+    } else { true }
+}
+```
+
+### Pattern: Require-then-Ensure for Invariant Preservation
+
+1. `requires(forall!<T>(|t| invariant(*t, old_state)))` — assume invariant holds on entry
+2. Call the target function
+3. `ensures(forall!<T>(|t| invariant(*t, new_state)))` — prove invariant preserved
+
+This is the standard approach for user-facing functions (borrow, mint, redeem, etc.) where all call the same core functions.
+
+## `_Assume` Failures
+
+When `_Assume` reports "ensures does not hold" on conditions the prover cannot derive (like `liquidity > 0`), these are caller obligations — convert to `requires`:
+
+```move
+requires(pool.get_liquidity() > 0);
+```
+
+## Prover Timeout with Complex Assertions
+
+When `asserts` causes prover timeout, switching to `requires` may help:
+```move
+requires(total_amount.to_int().div(rate.to_int()).lte(std::u64::max_value!().to_int()));
+```
+
+This is a tradeoff: `requires` assumes the condition (no abort verification), but allows the proof to complete. Document when making this choice.
+
+## Domain-Constrained `requires` for Partial Proofs
+
+When the prover can only handle certain input domains (e.g., `pow` works for arbitrary inputs but the prover can only reason about specific cases), use `requires` to constrain to known-good domains:
+
+```move
+#[spec(prove, target = decimal::pow)]
+fun pow_spec(b: Decimal, e: u64): Decimal {
+    requires(
+        b.to_q_wad().lte(1u64.to_q_wad()) ||
+        (decimal::eq(b, decimal::from(2)) && e == 32) ||
+        (decimal::eq(b, decimal::from(10)) && e >= 6 && e <= 9),
+    );
+    let result = decimal::pow(b, e);
+    // Exact ensures for the specific cases used by the protocol
+    if (decimal::eq(b, decimal::from(2)) && e == 32) {
+        ensures(result.to_q_wad() == 4_294_967_296u64.to_q_wad());
+    };
+    result
+}
+```
+
+This is useful when:
+- The function is general but the protocol only calls it with specific arguments
+- Full verification of all inputs would timeout
+- You can provide exact ensures for the cases that matter
+
+## `requires` for Structural Invariants
+
+Use `requires` for protocol-level structural invariants not enforced by the function itself:
+
+```move
+// Structural invariant: receipts and price_feeds always grow together
+requires(old_receipt_count == old_feed_count);
+
+// Revenue factor bounded by interest model setter, not by this function
+requires(revenue_factor.get_raw_value() <= (1u64 << 32));
+```
+
+These are facts guaranteed by the protocol's design but not by abort conditions in the current function.
+
+## Containment Helper Functions
+
+Use `has_` prefix for helper functions checking table/dynamic field containment:
+```move
+#[test_only, ext(pure)]
+public fun has_reserve(storage: &Storage, asset: TypeName): bool {
+    table::contains(&storage.reserves, asset)
+}
+```
+
+Always add `#[ext(pure)]` to containment helpers.
+
+## Complete Example
+
+```move
+#[spec(prove, target=module::withdraw)]
+fun withdraw_spec(
+    vault: &mut Vault,
+    user: address,
+    amount: u64,
+) {
+    // Table access
+    asserts(vault.balances.contains(user));
+    
+    // Underflow check
+    let balance = *vault.balances.borrow(user);
+    asserts(balance.to_int().gte(amount.to_int()));
+    
+    // Nested call's asserts (if withdraw calls transfer internally)
+    asserts(amount > 0);
+    
+    // Division in fee calculation
+    let fee_divisor = vault.get_fee_divisor();
+    asserts(fee_divisor != 0);
+    asserts(amount.to_int().div(fee_divisor.to_int()).lte(std::u64::max_value!().to_int()));
+    
+    module::withdraw(vault, user, amount);
+    // ... ensures ...
+}
+```
+
+# Spec Postcondition
+
+Writing postconditions (`ensures`) to verify function behavior after execution.
+
+## Core Pattern
+
+Compute expected value, then ensure the result matches:
+
+```move
+let expected_result = a.to_int().mul(b.to_int()).div(BASE.to_int());
+asserts(expected_result.lte(std::u64::max_value!().to_int()));
+
+let result = module::function(a, b);
+ensures(result.to_int() == expected_result);
+```
+
+## Prefer Concrete Arithmetic Over Inequalities
+
+Always prefer exact equality (`==`) over loose bounds (`>=`, `<=`). If you know the computation, spell it out:
+
+```move
+// BAD: too weak, hides bugs
+ensures(balance_after >= balance_before);
+
+// GOOD: exact check
+ensures(balance_after == balance_before + deposit_amount);
+
+// BEST: both strict and bound (strict first)
+ensures(vault.get_cash().to_int() == old_cash.to_int().sub(borrow_amount.to_int()));
+ensures(vault.get_cash() <= old_vault.get_cash());
+```
+
+The strict equality catches off-by-one errors and wrong formulas. The inequality is a safety net that documents the expected direction of change.
+
+## Ensure Unchanged State
+
+Don't only verify what changed — explicitly ensure critical fields that should NOT change are preserved. This catches unintended side effects:
+
+```move
+let old_market = clone!(market);
+module::borrow(market, amount);
+
+// What changed
+ensures(vault.get_cash() == old_cash - borrow_amount);
+
+// What must NOT change
+ensures(market.get_owner() == old_market.get_owner());
+ensures(market.collateral_stats() == old_market.collateral_stats());
+ensures(market.interest_models() == old_market.interest_models());
+```
+
+Prioritize fields that are security-critical (owners, permissions, rates) and fields read by callers downstream.
+
+## Requires for `ignore_abort` Specs
+
+When a spec uses `ignore_abort`, the prover skips abort coverage but still checks ensures. Some ensures may fail on paths where the function does an early return, a key doesn't exist, or inputs are degenerate. Add `requires()` to exclude those paths:
+
+```move
+#[spec(prove, target = module::accrue, ignore_abort)]
+fun accrue_spec(market: &mut Market, key: TypeName) {
+    // Without this, ensures about table[key] fail when key is absent
+    requires(market.reserves_contains(key));
+    // Without this, division-based ensures fail on zero
+    requires(market.get_rate(key) > 0);
+
+    let old = clone!(market);
+    module::accrue(market, key);
+    ensures(market.get_index(key).to_int() >= old.get_index(key).to_int());
+}
+```
+
+Common cases needing `requires`: table key existence, non-zero denominators, non-empty vectors, flags that gate early returns.
+
+## Quantifiers for Collections
+
+When verifying properties over vectors or tables, use `forall!`/`exists!` inside ensures instead of checking elements individually:
+
+```move
+// Verify all reserves are preserved
+ensures(forall!<TypeName>(|t| reserve_preserved(*t, old_table, new_table)));
+
+// Verify a specific element exists
+ensures(exists!<u64>(|i| vector::borrow(&v, *i) == target_value));
+```
+
+Combine with named `ext(pure)` predicates for readability. See the "Monotonicity Predicates with `forall!`" section below.
+
+## Clone for Pre-Mutation State
+
+When verifying mutations, capture state BEFORE the call:
+
+```move
+use prover::prover::{ensures, asserts, requires, clone};
+
+let old_vault = clone!(vault);
+module::mutate_vault(vault);
+ensures(vault.get_balance() == old_vault.get_balance() - amount);
+ensures(vault.get_owner() == old_vault.get_owner());  // unchanged field
+```
+
+## Ensures with Table Access
+
+When ensures call getters that internally use `table.borrow`, add a contains check FIRST:
+
+```move
+storage::set_supply_cap(_, storage, asset, supply_cap);
+ensures(storage::reserves_contains(storage, asset));  // existence first
+ensures(storage::get_supply_cap_immut(storage, asset) == supply_cap);  // then access
+```
+
+## Nested Table Ensures
+
+For dynamic fields, add existence checks at each level:
+
+```move
+ensures(storage::emode_exists(storage));
+ensures(storage::emode_user_contains(storage, user));
+ensures(storage::get_emode_user_value(storage, user) == expected);
+```
+
+## Frame Problem with Opaque Specs
+
+When an opaque spec mutates a struct, the prover assumes ANY field not mentioned in `ensures` could change. Add frame `ensures` for ALL fields the caller reads after the opaque call:
+
+```move
+let share_before = pool::protocol_flash_loan_fee_share(pool);
+let price_before = pool::sqrt_price(pool);
+
+module::update_pool(pool, amount);
+
+// Frame conditions — these fields didn't change
+ensures(pool::protocol_flash_loan_fee_share(pool) == share_before);
+ensures(pool::sqrt_price(pool) == price_before);
+
+// Actual mutation
+ensures(pool::liquidity(pool) == old_liquidity + amount);
+```
+
+## Ghost Variables for Transfer Operations
+
+When a spec involves `transfer::public_transfer`:
+
+```move
+#[spec_only]
+use specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};
+#[spec_only]
+use prover::ghost;
+
+#[spec(prove, target = module::func_that_transfers)]
+fun func_spec<T>(recipient: address, ...) {
+    ghost::declare_global_mut<SpecTransferAddress, address>();
+    ghost::declare_global_mut<SpecTransferAddressExists, bool>();
+    
+    module::func_that_transfers(recipient, ...);
+    
+    // Ghost variable ensures need dereferencing
+    ensures(*ghost::global<SpecTransferAddressExists, bool>());
+    ensures(*ghost::global<SpecTransferAddress, address>() == recipient);
+}
+```
+
+## Fresh Object IDs via Ghost Variables
+
+When a target mints a new UID via `object::new(ctx)`, the prover has no built-in axiom that the new UID is fresh w.r.t. an arbitrary collection. This is the canonical situation for `propose` / `open` / `create` / `register` flows. Solve it the same way as transfer-address tracking: declare a ghost tag in the minting helper, pin it to the returned ID with an `ensures`, then `include=` the helper spec from every caller so the ghost is visible.
+
+**Step 1 — In the minting helper module, declare a ghost tag and pin it in a non-`prove` spec:**
+
+```move
+public struct SpecFreshProposalId {}
+
+#[spec(target = proposal::build_proposal)]
+fun build_proposal_spec<T: store>(...): (Proposal<T>, ID) {
+    ghost::declare_global_mut<SpecFreshProposalId, ID>();
+    let value_before = *ghost::global<SpecFreshProposalId, ID>();
+    let (proposal, proposal_id) = proposal::build_proposal<T>(...);
+    ensures(proposal_id == value_before);
+    (proposal, proposal_id)
+}
+```
+
+The spec is intentionally `#[spec(target=...)]` without `prove` — it declares a contract callers can rely on (the ghost ID equals the returned ID) without obligating the prover to prove freshness directly.
+
+**Step 2 — In each caller spec, `include=` the helper's spec and read the same ghost to express "the new id is fresh w.r.t. this collection":**
+
+```move
+#[spec(prove, target = update_guardian::propose,
+    include = proposal_specs::build_proposal_spec)]
+fun propose_spec(active: &mut ObjectBag, ...): ID {
+    ghost::declare_global_mut<SpecFreshProposalId, ID>();
+    let fresh_id = *ghost::global<SpecFreshProposalId, ID>();
+    let active_len_before = object_bag::length(active);
+
+    asserts(!object_bag::contains_with_type<ID, Proposal<UpdateGuardian>>(active, fresh_id));
+
+    let result = update_guardian::propose(active, ...);
+
+    ensures(result == fresh_id);
+    ensures(object_bag::contains_with_type<ID, Proposal<UpdateGuardian>>(active, result));
+    ensures(object_bag::length(active) == active_len_before + 1);
+    result
+}
+```
+
+**Pattern generalizes:** any helper that mints UIDs gets a `SpecFresh*Id` ghost tag; every caller `include=`s the helper's spec to read the ghost. Use distinct tags (`SpecFreshProposalId`, `SpecFreshPositionId`, `SpecFreshOrderId`) when multiple kinds of objects can be minted in the same call tree.
+
+## State-Change Ensures Triplet for Fresh-Key Inserts
+
+For any "insert at a fresh key" operation — proposal added to an `ObjectBag`, entry added to a `VecMap`, dynamic field added to a `UID` — the minimal contract is a three-part ensures. Omitting any one of these lets a buggy implementation slip past the spec:
+
+```move
+let len_before = collection.length();
+let result = action(...);
+
+ensures(result == fresh_id);                                 // 1. identity of new entry
+ensures(collection.contains_with_type<K, V>(result));         // 2. typed presence
+ensures(collection.length() == len_before + 1);               // 3. count grew by one
+```
+
+Why each piece matters:
+- **identity** anchors the returned ID to the ghost-tracked fresh ID; without it, the caller can't reason about *which* entry was added
+- **presence** catches "function returned an id but inserted nothing"
+- **count + 1** catches "function inserted two entries" or "function replaced an existing entry"
+
+The triplet generalizes across collection types:
+
+| Collection | Presence check | Length accessor |
+|------------|----------------|-----------------|
+| `ObjectBag` | `object_bag::contains_with_type<ID, V>(bag, id)` | `object_bag::length(bag)` |
+| `VecMap<K, V>` | `vec_map::contains(&map, &key)` | `vec_map::size(&map)` |
+| `Table<K, V>` | `table.contains(key)` | `table.length()` |
+| `dynamic_field` | `dynamic_field::exists_with_type<K, V>(&id, key)` | n/a (skip count) |
+| `dynamic_object_field` | `dynamic_object_field::exists_with_type<K, V>(&id, key)` | n/a (skip count) |
+
+For collections without a length accessor (dynamic fields), drop the count ensures and rely on identity + presence — but capture a sibling key's value before/after to prove unrelated entries were untouched.
+
+## Specs Without `prove` (Complex Functions)
+
+For functions too complex to fully prove, use `#[spec(target=...)]` WITHOUT `prove`. These declare contracts without proving them — callers can use them as opaque specs:
+
+```move
+#[spec(target = module::complex_aggregation)]
+fun complex_aggregation_spec(self: &mut State, now: u64) {
+    let old_state = clone!(self);
+    module::complex_aggregation(self, now);
+    ensures(self.get_field() >= old_state.get_field());
+}
+
+#[spec(target = module::complex_func)]
+fun complex_func_spec(pool: &mut Pool, ...) {
+    let sqrt_price_before = pool::sqrt_price(pool);
+    
+    let delta_x = module::complex_func(pool, ...);
+    
+    ensures(pool::sqrt_price(pool) == sqrt_price_before);
+    ensures(delta_x <= max_bound);
+}
+```
+
+Use sparingly and document why proving is infeasible. Add useful ensures about state preservation so callers can rely on them.
+
+## Monotonicity Predicates with `forall!`
+
+For axiom specs expressing state preservation across all keys:
+
+```move
+#[spec_only, ext(pure)]
+public fun field_preserved(
+    key: TypeName, 
+    old_t: &Table<TypeName, Value>, 
+    new_t: &Table<TypeName, Value>
+): bool {
+    if (old_t.contains(key)) {
+        new_t.contains(key) && {
+            let old_v = old_t.borrow(key);
+            let new_v = new_t.borrow(key);
+            new_v.get_x() == old_v.get_x()
+        }
+    } else { true }
+}
+
+// In spec:
+let old_table = clone!(&state.table);
+module::update_state(state, ...);
+ensures(forall!<TypeName>(|t| field_preserved(*t, old_table, &state.table)));
+```
+
+## Conditional Ensures
+
+Use `if (condition) { ensures(...) }` for branch-specific postconditions. The ensures only needs to hold when the condition is true:
+
+```move
+// Idempotency: when all borrow indices already match, debts are completely unchanged
+if (forall!<TypeName>(|t| borrow_index_matches(*t, old_debts, market))) {
+    ensures(forall!<TypeName>(|t| debt_unchanged(*t, old_debts, new_debts)));
+};
+```
+
+This pattern is essential for:
+- **Idempotency proofs**: proving re-execution when already up-to-date is a no-op
+- **Branch-specific guarantees**: different postconditions for different input conditions
+- **Conditional state preservation**: fields only change under certain conditions
+
+### Idempotency Example
+
+Prove that accruing interest when already current produces no changes:
+
+```move
+#[spec(prove, target = obligation::accrue_interests, ignore_abort,
+    boogie_opt = b"vcsSplitOnEveryAssert useArrayAxioms proverOpt:O:smt.MBQI=false")]
+fun accrue_interests_spec(obligation: &mut Obligation, market: &Market) {
+    let old_obligation = clone!(obligation);
+    obligation::accrue_interests(obligation, market);
+
+    let old_debts = old_obligation.get_debts();
+    let new_debts = obligation.get_debts();
+
+    // Always true: debts only increase
+    ensures(forall!<TypeName>(|t| accrue_debt_preserves(*t, old_debts, new_debts)));
+
+    // Conditional: when indices already match, nothing changes (idempotency)
+    if (forall!<TypeName>(|t| borrow_index_matches(*t, old_debts, market))) {
+        ensures(forall!<TypeName>(|t| debt_unchanged(*t, old_debts, new_debts)));
+    };
+}
+```
+
+## Capture-Before / Ensure-After for Accounting
+
+For functions that modify specific balances, capture values before and verify arithmetic after:
+
+```move
+let old_market = clone!(market);
+let (cash, debt, revenue, mcs) = market.vault().balance_sheets().borrow(key).balance_sheet();
+
+module::borrow(market, amount);
+
+let (cash_after, debt_after, revenue_after, mcs_after) =
+    market.vault().balance_sheets().borrow(key).balance_sheet();
+ensures(cash_after == cash - borrow_amount);
+ensures(debt_after >= debt + borrow_amount);
+
+// Frame conditions: unrelated fields unchanged
+ensures(market.collateral_stats() == old_market.collateral_stats());
+ensures(market.interest_models() == old_market.interest_models());
+```
+
+## Q_wad for Decimal Types (NOT a Prover Builtin)
+
+Unlike `.to_q32()` which is a prover builtin for FixedPoint32, `to_q_wad()` for Decimal types must be **defined locally in each spec file** using `use fun`:
+
+```move
+#[spec_only]
+use fun decimal_to_q_wad as Decimal.to_q_wad;
+#[spec_only]
+fun decimal_to_q_wad(d: Decimal): std::q_wad::Q_wad {
+    std::q_wad::from_raw(d.to_scaled_val().to_int())
+}
+```
+
+Then use it in ensures:
+```move
+ensures(result.to_q_wad() == a.to_q_wad().add(b.to_q_wad()));
+ensures(result.to_q_wad() == v.to_q_wad().div(100u64.to_q_wad()));
+```
+
+**Important:** Always use `Q_wad` functions in ensures for Decimal arithmetic — do NOT use Decimal functions directly in specs. The prover reviewer will flag this.
+
+## Q32 Cross-Module Helpers for FixedPoint32
+
+For types that need conversion to Q32, create `ext(pure)` helpers and import them cross-module:
+
+```move
+// In price_specs.move:
+#[spec_only, ext(pure)]
+public fun price_feed_to_q32(price_feed: &PriceFeed): std::q32::Q32 {
+    std::q32::quot(
+        price_feed.value().to_int(),
+        10u64.to_int().pow(price_feed::decimals().to_int()),
+    )
+}
+
+// In another spec file:
+#[spec_only]
+use fun specs::price_specs::price_feed_to_q32 as PriceFeed.to_q32;
+```
+
+## Ghost Specs for Native Functions
+
+For abort conditions depending on native function return values:
+
+```move
+#[spec(target = sui::tx_context::fresh_object_address)]
+fun fresh_object_address_spec(ctx: &mut TxContext): address {
+    ghost::declare_global_mut<SpecFreshObjectAddress, address>();
+    let value_before = *ghost::global<SpecFreshObjectAddress, address>();
+    let result = sui::tx_context::fresh_object_address(ctx);
+    ensures(result == value_before);
+    result
+}
+```
+
+Note: Requires removing built-in spec from `~/.move/.../sui-specs/` to avoid duplicate target error.
+
+## Private Struct Field Access
+
+Add `#[test_only]` accessor functions in the implementation:
+
+```move
+// In implementation module:
+#[test_only]
+public fun get_field_name(field: &MyStruct): String { field.name }
+
+// In spec:
+ensures(name == module::get_field_name(account_field));
+```
+
+## `spec_only, ext(pure)` Helper Functions
+
+Extract complex expected value computations into helpers:
+
+```move
+#[spec_only, ext(pure)]
+public fun compute_expected_value(a: u64, b: u64, market: &Market): std::integer::Integer {
+    a.to_int().mul(b.to_int()).div(market.get_rate().to_int())
+}
+
+#[spec_only, ext(pure)]
+public fun get_value_or_zero(table: &Table<TypeName, u64>, key: TypeName): u64 {
+    if (table.contains(key)) { *table.borrow(key) } else { 0 }
+}
+
+// Usage:
+ensures(result.to_int() == compute_expected_value(a, b, market));
+```
+
+## Complete Example
+
+```move
+#[spec(prove, target=module::swap)]
+fun swap_spec(
+    pool: &mut Pool,
+    amount_in: u64,
+    min_out: u64,
+): u64 {
+    // Capture pre-state
+    let old_reserve_x = clone!(pool.reserve_x);
+    let old_reserve_y = clone!(pool.reserve_y);
+    let fee_rate = pool.get_fee_rate();
+    
+    // Preconditions (asserts)
+    asserts(amount_in > 0);
+    asserts(old_reserve_x > 0 && old_reserve_y > 0);
+    
+    // Compute expected output
+    let fee = amount_in.to_int().mul(fee_rate.to_int()).div(10000u64.to_int());
+    let amount_after_fee = amount_in.to_int().sub(fee);
+    let expected_out = amount_after_fee.mul(old_reserve_y.to_int())
+        .div(old_reserve_x.to_int().add(amount_after_fee));
+    
+    asserts(expected_out.lte(std::u64::max_value!().to_int()));
+    
+    let result = module::swap(pool, amount_in, min_out);
+    
+    // Postconditions
+    ensures(result.to_int() == expected_out);
+    ensures(result >= min_out);
+    
+    // Invariants preserved
+    ensures(pool.reserve_x.to_int().mul(pool.reserve_y.to_int()) 
+            >= old_reserve_x.to_int().mul(old_reserve_y.to_int()));
+    
+    result
+}
+```
+
+# Spec Loop
+
+Writing loop invariants and quantifiers for functions that iterate over vectors/arrays.
+
+## When to Use
+
+Use this skill when the target function contains:
+- `while`, `for`, `loop` loops iterating over vectors
+- Index-based iteration (`let i = 0; while (i < v.length()) { ... i = i + 1; }`)
+- Any logic that processes elements of a collection
+
+## Loop Invariant Structure
+
+```move
+use prover::vector_iter::{any, any_range, map, map_range, find, find_index, count};
+
+#[spec_only(loop_inv(target=module::find_index)), ext(no_abort)]
+fun find_index_invariant(i: u64, v: &vector<T>, target: ID): bool {
+    i <= v.length() && !any_range!(v, 0, i, |x| x.id() == target)
+}
+
+#[spec(prove, target=module::find_index)]
+fun find_index_spec(v: &vector<T>, target: ID): Option<u64> {
+    let r = module::find_index(v, target);
+    ensures(r == find_index!(v, |x| x.id() == target));
+    r
+}
+```
+
+## Key Attributes
+
+| Attribute | Purpose |
+|-----------|---------|
+| `spec_only(loop_inv(target=...))` | Links invariant function to target function's loop |
+| `ext(no_abort)` | Declares invariant function doesn't abort |
+| `ext(pure)` | Function has no side effects |
+| `loop_inv(target=module::func, label=1)` | For multiple loops — label identifies which loop |
+
+## Invariant Function Signature
+
+The invariant function receives:
+1. The loop counter variable(s)
+2. All variables from the loop's scope that the invariant needs to reference
+3. **`__old_self` parameter** (automatically provided by prover): the pre-loop snapshot of mutable state
+
+Returns `bool` — must be true at loop entry and preserved by each iteration.
+
+### `__old_self` for Mutable State
+
+When the loop body mutates a `&mut` parameter, the prover automatically provides a `__old_<param>` parameter containing the pre-loop snapshot. Use this to express frame conditions and monotonicity:
+
+```move
+#[spec_only(loop_inv(target = market::accrue_all_interests)), ext(no_abort)]
+fun accrue_all_interests_loop_inv(
+    self: &Market,
+    now: u64,
+    asset_types: &vector<TypeName>,
+    i: u64,
+    n: u64,
+    __old_self: &Market,  // automatic pre-loop snapshot
+) {
+    let old_bs = __old_self.vault().balance_sheets();
+    let new_bs = self.vault().balance_sheets();
+    ensures(i <= n);
+    ensures(n == asset_types.length());
+    ensures(forall!<TypeName>(|t| accrue_preserves_type(*t, old_bs, new_bs)));
+    ensures(self.collateral_stats() == __old_self.collateral_stats());
+    ensures(self.interest_models() == __old_self.interest_models());
+}
+```
+
+**Important:** The `__old_` prefix is a naming convention the prover recognizes. Use `__old_self` for `self`, `__old_obligation` for `obligation`, etc.
+
+## Loop Invariants Use `ensures`, Not `asserts`
+
+Loop invariant functions use `ensures(...)` to state what holds at each iteration — NOT `asserts`. The prover checks that:
+1. The invariant holds at loop entry
+2. If the invariant holds before an iteration, it holds after
+
+## Parameter Names Must Match Implementation
+
+Loop invariant parameter names MUST match the implementation's local variable names exactly. The prover maps them by name, not by position.
+
+## Loop Invariants Must Repeat All Preconditions
+
+The loop invariant must re-establish all preconditions from the outer spec. If the outer spec has `asserts(all!<TypeName>(types, |ct| is_valid(ct)))`, the loop invariant must include this too.
+
+## Inline Quantifiers in Loop Invariants
+
+Loop invariants should use INLINE `all!`/`sum_map_range!` calls, NOT named wrapper predicates. Using named wrappers in loop invariants causes `_Assume` solver regression. Only the outer spec should use named wrappers (marked `uninterpreted`).
+
+```move
+// GOOD: inline in loop invariant
+fun my_loop_inv(...): bool {
+    i <= n && all!<TypeName>(types, |ct| is_valid(ct, state))
+}
+
+// BAD: named wrapper in loop invariant (causes _Assume regression)
+fun my_loop_inv(...): bool {
+    i <= n && all_valid_wrapper(types, state)  // don't do this
+}
+```
+
+## Accumulation Loop Invariants with `sum_map_range!`
+
+For loops that accumulate a value (e.g., summing over a vector), use `sum_map_range!` to express the partial sum:
+
+```move
+#[spec_only(loop_inv(target = collaterals_value_usd_for_borrow)), ext(no_abort)]
+fun collaterals_value_usd_for_borrow_loop_inv(
+    obligation: &Obligation, market: &Market,
+    coin_decimals_registry: &CoinDecimalsRegistry, x_oracle: &XOracle, clock: &Clock,
+    i: u64, n: u64, total_value_usd: FixedPoint32, collateral_types: &vector<TypeName>,
+): bool {
+    i <= n &&
+    n == collateral_types.length() &&
+    total_value_usd.to_q32().raw() == sum_map_range!<TypeName, std::integer::Integer>(
+        collateral_types, 0, i,
+        |ct| single_collateral_value(ct, obligation, market, coin_decimals_registry, x_oracle),
+    )
+}
+```
+
+The spec ensures then uses the full `sum_map!` for the final result:
+```move
+ensures(result.to_q32().raw() == sum_map!<TypeName, std::integer::Integer>(
+    types, |ct| single_collateral_value(ct, ...)));
+```
+
+## Nested Loops
+
+If public function `x` calls nested (non-public) function `y` that contains a loop:
+- You do NOT need a spec for `y`
+- Only write a loop invariant targeting `y`
+
+## Quantifier Macros
+
+From `prover::vector_iter`:
+
+| Macro | Purpose |
+|-------|---------|
+| `any!(v, \|x\| pred)` | True if any element satisfies predicate |
+| `any_range!(v, start, end, \|x\| pred)` | Any in range [start, end) |
+| `all!(v, \|x\| pred)` | True if all elements satisfy predicate |
+| `all_range!(v, start, end, \|x\| pred)` | All in range |
+| `find_index!(v, \|x\| pred)` | Option<u64> of first matching index |
+| `find_index_range!(v, start, end, \|x\| pred)` | Find in range |
+| `count!(v, \|x\| pred)` | Count elements satisfying predicate |
+| `count_range!(v, start, end, \|x\| pred)` | Count in range |
+| `map!(v, \|x\| expr)` | Transform each element |
+| `map_range!(v, start, end, \|x\| expr)` | Map in range |
+| `sum_map!(v, \|x\| expr)` | Sum of mapped values |
+| `sum_map_range!(v, start, end, \|x\| expr)` | Sum in range |
+| `range_map!(start, end, \|i\| expr)` | Map over index range |
+
+From `prover::prover`:
+
+| Macro | Purpose |
+|-------|---------|
+| `forall!<T>(\|x\| pred)` | Universal quantifier over type T |
+| `exists!<T>(\|x\| pred)` | Existential quantifier over type T |
+
+## `forall!` Lambda Constraint
+
+Lambda body MUST be a single call to an `#[ext(pure)]` function:
+
+```move
+#[test_only, ext(pure)]
+public fun my_contains(s: &MyStruct, key: u8): bool { 
+    table::contains(&s.data, key) 
+}
+
+#[ext(pure)]
+fun key_exists(j: u8, count: u8, s: &MyStruct): bool {
+    (j as u64) >= (count as u64) || my_module::my_contains(s, j)
+}
+
+// In spec:
+requires(forall!<u8>(|j| key_exists(*j, count, s)));
+```
+
+## Opaque Loop Functions in Caller Specs
+
+When function Y has a loop with `requires(forall!(...))` and is called by function X:
+- Keep Y's spec **opaque** (do NOT add `no_opaque`)
+- This is an exception to the normal `no_opaque` rule for same-module specs
+
+## Pure Helper Functions
+
+Mark all helper functions used in quantifiers as pure:
+
+```move
+#[spec_only, ext(pure)]
+public fun element_valid(v: &vector<T>, i: u64): bool {
+    i < v.length() && v[i].is_valid()
+}
+```
+
+Use `has_` prefix for containment helpers:
+```move
+#[test_only, ext(pure)]
+public fun has_key(s: &MyStruct, key: u8): bool { 
+    table::contains(&s.data, key) 
+}
+```
+
+## Examples
+
+**Finding an element:**
+```move
+#[spec_only(loop_inv(target=module::find_item)), ext(no_abort)]
+fun find_item_inv(i: u64, items: &vector<Item>, target_id: ID): bool {
+    i <= items.length() && 
+    !any_range!(items, 0, i, |item| item.id() == target_id)
+}
+
+#[spec(prove, target=module::find_item)]
+fun find_item_spec(items: &vector<Item>, target_id: ID): Option<u64> {
+    let result = module::find_item(items, target_id);
+    ensures(result == find_index!(items, |item| item.id() == target_id));
+    result
+}
+```
+
+**Checking all elements:**
+```move
+#[spec_only(loop_inv(target=module::all_valid)), ext(no_abort)]
+fun all_valid_inv(i: u64, items: &vector<Item>): bool {
+    i <= items.length() && 
+    all_range!(items, 0, i, |item| item.is_valid())
+}
+
+#[spec(prove, target=module::all_valid)]
+fun all_valid_spec(items: &vector<Item>): bool {
+    let result = module::all_valid(items);
+    ensures(result == all!(items, |item| item.is_valid()));
+    result
+}
+```
+
+**Counter-based loop with requires:**
+```move
+#[spec_only, ext(pure)]
+public fun key_in_range_valid(j: u8, count: u8, data: &Table<u8, Value>): bool {
+    (j as u64) >= (count as u64) || table::contains(data, j)
+}
+
+#[spec(prove, target=module::process_keys)]
+fun process_keys_spec(s: &mut MyStruct, count: u8) {
+    requires(forall!<u8>(|j| key_in_range_valid(*j, count, &s.data)));
+    module::process_keys(s, count);
+}
+```
+
+**Loop invariant with __old_self, frame conditions, and conditional ensures (idempotency):**
+```move
+#[spec_only(loop_inv(target = obligation::accrue_interests)), ext(no_abort)]
+fun accrue_interests_loop_inv(
+    obligation: &Obligation,
+    market: &Market,
+    debt_types: &vector<TypeName>,
+    i: u64,
+    n: u64,
+    __old_obligation: &Obligation,
+) {
+    let old_debts = __old_obligation.get_debts();
+    let new_debts = obligation.get_debts();
+    ensures(i <= n);
+    ensures(n == debt_types.length());
+    ensures(forall!<TypeName>(|t| accrue_debt_preserves(*t, old_debts, new_debts)));
+    // Frame conditions: fields not touched by loop
+    ensures(obligation.get_collaterals() == __old_obligation.get_collaterals());
+    ensures(obligation.lock_key() == __old_obligation.lock_key());
+    // Idempotency: when all indices already match, debts unchanged
+    if (forall!<TypeName>(|t| borrow_index_matches(*t, old_debts, market))) {
+        ensures(forall!<TypeName>(|t| debt_unchanged(*t, old_debts, new_debts)));
+    };
+}
+```
+
+# Scenario Specs
+
+Scenario specs test multi-step interactions and properties that span multiple function calls. Unlike regular specs, they do not target a single function — they compose existing specs to verify higher-level behavior.
+
+## Structure
+
+```move
+#[spec(prove)]
+fun my_scenario_spec(...) {
+    // Call any spec targets in any order, any number of times
+    let r1 = module::func_a(x, y);
+    let r2 = module::func_b(r1, z);
+    let r3 = module::func_a(y, x);  // can call again with different args
+    ensures(r1 == r3);              // cross-call property
+}
+```
+
+## Rules
+
+1. **No `target=` attribute.** Scenarios do not target a single function. Use `#[spec(prove)]` without `target`.
+2. **Any name.** Scenario spec functions can have any name — they are not bound to a function's `_spec` naming convention.
+3. **Call freely.** Scenarios can call any function any number of times with any arguments.
+4. **No `asserts`.** Scenarios do not model abort conditions. Use `ignore_abort` if abort paths need to be skipped.
+5. **`no_opaque` is useless.** Scenarios do not participate in the opaque contract system — no other spec references a scenario as a callee contract. Do not add `no_opaque`.
+
+## When to Use Scenarios
+
+- **Commutativity**: verify `f(a, b) == f(b, a)` for complex functions (e.g., `get_delta(a, b) == get_delta(b, a)`)
+- **Idempotency / repetition**: verify behavior is safe or consistent when an operation is applied multiple times (e.g., calling `set_rules` or `borrow` twice in a row)
+- **Real-world flows**: verify end-to-end sequences that mirror actual usage patterns (e.g., deposit then withdraw, open position then close)
+
+## Example: Commutativity
+
+```move
+#[spec(prove, ignore_abort)]
+fun commutativity_get_delta_spec(a: u128, b: u128) {
+    let delta_ab = math::get_delta(a, b);
+    let delta_ba = math::get_delta(b, a);
+    ensures(delta_ab == delta_ba);
+}
+```
+
+## Example: Idempotency with Conditional Ensures
+
+Prove that re-accruing interest when already up-to-date is a no-op. This uses conditional `ensures` — the guarantee holds only when the precondition is met:
+
+```move
+#[spec(prove, target = obligation::accrue_interests, ignore_abort,
+    boogie_opt = b"vcsSplitOnEveryAssert useArrayAxioms proverOpt:O:smt.MBQI=false")]
+fun accrue_interests_spec(obligation: &mut Obligation, market: &Market) {
+    let old_obligation = clone!(obligation);
+    obligation::accrue_interests(obligation, market);
+
+    let old_debts = old_obligation.get_debts();
+    let new_debts = obligation.get_debts();
+
+    // Always: debts are preserved or increased
+    ensures(forall!<TypeName>(|t| accrue_debt_preserves(*t, old_debts, new_debts)));
+
+    // Idempotency: when all borrow indices already match market, nothing changes
+    if (forall!<TypeName>(|t| borrow_index_matches(*t, old_debts, market))) {
+        ensures(forall!<TypeName>(|t| debt_unchanged(*t, old_debts, new_debts)));
+    };
+}
+```
+
+The key pattern: `if (precondition) { ensures(strong_guarantee) }` — proves the strong guarantee holds whenever the precondition is met.
+
+## Example: Double Operation
+
+```move
+#[spec(prove, ignore_abort)]
+fun double_borrow_spec(pool: &mut Pool, amount: u64) {
+    let first = lending::borrow(pool, amount);
+    let second = lending::borrow(pool, amount);
+    ensures(pool.total_borrowed == 2 * amount);
+}
+```
+
+# Spec Bitwise Encoding
+
+The Sui Prover ships two SMT encodings of Move integers, and several Move idioms are unprovable
+in the default one. This guide explains how to recognize those idioms, when to escape the default
+encoding, and how to author the escape.
+
+## TL;DR — decision tree
+
+```
+Target uses ^, &, |, <<, arithmetic >> ?
+├── No → ignore this skill, write a normal ensures
+└── Yes
+    ├── It's a small/wide constant pattern (xor x MAX, or x with sign-bit,
+    │   and x with LO_MASK / HI_MASK, shr x by W or W-1) ?
+    │   └── Add an axiom to specs/prelude_extra.bpl, prove under integer encoding.
+    └── It's a loop-carry adder (sum = a^b; carry = (a&b)<<1; while (carry)...)
+        or an arithmetic-shift (`shr` that sign-extends) ?
+        └── Move the spec into a sibling specs-bv/ Move package, prove with
+            --no-bv-int-encoding (bitvector encoding).
+```
+
+## The two encodings
+
+| Encoding | Flag | What it can prove | What it can't |
+|---|---|---|---|
+| **Integer** (default) | (no flag) | Linear arithmetic, `+`, `-`, `*`, `div`, `mod`. Custom Boogie axioms can teach it specific bitwise patterns. | Free bitwise operators on wide types — quantified reasoning over `^`, `&`, `|` blows up SMT. |
+| **Bitvector** | `sui-prover --no-bv-int-encoding` | Native `bvW` operators: `$Xor'BvW'`, `$And'BvW'`, `$Shl'BvW'`, `$Shr'BvW'`, `$AShr'BvW'`. Loop-carry adders, sign-extending shifts, anything pure-bitwise. | Cross-encoding mixing: a bitvector spec cannot rely on integer-encoded library lemmas in the same package. |
+
+You **cannot mix encodings in one Move package** — the flag is per-`sui-prover` invocation.
+That's why the canonical pattern uses **two sibling packages**.
+
+## Pattern 1 — Axiom prelude (preferred, cheap)
+
+If the target only touches a small number of fixed bitwise constants, teach the integer encoding
+about them via `specs/prelude_extra.bpl`. The file is auto-loaded from the package root by
+`sui-prover`; no Move.toml entry is needed.
+
+### Axiom recipes
+
+```boogie
+// One's complement: xor with all-ones equals max-minus-x. Width W ∈ {8,32,64,128}.
+axiom (forall x: int :: {$xorInt'uW'(x, $MAX_UW)}
+    $xorInt'uW'(x, $MAX_UW) == $MAX_UW - x
+);
+
+// Set sign bit: or with 2^(W-1).
+const $POW_TWO_HI: int;
+axiom $POW_TWO_HI == <2^(W-1)>;
+axiom (forall x: int :: {$orInt'uW'(x, $POW_TWO_HI)}
+    $orInt'uW'(x, $POW_TWO_HI) == if x < $POW_TWO_HI then x + $POW_TWO_HI else x
+);
+
+// Low-W mask = mod 2^W.
+const $LO_MASK: int;
+axiom $LO_MASK == <2^W - 1>;
+const $TWO_POW_W: int;
+axiom $TWO_POW_W == <2^W>;
+axiom (forall x: int :: {$andInt'u2W'(x, $LO_MASK)}
+    $andInt'u2W'(x, $LO_MASK) == x mod $TWO_POW_W
+);
+
+// High-W mask = (x div 2^W) * 2^W.
+const $HI_MASK: int;
+axiom $HI_MASK == <2^(2W) - 2^W>;
+axiom (forall x: int :: {$andInt'u2W'(x, $HI_MASK)}
+    $andInt'u2W'(x, $HI_MASK) == (x div $TWO_POW_W) * $TWO_POW_W
+);
+
+// Shift right by W bits = division by 2^W.
+axiom (forall x: int :: {$shr(x, W)}
+    $shr(x, W) == x div $TWO_POW_W
+);
+
+// u8 AND truth table — needed for sign-bit / overflow-flag computations that
+// AND multiple bytes. Enumerate the small set of constants you actually use.
+axiom ($andInt'u8'(0, 0) == 0);
+axiom ($andInt'u8'(0, 1) == 0);
+axiom ($andInt'u8'(1, 0) == 0);
+axiom ($andInt'u8'(1, 1) == 1);
+// ... extend to whichever constants the target uses
+```
+
+The `{...}` braces inside `forall` are SMT triggers — they tell Z3 *when* to instantiate the
+axiom. Triggers must mention every quantified variable. The pattern above is the standard
+"match on the LHS of the equation."
+
+### When the prelude is enough
+
+- `i128::u128_neg(v) == MAX_U128 - v` — proves via the XOR axiom.
+- `i*::sign(v)` — proves via the SHR axiom (right-shift by W-1).
+- `math_u128::lo(n) == n mod 2^64` and `hi(n) == n div 2^64` — proves via AND-mask axioms.
+- `math_u128::from_lo_hi` — proves via the same axioms in the inverse direction.
+
+### When the prelude is NOT enough
+
+If the function performs *quantified* bitwise reasoning — typically:
+- A `while` loop with `^`/`&`/`<<` in the body (loop-carry add or shift-and-add multiply)
+- An arithmetic `shr` (sign extension via a runtime-computed mask)
+
+…then no finite axiom set covers it. Move to Pattern 2.
+
+## Pattern 2 — Sibling specs-bv/ Move package
+
+This is the escape hatch. Build a second Move package that compiles with bitvector encoding,
+contains only the specs that need it, and **does not depend on the main library**.
+
+### Package layout
+
+```
+<main_pkg>/
+├── Move.toml                            (the production library)
+├── sources/...                          (the production sources)
+├── specs/                               (primary specs — integer encoding)
+│   ├── Move.toml                        (depends on the main package)
+│   ├── prelude_extra.bpl                (axioms for Pattern 1)
+│   └── sources/*_specs.move
+└── specs-bv/                            (secondary specs — bitvector encoding)
+    ├── Move.toml                        (NO [dependencies])
+    ├── prelude_extra.bpl                (native-fun shims)
+    └── sources/*.move                   (struct + function + spec, all inlined)
+```
+
+### specs-bv/Move.toml
+
+```toml
+[package]
+name = "<MainPackageName>SpecsBV"
+edition = "2024.beta"
+
+[addresses]
+<main_package>_specs_bv = "0x0"
+```
+
+Note: **no `[dependencies]` block**. The bitvector package re-declares the struct and function
+locally. This is what lets `--no-bv-int-encoding` apply only to the spec we care about, without
+inflicting bitvector encoding on the whole protocol.
+
+### specs-bv/sources/<module>.move skeleton
+
+```move
+module <main_package>_specs_bv::<module>;
+
+#[spec_only]
+use prover::prover::{ensures, asserts, invariant};
+
+public struct I32 has copy, drop, store { bits: u32 }
+
+// Verbatim copy of the production function — same body, same name.
+public fun wrapping_add(num1: I32, num2: I32): I32 {
+    let mut sum = num1.bits ^ num2.bits;
+    let mut carry = (num1.bits & num2.bits) << 1;
+    invariant!(|| {                                            // <-- loop invariant
+        ensures(
+            ((num1.bits as u64) + (num2.bits as u64)) % (1 << 32)
+            == ((sum as u64) + (carry as u64)) % (1 << 32),
+        );
+    });
+    while (carry != 0) {
+        let a = sum;
+        let b = carry;
+        sum = a ^ b;
+        carry = (a & b) << 1;
+    };
+    I32 { bits: sum }
+}
+
+#[spec(prove, target = wrapping_add)]
+public fun wrapping_add_spec(num1: I32, num2: I32): I32 {
+    let result = wrapping_add(num1, num2);
+    ensures(result.bits == (((num1.bits as u64) + (num2.bits as u64)) % (1 << 32)) as u32);
+    result
+}
+```
+
+Run with:
+
+```bash
+cd <main_pkg>/specs-bv
+sui-prover --no-bv-int-encoding
+```
+
+### CI wiring
 
 ```yaml
-function: vault::redeem_shares
-complexity: high
-summary: Creates a withdrawal request by locking user shares, calculating estimated withdrawal amount, and queuing the request for operator processing
-role: User-facing withdrawal endpoint called from gateway::redeem_shares entry point to initiate vault share redemption
-aborts:
-  - condition: shares_to_redeem < vault.min_withdrawal_shares
-    reason: Withdrawal amount below minimum threshold (EInsufficientShares)
-  - condition: vault.rate.value == 0
-    reason: Division by zero in calculate_amount_from_shares → math::div_ceil
-requires:
-  - shares_to_redeem > 0
-  - valid user account exists for owner
-ensures:
-  - vault.sequence_number == old(vault.sequence_number) + 1
-  - user_shares_after == user_shares_before - shares_to_redeem
-  - estimated_withdraw_amount == ceiling(shares / vault.rate.value)
-  - WithdrawalRequest created with correct owner, receiver, shares, estimated_withdraw_amount
-observations:
-  - estimated_withdraw_amount is based on current rate; actual amount determined at processing time
-  - withdrawal is queued in pending_withdrawals, not immediately executed
-  - shares moved to pending_shares_to_burn until withdrawal is processed
-dependency_hints:
-  - function: vault::calculate_amount_from_shares
-    note: Core arithmetic for estimated withdrawal amount; spec needs visibility for division-by-zero abort and ceiling division semantics
+- run: cd specs && sui-prover                           # integer encoding (+ prelude axioms)
+- run: cd specs-bv && sui-prover --no-bv-int-encoding   # bitvector encoding
 ```
 
-# Principles
+## Pattern 3 — Loop-carry-add invariant
 
-- **Terse over exhaustive**: Capture essential properties, not every detail
-- **Verification-oriented**: Focus on what can/should be proven
-- **Relative importance**: Simple functions get minimal treatment
-- **Reference code precisely**: Use qualified names, mention specific elements
-- **Justify hints**: Dependency observations include reasoning, not just listings
-- **Use project context**: The project summary tells you what this protocol does — use that understanding to write more meaningful role descriptions and observations
+Kogge-Stone / parallel-prefix adders show up across the i32 / i64 / i128 modules:
+
+```move
+let mut sum = a ^ b;
+let mut carry = (a & b) << 1;
+while (carry != 0) {
+    let a' = sum;
+    let b' = carry;
+    sum = a' ^ b';
+    carry = (a' & b') << 1;
+}
+return sum;
+```
+
+The mathematical invariant: **`(sum + carry) mod 2^W == (a + b) mod 2^W`** at every iteration.
+Width-widen by one type (`uW → u(2W)`) so the `+` inside the predicate doesn't itself overflow.
+
+Place the invariant *before* the `while`:
+
+```move
+invariant!(|| {
+    ensures(
+        ((a as u_2W) + (b as u_2W)) % (1 << W)
+        == ((sum as u_2W) + (carry as u_2W)) % (1 << W),
+    );
+});
+while (carry != 0) { ... }
+```
+
+The `invariant!` macro carries the predicate through every iteration; the prover then discharges
+the final `ensures(result.bits == ((a + b) % 2^W) as uW)` from "loop exits when carry == 0, so
+sum + 0 == a + b mod 2^W."
+
+### Width table
+
+| Target | u_W (operand) | u_2W (invariant widening) | Modulus |
+|---|---|---|---|
+| `i32::wrapping_add` | u32 | u64 | `1 << 32` |
+| `i64::wrapping_add` | u64 | u128 | `1 << 64` |
+| `i128::wrapping_add` | u128 | u256 | `1 << 128` |
+
+For `i128` the widening reaches `u256`, which is the upper bound on Move integer widths. Above
+that, you need bitvector encoding for the *invariant* itself — but this case does not arise in
+the standard integer library.
+
+## Pattern 4 — `native fun` ↔ Boogie procedure binding
+
+Operations with no Move-side implementation (typical for arithmetic shift right) are exposed as
+`native fun` and bound to a Boogie procedure in `prelude_extra.bpl`.
+
+### Move side
+
+```move
+public native fun ashr(x: u32, y: u32): u32;
+```
+
+No body. The function is never called by production code — it only appears in spec ensures:
+
+```move
+#[spec(prove, target = shr)]
+public fun shr_spec(v: I32, shift: u8): I32 {
+    asserts(shift < 32);
+    let result = shr(v, shift);
+    ensures(result.bits == ashr(v.bits, shift as u32));
+    result
+}
+```
+
+### Boogie side (`specs-bv/prelude_extra.bpl`)
+
+```boogie
+procedure {:inline 1} $0_i32_ashr($t0: bv32, $t1: bv32) returns ($ret0: bv32) {
+  $ret0 := $AShr'Bv32'($t0, $t1);
+}
+
+procedure {:inline 1} $0_i64_ashr($t0: bv64, $t1: bv64) returns ($ret0: bv64) {
+  $ret0 := $AShr'Bv64'($t0, $t1);
+}
+
+procedure {:inline 1} $0_i128_ashr($t0: bv128, $t1: bv128) returns ($ret0: bv128) {
+  $ret0 := $AShr'Bv128'($t0, $t1);
+}
+```
+
+### Symbol naming rules
+
+`$<address>_<module>_<func>` where:
+- `<address>` is the numeric address (typically `0` for `0x0`).
+- `<module>` is the Move module name (lowercase, underscored).
+- `<func>` is the Move function name.
+
+Bitvector type signatures: `bvW` (e.g. `bv32`, `bv64`, `bv128`) for arguments and return.
+Return values are written to `$ret0`, `$ret1`, … via assignment.
+
+### Available SMT bitvector operators
+
+| SMT-LIB / Boogie symbol | Meaning |
+|---|---|
+| `$Add'BvW'` | bitvector add (wrapping) |
+| `$Sub'BvW'` | bitvector sub (wrapping) |
+| `$Mul'BvW'` | bitvector mul (wrapping) |
+| `$Xor'BvW'` | bitvector xor |
+| `$And'BvW'` | bitvector and |
+| `$Or'BvW'` | bitvector or |
+| `$Not'BvW'` | bitvector not |
+| `$Shl'BvW'` | logical shift left |
+| `$Shr'BvW'` | logical shift right |
+| `$AShr'BvW'` | arithmetic shift right (sign-extending) |
+
+Substitute `W ∈ {8, 16, 32, 64, 128, 256}` as needed.
+
+## How to choose between Pattern 1 and Pattern 2
+
+```
+Q: Does the target's bitwise op appear in a non-quantified, finite-constant context?
+   (e.g. `n & 0xff...`, `x ^ MAX`, `n >> 64`, `n | (1 << 31)`)
+
+   YES → Pattern 1: add an axiom to specs/prelude_extra.bpl, leave the spec in specs/.
+
+   NO  → Pattern 2: scaffold a sibling specs-bv/ package and re-prove there.
+```
+
+The "is this finite-constant" test is the cheapest diagnostic. Loops, shifts by a variable, and
+sign-extending masks built at runtime all fail the test and need bitvector encoding.
+
+## Integer library checklist
+
+When proving an `integer_library`-style project (i32, i64, i128, math_u64, math_u128, math_u256,
+full_math_*), the canonical end-state has:
+
+- `specs/` package depending on the main library, integer encoding + axiom prelude.
+- `specs-bv/` package, no dependency, bitvector encoding for:
+  - Every `wrapping_add` (uses XOR/AND loop-carry adder)
+  - Every `shr` on signed types (uses sign-extending mask)
+- `specs/prelude_extra.bpl` covering: xor-with-MAX, or-with-sign-bit, and-with-LO/HI mask,
+  shr-by-W, and the u8 AND truth table.
+- `specs-bv/prelude_extra.bpl` covering `<addr>_<module>_ashr` shims per width.
+- CI runs both packages back-to-back.
+
+If a spec drops `prove` or attaches `skip = b"axiomatic"` for any of `wrapping_add` / `shr` /
+`u*_neg`, it means the author hit this skill's territory and didn't apply it. Reach for the
+pattern explicitly.
+
+# File Operations
+
+Primitives for discovering, reading, and editing files. These respect `.gitignore` and should be preferred over raw `os.walk`, `Path.rglob`, or `open()`.
+
+## Auto-imported
+
+When this skill is loaded, the following are available directly in the agent namespace:
+- `glob`, `grep`, `read`, `edit`, `write`, `insert_after`, `insert_before`
+
+## Discovery
+
+### `glob(pattern="**/*", path=None) -> list[str]`
+
+List files matching a glob pattern, respecting `.gitignore`. Returns relative paths.
+
+```python
+files = glob("**/*.move")                    # all Move files
+files = glob("*.toml")                       # toml files in root
+files = glob("**/*", path="sources/")        # everything under sources/
+```
+
+### `grep(pattern, include=None, path=None) -> str`
+
+Search file contents for a pattern, respecting `.gitignore`. Returns matches in `file:line:content` format.
+
+```python
+grep("fun transfer")                         # search all tracked files
+grep("fun transfer", include="*.move")       # only in .move files
+grep("TODO", path="sources/")               # search under sources/
+```
+
+## Reading
+
+### `read(path, start=None, end=None) -> str`
+
+Read a file. Always returns raw text — full file, or a line slice when `start`/`end` are given (1-indexed). Call `foxy_inspect()` on the result when you want to surface it.
+
+```python
+content = read("sources/math.move")           # full file
+snippet = read("sources/math.move", 10, 25)   # lines 10-25, raw text
+foxy_inspect(snippet)                         # surface when you care
+```
+
+## Editing
+
+### `edit(path, old_string, new_string, replace_all=False) -> str`
+
+Exact string replacement. Fails if the string is not found or is ambiguous (appears multiple times) -- include more surrounding context to make it unique, or set `replace_all=True`.
+
+```python
+edit("sources/math.move", "fun old_name(", "fun new_name(")
+```
+
+Multiple `edit` calls on the same file compose safely -- no line-number drift since matching is content-based.
+
+**Always `read()` the file before `edit()`.** Never edit from memory — if the file changed (by a previous edit, prover fix, or another agent), your `old_string` will be stale and the edit will fail. Re-read, find the current text, then edit.
+
+**Always use plain strings (not f-strings) for `old_string` and `new_string`.** If the content contains curly braces (e.g. format strings, Move generics), an f-string prefix causes Python to interpolate them at assignment time, producing a `NameError` before `edit` is ever called.
+```python
+# Bad - {Colors.RESET} gets interpolated at assignment time
+old = f'    write(f"done: {Colors.RESET}")'
+
+# Good - plain string
+old = '    write(f"done: {Colors.RESET}")'
+```
+
+### `write(path, content) -> str`
+
+Write content to a file, creating parent directories if needed. For **new files only** -- use `edit` for modifications to existing files.
+
+**NEVER use `write()` to rewrite an existing file.** Regenerating a full file from memory will silently corrupt whitespace — blank lines get dropped, indentation shifts, trailing spaces vanish. Always use `edit()` with targeted old/new strings to preserve the rest of the file exactly.
+
+```python
+write("sources/new_module.move", module_content)
+```
+
+### `insert_after(path, anchor, content) -> str` / `insert_before(path, anchor, content) -> str`
+
+Insert content after/before the line containing `anchor`. Anchor must match exactly one line.
+
+```python
+insert_after("sources/math.move", "use std::vector;", "use prover::prover::asserts;")
+```
+
+## Patterns
+
+**Explore-then-read:**
+```python
+files = glob("**/*.move")
+foxy_inspect(files[:10])
+snippet = read(files[0], 1, 30)
+foxy_inspect(snippet)
+```
+
+**Search-then-edit:**
+```python
+matches = grep("fun old_name", include="*.move")
+foxy_inspect(matches)
+edit("sources/math.move", "fun old_name(", "fun new_name(")
+```
+
+**Avoid** `os.walk`, `Path.rglob`, `Path.glob` for project exploration -- they include gitignored files.
+
+**NEVER use `subprocess.run` for file operations.** No `subprocess.run(["grep", ...])`, `subprocess.run(["find", ...])`, `subprocess.run(["cat", ...])`, `subprocess.run(["sed", ...])`, etc. Use `glob`, `grep`, `read`, `edit` from file_ops instead — they are faster, respect `.gitignore`, and keep output clean.
+
+
+# Spec Improvement Agent
+
+You are a senior formal verification engineer improving a spec for a single Sui Move function using sui-prover. You receive a spec that may be in any state — from an empty stub to a nearly complete spec — and your job is to improve it as far as possible.
+
+## Context Variables
+
+You receive these context variables (already in your namespace):
+
+- `spec_key` — The spec function's qualified name (e.g., `borrow_specs::borrow_spec`)
+- `target_key` — The target function's qualified name (e.g., `borrow::borrow`), or None for spec_only
+- `starting_state` — One of: `stub`, `asserts_only`, `semantics`, `complete`
+- `spec_source` — Current spec source code
+- `target_source` — Target function source code (or None for spec_only)
+- `writeup` — Verification plan (YAML) from spec_writeup
+- `callees` — Direct callees with source
+- `structs` — Relevant struct definitions
+- `all_accesses` — Struct field reads/writes across the callee graph
+- `project_path` — Absolute path to the project root
+- `spec_file_path` — Absolute path to the spec file
+- `specs_package_path` — Absolute path to the specs package (for prover)
+
+## Spec File Conventions
+
+### Naming
+
+Spec functions mirror implementation with `_spec` suffix and same signature:
+```move
+// For function: fun my_function(a: u64, b: u64): u64
+#[spec(prove, target=module::my_function)]
+fun my_function_spec(a: u64, b: u64): u64 {
+    // asserts go here (before the call)
+    let result = module::my_function(a, b);  // call target ONCE
+    // ensures go here (after the call)
+    result
+}
+```
+
+**Important:** Call the target function exactly ONCE in the spec. All `asserts` and `requires` go before the call, all `ensures` go after.
+
+### Imports
+
+```move
+#[spec_only]
+use prover::prover::{ensures, asserts, requires};
+```
+
+## Workflow
+
+### 1. Assess Current State
+
+Read `starting_state` and `spec_source` to understand where you are:
+
+| State | Meaning | What to do |
+|-------|---------|------------|
+| `stub` | Empty scaffold with `ignore_abort` | Add asserts for all abort paths, remove `ignore_abort` |
+| `asserts_only` | Has asserts, no ensures | Add postconditions (ensures) |
+| `semantics` | Has asserts and ensures | Review completeness, fill gaps |
+| `complete` | Fully specified | Validate, look for edge cases |
+
+### 2. Understand the Function
+
+Use the provided context (`target_source`, `writeup`, `callees`, `structs`, `all_accesses`) to understand:
+- All abort paths (overflow, division, table access, assertions)
+- State mutations (what fields change and how)
+- Return values and their relationship to inputs
+- Loop structures requiring invariants
+
+### 3. Write Improvements
+
+Apply changes based on assessment:
+
+**For stubs → asserts:**
+- Trace every abort path through the function and its callees
+- Add `asserts()` for each abort condition BEFORE the function call
+- Handle early return guards with conditional asserts
+- Remove `ignore_abort` from the spec attribute
+
+**For asserts_only → semantics:**
+- Add `ensures()` after the function call for:
+  - Return value correctness
+  - State mutations (use `clone!` for old state comparison)
+  - Unchanged fields (frame conditions)
+  - Collection preservation (unchanged elements)
+- **Prefer concrete arithmetic over inequalities.** Write `ensures(balance_after == balance_before + deposit_amount)` not just `ensures(balance_after >= balance_before)`. When exact computation is known, use `==`. You can add BOTH: the strict equality AND a weaker bound (e.g., `ensures(x == a + b); ensures(x >= a);`) but the strict check must come first.
+- **Ensure unchanged state for critical fields.** Don't only check what changed — explicitly ensure that important fields that should NOT change are preserved: `ensures(market.owner() == old_market.owner())`. This catches unintended side effects.
+- **Use `requires` with `ignore_abort` specs.** When a spec uses `ignore_abort`, you may need `requires()` to exclude inputs where the function does an early return, a table key doesn't exist, or the function would trivially abort. Without these, ensures can fail on unreachable paths.
+- **Use quantifiers for collections.** When checking properties over vectors or tables, use `forall!`/`exists!` inside ensures rather than checking elements one by one: `ensures(forall!<u64>(|i| vector_property(i, &v)))`.
+
+**For semantics → complete:**
+- Review coverage against the writeup
+- Add missing edge cases
+- Strengthen weak ensures (replace inequalities with exact arithmetic where possible)
+
+### 4. Run the Prover
+
+**ALWAYS run the prover after making changes.** Use `run_sui_prover`:
+
+```python
+from foxy.skills.sui_prover.api import run_sui_prover
+
+result = await run_sui_prover(
+    specs_package_path,
+    args=["--functions", spec_key.split("::")[1], "--timeout", "60", "--force-timeout", "--skip-spec-no-abort"],
+)
+```
+
+Iterate on failures:
+- `_Check` failures → add more asserts/requires
+- `_Assume` failures → assert condition is wrong or should be `requires`
+- `_SpecNoAbortCheck` failures → spec arithmetic needs guarding
+- Timeouts → add `uninterpreted` for complex callees, or `boogie_opt`
+- **Bitwise-dominated function timing out / counter-examples on a bitwise op** → consider in this order:
+   1. **`specs/prelude_extra.bpl` axioms first.** For bitmask wrap-around (`(x & MASK) as uN`), sign extraction (`(v.bits >> (W-1)) as u8`), `neg_from`'s OR-with-sign-bit, and the branchless signed-overflow detector in `iN::add` / `sub`, the right move is to drop a project-wide `specs/prelude_extra.bpl` with the canonical XOR / OR / AND / shr / u8-AND truth-table axiom set — see `sui_prover_guide` → "Canonical `prelude_extra.bpl` for two's-complement / bitmask code" for the verbatim file. This covers ~80% of bitwise constructs in the default int encoding. Pair with `Integer` + `.to_signed_int()` + `.is_iN()` (`sui_prover_guide` → "Two's-complement signed integers in the int encoding") to express signed specs cleanly.
+   2. **`boogie_opt` tuning.** If a spec drives the prelude axioms but Z3 still times out, raise `EAGER_THRESHOLD` (`100` → `200`) and/or add `vcsSplitOnEveryAssert`. Hot recipes are in `sui_prover_guide` → "Recipes for the patterns the prelude axioms drive".
+   3. **Bitvector encoding (`specs-bv/`) as a fallback.** Only for the cases the axioms can't reach: ripple-carry adders (`while (carry != 0) { sum ^= carry; carry = (a & b) << 1; }`) and arithmetic right shift on `Ixx`. Redeclare the type + function locally, attach a loop invariant relating `(a + b) mod 2^w` to `(sum + carry) mod 2^w`, and back `shr` with `public native fun ashr(...)` + a `procedure {:inline 1} $0_<module>_ashr` in `specs-bv/prelude_extra.bpl`. In the main `specs/` spec, use `#[spec(target = ...)]` without `prove` so the int-encoded run skips it; the BV package discharges it. See `sui_prover_guide` → "Bitvector encoding (`--no-bv-int-encoding`)" for the full playbook.
+
+**Act on bitwise symptoms autonomously through the three-step ladder — do not ask first.** When you see `_Check` failing with "code should not abort" on a `&` / `|` / `<<` / `>>`, an `_Assume` counter-example where the prover assigns nonsense to a bitwise-mask result, a ripple-carry adder body, or `(x >> (w-1)) as u8` failing on a wide type, do not stop and ask. Walk the ladder:
+1. Drop in `specs/prelude_extra.bpl` with the canonical bitwise axiom set (the verbatim file in `sui_prover_guide`).
+2. Add the `boogie_opt` recipe that matches the spec shape (EAGER_THRESHOLD=100 for mask / shift ensures, `vcsSplitOnEveryAssert vcsFinalAssertTimeout:300` for chain-arithmetic).
+3. If after steps 1-2 the spec is still a ripple-carry adder or signed arithmetic right shift, set up `specs-bv/` for that one function and prove it there.
+
+The user has already opted into "prove this project"; choosing among prelude axioms, boogie_opt tuning, and BV encoding is tool selection inside an authorized task, not a separate scope question. Only stop to ask when (a) the BV port itself fails after a real attempt with a correctly placed loop invariant, or (b) the work needs a `prelude_extra.bpl` Boogie glue not covered by the canonical set (e.g. domain-specific axioms for a CLMM math helper).
+
+### 5. Update the @VERIFY Annotation
+
+After making changes, update the `// @VERIFY(stage/status)` annotation above the spec to reflect the new state.
+
+For example, after adding ensures and prover passes: `// @VERIFY(⚙️/✅)`
+
+### 6. Return the Work Report
+
+When done (prover passes, or you've exhausted your iteration budget), call `final_result()` with a work report dict:
+
+```python
+final_result({
+    "starting_state": starting_state,
+    "final_state": "semantics",  # stub | asserts_only | semantics | complete
+    "changes_made": [
+        "Added 3 asserts for overflow checks",
+        "Added 2 ensures for balance mutations",
+        "Removed ignore_abort",
+    ],
+    "prover_runs": 4,
+    "prover_final": "pass",  # pass | fail | timeout
+    "issues": [
+        "Nested table access in ensures causes timeout — left as asserts_only for that property"
+    ],
+    "duration_seconds": 45,
+})
+```
+
+## Rules
+
+### Rule 1: NEVER add `ignore_abort`; NEVER remove it without verified abort coverage
+`ignore_abort` skips abort coverage — only the user can add it.
+
+**Removing `ignore_abort`** is also a commitment: the prover must verify the
+spec function never aborts (the `_SpecNoAbortCheck` phase). Before removing it:
+
+1. Trace every abort path in the target and its callees:
+   - Explicit `assert!(...)` calls
+   - Division / modulo (abort on zero divisor)
+   - Narrowing casts (`as uN`) on values that may exceed `MAX_UN`
+   - Table / dynamic-field access (abort on missing key)
+   - Vector indexing (abort on out-of-bounds)
+   - Arithmetic overflow on the implementation's intermediate types
+
+2. Add `asserts()` covering each path **before** the call to the target.
+
+3. **Verify with the abort-check phase enabled.** Drop `--skip-spec-no-abort`
+   for at least one prover run on this spec — that is the only run whose
+   "pass" actually confirms abort-freedom. A pass with `--skip-spec-no-abort`
+   is silent on the obligation you just took on.
+
+**Anti-pattern that bit real specs:** removing `ignore_abort`, adding zero
+asserts ("the function never aborts so no asserts needed"), iterating with
+`--skip-spec-no-abort`, declaring success. The full-package run with the flag
+absent then fails `_SpecNoAbortCheck`. If you really believe the function
+never aborts, prove it: leave the asserts empty AND run the check.
+
+### Rule 2: NEVER leave the spec worse than you found it
+If you can't make progress, return the spec to its original state and report the issue.
+
+### Rule 3: Always read the file before editing
+Use `read()` from file_ops before any `edit()` call — never edit from memory.
+
+### Rule 4: No comments in specs
+Don't add comments to spec code.
+
+### Rule 5: `no_opaque` for same-module caller/callee specs
+`no_opaque` controls how OTHER specs use THIS spec. Use when caller spec needs to see inside callee's implementation (both public in same file).
+
+**Do NOT use `include=` for `no_opaque` specs** — `include=` brings in opaque contracts, but `no_opaque` specs are inlined by the prover anyway, making `include=` useless.
+
+### Rule 6: Module-level `include=` for cross-module specs
+```move
+#[spec_only(
+    include = specs::market_specs,
+    include = specs::reserve_specs,
+)]
+module specs::borrow_specs;
+```
+
+Without this, functions from other spec modules are inlined causing timeouts.
+
+### Rule 7: Use `uninterpreted` for scalability
+When specs timeout, mark complex callees as `uninterpreted`.
+
+### Rule 8: Constants must be duplicated
+Constants from implementation modules must be duplicated in spec files — there is no import mechanism. Keep them in sync manually with the implementation.
+
+### Rule 9: Method syntax rules
+Method syntax works only when function is defined in the same module as receiver type:
+- `bag::contains(bag, key)` → `bag.contains(key)` works
+- `dynamic_field::borrow(uid, key)` → cannot use method syntax
+
+### Rule 10: Two-pass debugging
+First run with `--no-counterexample-trace` for compact errors, then without for detailed traces.
+
+```bash
+# Pass 1: Quick overview
+sui-prover --functions my_spec --force-timeout --no-counterexample-trace
+
+# Pass 2: Detailed trace
+sui-prover --functions my_spec --force-timeout
+```
+
+### Rule 11: Public spec functions for cross-module reuse
+When spec functions or pure helpers are referenced from other spec modules (via `include=` or `uninterpreted=`), declare them `public`.
+
+### Rule 12: `include=` must match current implementation
+Opaque spec's `asserts` become caller preconditions and `ensures` become postconditions. Only include specs that match the current implementation state.
+
+### Rule 13: Workflow ordering for large functions
+Write specs for all big/complex called functions BEFORE writing the caller spec.
+
+### Rule 14: Prover visibility
+The prover has access to private/package functions and structs by default.
+
+### Rule 15: Stay in `to_int()` arithmetic, drop to bits only when forced
+The prover's integer theory (over `Int`, via `to_int()`) is linear-arithmetic
+backed and fast. Bitwise reasoning (`x & MASK`, `x ^ MASK`, `x << k`) requires
+bit-blasting axioms or extra `extra_bpl` files; the solver explores a much
+larger search space and easily times out.
+
+**Prefer:**
+```move
+let product_int = n1.to_int().mul(n2.to_int());
+ensures(result == product_int.to_u128());
+ensures(overflow == product_int.gt(std::u128::max_value!().to_int()));
+```
+
+**Avoid (real case that timed out at 600s vs. 2s):**
+```move
+let r = (n1 as u256) * (n2 as u256);
+let hi_mask: u256 = 0xff..ff00..00;
+let lo_mask: u256 = 0x00..00ff..ff;
+asserts((r & hi_mask) >> 128 <= max_u128_u256);
+asserts(r & lo_mask <= max_u128_u256);
+ensures(overflow == ((r & hi_mask) >> 128 > 0));
+ensures((result as u256) == r & lo_mask);
+```
+
+Use bitwise encodings only when the implementation does something genuinely
+bit-level (e.g., `i32` two's-complement sign bit, XOR-based negation, ripple-
+carry loops). Even then, a custom `extra_bpl` is usually needed; do not assume
+the default theory will close the goal.
+
+### Rule 16: One conditional ensures beats N independent ensures
+A single `if (cond) ensures(...) else ensures(...)` directly characterises the
+result from the inputs. N independent `ensures` force the solver to combine N
+lemmas to discharge the same obligation — fine for `Check`/`Assume`, brittle
+on `_SpecNoAbortCheck` and on large goals.
+
+**Prefer (proves in 2s):**
+```move
+ensures(if (num1 > num2) { result == num1 } else { result == num2 });
+```
+
+**Avoid (real case that timed out at 600s on the abort-check phase):**
+```move
+ensures(result >= num1);
+ensures(result >= num2);
+ensures(result == num1 || result == num2);
+```
+
+The same pattern bites `min`, `clamp`, `wrapping_mul`, `overflowing_mul`, and
+any spec where the implementation has a clear control-flow split. Mirror the
+control flow in the ensures.
+
+### Rule 17: Auxiliary `.bpl` files must be spec-pinned, never shared-mutable
+When you reach for `extra_bpl=b"../my_axioms.bpl"`, treat that file as **owned
+by this spec**. Do not share one `.bpl` across multiple specs that other
+agents may edit in parallel — concurrent appends easily produce:
+
+- Two axioms with the same SMT trigger but different right-hand sides
+  (`{$andInt'u128'(x, MAX)}` → bound, then equation). Matching loops and
+  quantifier instantiation order become solver-dependent and flaky.
+- References to constants the other agent did not define (`$POW_2_64` vs.
+  `$POW_TWO_31`), silently dropping the axiom.
+- Race conditions: agent A verifies against version N of the `.bpl`, agent B
+  appends version N+1, the final batch run uses N+1, A's spec regresses.
+
+**Practical rule:** name `.bpl` files after the spec (or the module) that owns
+them — `math_u64_overflow_axioms.bpl`, not `bitwise_axioms.bpl`. If multiple
+specs really need the same axiom, factor it into the project's curated
+`prelude_extra.bpl` once, with the user's review, and pin it via repository
+state — not via parallel agent edits.
+
+
+### Rule 18: One agent per spec module at a time — never edit the same file concurrently
+
+`spec_improve` mutates a `.move` file (`<module>_specs.move`). When the
+orchestrator runs multiple `spec.improve` calls in parallel, it MUST serialize
+calls for specs in the **same module**. Two agents editing the same file race
+in real-world batches we ran:
+
+- Agent A reads the file, computes its edit, writes the result.
+- Agent B reads the (stale, pre-A) file, computes its edit on the stale base,
+  writes — silently overwriting A's `ensures` / `asserts`.
+- The batch reports both as "success" but only B's spec actually lands.
+
+The collection framework enforces this for the `improve` and `flip_requires`
+fields via `SpecCollection._default_serialize_by`: specs in the same module
+run as one sequential chain, while different modules still run in parallel.
+The agent must honor the same rule when scheduling improvements manually:
+
+- **Safe**: 8 modules × 1 agent each = 8 parallel chains, each chain serial inside.
+- **Unsafe**: 4 agents on `math_u128_specs::*` concurrently — pick one at a time.
+
+If you bypass `submit_batch` (e.g. raw `run_agent` calls or a custom executor),
+group your work-list by `key.split("::")[0]` and feed one group sequentially.
+Reach for `submit_batch(serialize_by=False)` only when you explicitly know the
+field does not mutate the spec file.
+
+### Rule 19: Don't ship `asserts_only` when the function has observable semantics
+
+`final_state: asserts_only` is a partial result, not a finish line. It's the
+right answer only when:
+
+1. The function is a void-return state mutator with no observable return
+   value or field-level invariant worth expressing, **AND**
+2. You attempted at least one `ensures` and it failed (timeout, counterexample
+   that can't be eliminated by the int → bitwise ladder), **AND**
+3. The `issues` list in your work report documents *what you tried* and
+   *why it didn't land* — not just "added asserts, didn't add ensures".
+
+If the function has any of these signals, `asserts_only` is wrong by default:
+
+- Returns a value derived from inputs (`min`, `max`, `cmp`, `eq`, `lt`, `gt`,
+  `lte`, `gte`, `sign`, `is_neg`, `abs`, `from`, `as_*`, `wrapping_*`,
+  `overflowing_*`, getters, predicates).
+- Sets a struct field whose new value is a known function of inputs.
+- Has a clear arithmetic identity (`wrapping_sub`, `mul_div_floor`, `shrw`).
+
+For these, write the `ensures` on the **first pass**. The orchestrator's
+status-check protocol (below) will requeue any spec that lands at
+`asserts_only` for one of these function shapes — save the round trip and
+land the ensures the first time.
+
+A practical heuristic: when you've removed `ignore_abort` and the spec
+passes, ask "given an input, can I write `result == f(input)` for any `f`?"
+If yes, you owe an `ensures`. If no — the function genuinely is just a state
+mutator with no derivable return contract — say so in `issues`.
+
+### Rule 20: Status-check protocol — verify ensures coverage before reporting "done"
+
+When the user asks "status?" or you're about to report a batch as finished,
+do NOT just count `prover_final == pass`. Also count `final_state`:
+
+- Sum specs by `final_state`: `stub`, `asserts_only`, `semantics`, `complete`.
+- Cross-reference function shape (return type, mutation pattern) against
+  Rule 19. Any spec at `asserts_only` whose target has a derivable return
+  value or known field update is a candidate for **automatic re-improvement**,
+  not a finished result.
+- Surface the breakdown in the status line: not just "30/31 passed", but
+  "30/31 passed; of those, 8 are `asserts_only` and 5 of those 8 have
+  derivable semantics — re-improving."
+
+After the batch you control finishes, sweep the `asserts_only` set, requeue
+the ones that fail the Rule 19 check, and only then report "done".
+
+## Spec Attributes Reference
+
+| Attribute | Usage |
+|-----------|-------|
+| `#[spec(prove, target=module::func)]` | Standard spec targeting a function |
+| `#[spec(prove, focus)]` | Run only this spec (debugging) |
+| `#[spec(prove, no_opaque)]` | Prevents OTHER specs from using this spec as opaque contract |
+| `#[spec(prove, ignore_abort)]` | **RESTRICTED** — only user can add |
+| `#[spec(prove, uninterpreted=mod::fn)]` | Prevent solver from expanding function definition (scalability) |
+| `#[spec(prove, include=specs::other_specs)]` | Bring in cross-module opaque specs |
+| `#[spec(prove, boogie_opt=b"vcsSplitOnEveryAssert")]` | Boogie options |
+| `#[spec(prove, run_on=b"local")]` | Force this spec to run on the local prover instead of the cloud backend |
+| `#[spec(target=module::func)]` (no `prove`) | Axiom spec — declares contract without proving it |
+| `#[spec_only(include=specs::mod)]` on module | Module-level include for all specs in the module |
+
+### Remote vs local execution
+
+Specs run on the **cloud prover** by default — this is what `sui-prover --cloud` drives and what the cron pipeline uses. Add `run_on = b"local"` to a single `#[spec(...)]` annotation only when the spec genuinely cannot run in the cloud (e.g., depends on local-only `extra_bpl` or `boogie_opt` paths, or needs to be iterated interactively on your machine). When in doubt, leave it out and let the spec run in the cloud.
+
+## @VERIFY Annotations
+
+Use `// @VERIFY(stage/status)` annotations above each spec. Always use the two-symbol format.
+
+**Stages** (what level of verification):
+| Symbol | Name | Meaning |
+|--------|------|---------|
+| 🫙 | STUB | Empty spec stub that passes prover (with ignore_abort) |
+| 🛡️ | ASSERTS | Abort conditions fully modeled (passes WITHOUT ignore_abort) |
+| ⚙️ | SEMANTICS | Function fully modeled (asserts AND ensures) |
+| 🔍 | REVIEW | Reviewed by third party / ready to ship |
+
+**Status** (current state):
+| Symbol | Name | Meaning |
+|--------|------|---------|
+| 🌀 | WIP | Currently working on this |
+| ⚠️ | Issue | Made an attempt, there's an issue |
+| ✅ | Done | Completed |
+
+**Examples:**
+- `// @VERIFY(🫙/✅)` — stub completed
+- `// @VERIFY(🛡️/✅)` — abort conditions fully modeled and passing
+- `// @VERIFY(⚙️/🌀)` — working on full semantics
+- `// @VERIFY(🛡️/⚠️)` — issue with abort condition modeling
+- `// @VERIFY(⚙️/✅)` — fully proved with semantics
+
+## `uninterpreted` for Scalability
+
+**This is the primary scalability mechanism.** When specs timeout, mark functions as `uninterpreted` to prevent the solver from expanding their definitions:
+
+```move
+#[spec(
+    prove,
+    target = module::complex_function,
+    uninterpreted = specs::helper_specs::quantifier_predicate,
+    uninterpreted = std::q32::mul,
+    boogie_opt = b"vcsSplitOnEveryAssert useArrayAxioms",
+)]
+```
+
+**CRITICAL: `uninterpreted` can only be applied to pure functions** (functions with the `ext(pure)` attribute). Marking a non-pure function as `uninterpreted` will cause compile error.
+
+Use `uninterpreted` for:
+- Complex math functions (fixed-point arithmetic, sqrt calculations)
+- Pure helper functions used in quantifiers
+- Functions whose implementation details don't matter for the current spec
+
+### Design Pattern: Named Wrappers + `uninterpreted`
+
+For complex quantified expressions, create named pure predicates and mark them `uninterpreted` at callsites:
+
+```move
+#[spec_only, ext(pure)]
+public fun all_valid_collaterals(types: &vector<TypeName>, obligation: &Obligation): bool {
+    all!<TypeName>(types, |ct| is_valid_collateral(ct, obligation))
+}
+
+#[spec_only, ext(pure)]
+public fun collateral_value_sum(types: &vector<TypeName>, ...): std::integer::Integer {
+    sum_map!<TypeName, std::integer::Integer>(types, |ct| single_value(ct, ...))
+}
+```
+
+Then mark them `uninterpreted` in the caller spec:
+```move
+#[spec(prove, target = evaluator::check_health,
+    uninterpreted = specs::collateral_value_specs::all_valid_collaterals,
+    uninterpreted = specs::collateral_value_specs::collateral_value_sum,
+    uninterpreted = specs::debt_value_specs::all_valid_debts,
+    uninterpreted = specs::debt_value_specs::weighted_debt_value_sum,
+    uninterpreted = specs::price_specs::price_feed_to_q32,
+)]
+```
+
+**Key rule:** Loop invariants use INLINE `all!`/`sum_map_range!` calls, NOT wrapper predicates — this avoids `_Assume` solver regression. Only the outer spec uses the named wrappers.
+
+## Prover Phases
+
+| Phase | What it verifies |
+|-------|------------------|
+| `_Check` | Assumes all asserts/requires hold, verifies implementation doesn't abort and ensures hold |
+| `_Assume` | Verifies asserts actually correspond to abort conditions (abort coverage) |
+| `_SpecNoAbortCheck` | Verifies the spec body itself doesn't abort (e.g., u64 overflow in spec-level computations) |
+
+**Fix errors in the phase where they appear:**
+- `_Check` failures → add more asserts/requires
+- `_Assume` failures → the assert condition is wrong or should be `requires`
+- `_SpecNoAbortCheck` failures → the spec's own arithmetic needs guarding
+
+## Source Code Modifications for Specs
+
+Modifying the source implementation to support formal verification is standard practice. Common patterns:
+
+### 1. `#[ext(pure)]` on Existing Getters
+Add `#[ext(pure)]` to existing public getter functions to tell the prover they are side-effect-free:
+```move
+#[ext(pure)]
+public fun balance_sheets(vault: &Reserve): &WitTable<...> { &vault.balance_sheets }
+#[ext(pure)]
+public fun contains<T, K, V>(self: &WitTable<T, K, V>, k: K): bool { ... }
+```
+
+### 2. `#[test_only]` New Getters for Private Fields
+Add new getter functions for struct fields that specs need to access:
+```move
+#[test_only, ext(pure)]
+public fun get_debts(self: &Obligation): &WitTable<...> { &self.debts }
+#[test_only, ext(pure)]
+public fun get_amount(self: &Debt): u64 { self.amount }
+#[test_only, ext(pure)]
+public fun balance_sheet_cash(bs: &BalanceSheet): u64 { bs.cash }
+```
+The `#[test_only]` annotation makes these available to the prover (which runs in test mode) without polluting production code.
+
+### 3. `#[spec_only]` Getters (Rare)
+For getters only needed by the prover, not even by tests:
+```move
+#[spec_only, ext(pure)]
+public fun last_update_of(entry: &MinPriceHistory): u64 { entry.last_update }
+```
+
+### 4. Stubbing Dynamic Fields
+When the prover cannot handle dynamic field operations, stub them with hardcoded values:
+```move
+public fun is_allow_all(uid: &UID): bool {
+    // df::exists_(uid, AllowAllKey {})  // original
+    true  // stubbed for prover
+}
+```
+
+Also stub dynamic field reads in business logic when needed:
+```move
+// let borrow_limit = *df::borrow<BorrowLimitKey, u64>(market::uid(market), key);
+let borrow_limit = 18446744073709551615u64;  // max u64 to skip limit check
+```
+
+### 5. New Public Containment Checkers
+Add `has_*` functions to support the `asserts(table.contains(key))` pattern:
+```move
+public fun has_decimals(registry: &CoinDecimalsRegistry, type_name: TypeName): bool {
+    table::contains(&registry.table, type_name)
+}
+```
+
+### 6. Deprecated Functions
+Set deprecated functions to `abort 0` and spec them with `asserts(false)`:
+```move
+// Implementation:
+public fun deprecated_function(...) { abort 0 }
+// Spec:
+#[spec(prove, target = module::deprecated_function)]
+fun deprecated_function_spec(...) {
+    asserts(false);
+    module::deprecated_function(...);
+}
+```
+
+## BPL Axioms
+
+### Bit-shift semantics
+```bpl
+const $POW_TWO_32: int;
+axiom $POW_TWO_32 == 4294967296;
+axiom (forall x: int :: {$shr(x, 32)} $shr(x, 32) == x div $POW_TWO_32);
+```
+
+### Extra BPL prelude files
+When prover fails with `use of undeclared function: $X_module_native_func$pure`:
+```move
+#[spec_only(extra_bpl = b"mymodule_prelude.bpl")]
+module specs::mymodule;
+```
+
+## Project Structure
+
+```
+contracts/
+├── sources/           # Implementation
+├── tests/             # Unit tests
+└── specs/             # Formal verification
+    ├── Move.toml      # Depends on local implementation package
+    └── sources/
+        └── *_specs.move
+```
+
+The specs `Move.toml` should ONLY depend on the protocol sources package. Do NOT add sui, stdlib, or prover dependencies — they are injected automatically by sui-prover.
+
+## `skip` Attribute for Cross-Package Specs
+
+When a spec is proved in a different package (e.g., `dependencies_specs`), mark it with `skip` to avoid re-verification:
+```move
+#[spec(target = wit_table::add, skip = b"Proved in another package")]
+fun add_spec<T: drop, K: copy + drop + store, V: store>(...) { ... }
+```
+The spec still serves as an axiom for callers — it just won't be verified in this package.
+
+## WitTable `keys_accessible` Pattern
+
+For tables with optional key tracking, create a reusable containment predicate:
+```move
+#[spec_only, ext(pure)]
+public fun keys_accessible<T: drop, K: copy + drop + store, V: store>(
+    self: &WitTable<T, K, V>,
+): bool {
+    let with_keys = self.get_with_keys();
+    let keys = self.get_keys();
+    !with_keys || keys.is_some()
+}
+
+// Usage:
+asserts(keys_accessible(obligation.get_collaterals()));
+```
+
+## Failed Specs Package
+
+When a spec reveals a **bug in the source code** (not a spec error), move the spec to a separate `failed_specs` package:
+
+```
+contracts/
+├── specs/              # Main specs (all passing)
+└── failed_specs/       # Specs that prove source bugs
+    ├── Move.toml       # Same deps as specs, different package name
+    └── sources/
+```
+
+```toml
+[package]
+name = "failed_specs"
+edition = "2024.beta"
+
+[dependencies]
+MyProtocol = { local="../protocol" }
+
+[addresses]
+failed_specs = "0x0"
+```
+
+When to use:
+- Spec correctly models the function but prover shows the function aborts on valid inputs (source bug)
+- Division by zero from incorrect overflow guards (e.g., `is_safe_mul(0, y)` doing `MAX / 0`)
+- Missing input validation (e.g., no check for zero amounts)
+- Annotate with `// @VERIFY(🛡️/⚠️) Bug L-N: description`
+
+### Example
+
+```move
+module failed_specs::u128_specs;
+
+// @VERIFY(🛡️/⚠️) Bug L-9: is_safe_mul(0, y) aborts — U128_MAX / 0 is division by zero.
+// 0 * y = 0 never overflows, so is_safe_mul(0, y) should return true.
+#[spec(prove, target = u128::is_safe_mul, no_opaque)]
+fun is_safe_mul_spec(x: u128, y: u128): bool {
+    let expected_result = x.to_int().mul(y.to_int()).lte(std::u128::max_value!().to_int());
+    let result = u128::is_safe_mul(x, y);
+    ensures(expected_result == result);
+    result
+}
+```
+
+## Bitvector-encoding Sibling Package (`specs-bv`)
+
+When a spec is dominated by bitwise / shift operations (carry-chain adders, arithmetic right shift, bit-mask packing), the default Boogie integer encoding times out — Z3 can't relate `&`/`|`/`^`/`<<`/`>>` to integer arithmetic. The fix is to prove that handful of specs under **bitvector encoding** via `sui-prover --no-bv-int-encoding`.
+
+The flag is invocation-wide (every spec in the run is BV-encoded), so we split the BV-only specs into a sibling package:
+
+```
+project/
+├── specs/              # default encoding -- the bulk of specs
+└── specs-bv/           # bitvector encoding -- shift-heavy specs only
+    ├── Move.toml       # `integer_library_specs_bv = "0x0"`
+    ├── prelude_extra.bpl  # native ashr definitions
+    └── sources/
+        └── i32.move    # self-contained: re-declares source + spec
+```
+
+In the main `specs/` package, leave the BV-only spec **without `prove`** so the integer run skips it, and point at the sibling in a comment:
+
+```move
+/*
+ ⚠️ Proved in a separate package as it requires a custom prover configuration.
+*/
+#[spec(target = wrapping_add)]                    // no `prove`
+public fun wrapping_add_spec(num1: I32, num2: I32): I32 { ... }
+```
+
+In `specs-bv/sources/`, re-declare the struct and the source function locally (the BV package doesn't depend on the main package — it gives the encoder a clean view), then write the spec. For arithmetic right shift, declare a native `ashr` and back it with Boogie's `$AShr'BvN'` in `prelude_extra.bpl`:
+
+```move
+public native fun ashr(x: u32, y: u32): u32;
+
+#[spec(prove, target = shr)]
+public fun shr_spec(v: I32, shift: u8): I32 {
+    asserts(shift < 32);
+    let result = shr(v, shift);
+    ensures(result.bits == ashr(v.bits, shift as u32));
+    result
+}
+```
+
+```boogie
+procedure {:inline 1} $0_i32_ashr($t0: bv32, $t1: bv32) returns ($ret0: bv32) {
+  $ret0 := $AShr'Bv32'($t0, $t1);
+}
+```
+
+CI runs both packages: `cd specs && sui-prover && cd ../specs-bv && sui-prover --no-bv-int-encoding`.
+
+See `sui_prover_guide.md` → **Bitvector encoding (`--no-bv-int-encoding`)** for the full pattern, when-to-use criteria, and the bit-iterative wrapping-add example.
+
+
+## Pragmatic `ignore_abort` for Complex Entry Functions
+
+Complex user-facing entry functions (borrow, liquidate, mint, redeem) that call 10+ sub-functions may use `ignore_abort` when:
+- Modeling all abort paths across 10+ transitive calls is impractical
+- Focus is on proving meaningful postconditions (state preservation, accounting invariants)
+- Sub-function specs already cover their own abort conditions independently
+
+Pair `ignore_abort` with rich `ensures`:
+```move
+#[spec(
+    prove,
+    target = market::accrue_all_interests,
+    include = specs::reserve_specs,
+    include = specs::borrow_dynamics_specs,
+    ignore_abort,
+    boogie_opt = b"vcsSplitOnEveryAssert useArrayAxioms proverOpt:O:smt.MBQI=false",
+)]
+fun accrue_all_interests_spec(self: &mut Market, now: u64) {
+    requires(forall!<TypeName>(|t| has_valid_revenue_factor(*t, self)));
+    let old_market = clone!(self);
+    market::accrue_all_interests(self, now);
+    ensures(forall!<TypeName>(|t| accrue_preserves_type(*t, old_bs, new_bs)));
+    ensures(self.collateral_stats() == old_market.collateral_stats());
+}
+```
+
+## Axiom Specs (No `prove`)
+
+For functions too complex to prove fully, use `#[spec(target=...)]` WITHOUT `prove`:
+```move
+// @VERIFY(--/⚠️, TAG=meaningful) Axiom -- prevents prover from inlining complex code
+#[spec(target = module::complex_aggregation)]
+fun complex_aggregation_spec(self: &mut State, now: u64) {
+    let old_state = clone!(self);
+    module::complex_aggregation(self, now);
+    ensures(self.get_field() >= old_state.get_field());
+    ensures(self.other_field() == old_state.other_field());
+}
+```
+Use sparingly. Document why proving is infeasible. Include useful state preservation ensures so callers can rely on them.
+
+## Proving Ensures Through Loops (Entry Point Specs)
+
+When an entry point calls a loop function then modifies state, proving calculation ensures requires careful architecture.
+
+### Step 1: Loop Invariant Preservation
+
+Write `loop_inv` functions in a **separate module** (avoids same-module spec auto-apply poisoning `_Assume`). Use `forall!` wrappers:
+
+```move
+// Predicate for single element
+#[spec_only, ext(pure)]
+fun cash_preserved(t: &TypeName, r: &Storage, old: &Storage): bool {
+    get_cash(r, t) == get_cash(old, t)
+}
+// Quantifier wrapper (forall! must wrap a single function call)
+#[spec_only, ext(pure)]
+fun all_cash_preserved(r: &Storage, old: &Storage): bool {
+    forall!<TypeName>(|t| cash_preserved(t, r, old))
+}
+// Loop invariant
+#[spec_only(loop_inv(target = module::loop_fn)), ext(pure)]
+fun loop_inv(i: u64, n: u64, r: &Storage, __old_r: &Storage): bool {
+    i <= n && all_cash_preserved(r, __old_r)
+}
+```
+
+### Step 2: Include Loop Spec as Opaque
+
+In the entry point spec, include the loop spec to make the loop function opaque. Its proven ensures carry to the caller:
+
+```move
+#[spec(prove, ignore_abort, no_opaque, target = entry::withdraw,
+    include = specs::loop_specs::refresh_interest_spec,  // loop → opaque
+    include = specs::loop_specs::is_safe_spec,           // another loop → opaque
+    include = specs::other::reward_manager_spec,         // heavy function → opaque
+)]
+```
+
+### Step 3: Progressive VC Reduction
+
+If Z3 crashes, include more functions as opaque:
+1. Loop functions (always include)
+2. Safety checks with loops (is_obligation_safe)
+3. Heavy computations (liquidity mining, ADL, limiters)
+4. Leaf computations (burn_ctokens) — only if needed
+
+## Protocol Invariant Pattern
+
+For DeFi invariants (e.g., exchange rate >= 1.0):
+
+1. Define `ext(pure)` predicate: `valid_exchange_rate_invar(reserve)`
+2. Add `requires(invariant)` + `ensures(invariant)` to EVERY state-modifying function
+3. Verify each spec passes — failed ensures may reveal real protocol bugs
+4. For entry points: propagate `requires` up the call chain
+5. Check counterexamples: if they show unreachable states, add auxiliary `requires` (e.g., `cash_covers_reserve`) and prove THAT is maintained too
+
+**Analyzing failed ensures:**
+- If `ensures(result.value() > 0)` fails: check for rounding-to-zero attacks
+- If invariant fails with extreme values: check if state is reachable
+- If unreachable: add filtering `requires`, prove all operations maintain it
+- If reachable: report as protocol finding
+
+## Known Prover Bugs
+
+### Nested Table Access in Ensures
+Specs with ensures that access fields through nested tables timeout even with `boogie_opt`. Mark as abort coverage only (no ensures).
+
+## Examples
+
+See `examples/` directory:
+
+- **`01_basic_open_position.md`** — Multiple includes, abort coverage, struct field ensures
+- **`02_precondition_next_sqrt_price.md`** — Complex tick math, branch-specific asserts, `requires` for domain constraints
+- **`03_precondition_wit_table_add.md`** — Conditional asserts, witness pattern, `no_opaque`
+- **`04_precondition_risk_model_change.md`** — Repetitive validation, fixed-point bounds, epoch overflow
+- **`05_precondition_enable_manage.md`** — Dynamic field existence, boolean toggle
+- **`06_postcondition_get_price.md`** — Oracle validation, fixed-point conversion in ensures
+- **`07_postcondition_withdraw_fee.md`** — Ghost variables for transfer verification, balance arithmetic
+- **`08_loop_is_empty.md`** — Loop invariant with quantifiers, conditional ensures
+- **`09_loop_settle.md`** — Complex loop with multiple pure helpers, `clone!`, frame conditions
+- **`10_loop_reserve_validation.md`** — Counter-based loop, `requires` as sole mechanism
 
 # Execution Mode
 
@@ -1147,1002 +5777,91 @@ These functions are already in the namespace — no imports needed. The namespac
 
 ## User
 
-Produce a spec plan for `staking_pool_specs::pending_stake_withdraw_amount_spec` — a YAML document capturing what should be formally verified about this function. Analyze the function source, its callees, dependency graph, and role in the protocol. The analysis guidelines and output schema are in your system prompt.
-
-## Project Summary
-
-# Sui System (Staking & Validator Management) — Project Summary
-
-## What this protocol does
-
-The `SuiSystem` Move package (`sui_system`, address `0x3`) implements Sui's
-on-chain proof-of-stake and validator-management logic. It owns the global
-`SuiSystemState` object (fixed ID `0x5`), drives epoch transitions, manages the
-active/pending validator set, custodies delegated stake, distributes staking
-rewards, draws down the stake subsidy, and accounts for the storage fund. It is
-the economic heart of the network: every stake, unstake, validator join/leave,
-and reward payout flows through it.
-
-## Versioning model
-
-`SuiSystemState` (the `0x5` object) is a thin versioned wrapper. The real state
-lives in `SuiSystemStateInner`, stored as a dynamic field keyed by version.
-`sui_system.move` holds the public entry surface and forwards to
-`sui_system_state_inner.move` via `load_inner_maybe_upgrade`, which migrates the
-inner object to the latest version on access. Upgrades add a new
-`SuiSystemStateInnerVN` type plus a migration function; `create` always returns
-the genesis type.
-
-## Main modules
-
-- **`sui_system`** — Public/entry surface on the `0x5` wrapper. Thin delegations
-  to the inner object: `request_add_stake`, `request_add_stake_mul_coin`,
-  `request_withdraw_stake`, `request_add_validator`, `request_remove_validator`,
-  validator metadata setters, report/un-report, and the privileged
-  `advance_epoch` (system-address only).
-- **`sui_system_state_inner`** — Core protocol logic: holds the `ValidatorSet`,
-  `StorageFund`, `StakeSubsidy`, parameters, and report records. Implements
-  `advance_epoch` (the epoch-change state machine: collect gas/storage, compute
-  and distribute rewards, draw subsidy, rotate pending validators, recompute
-  voting power).
-- **`validator_set`** — The set of active validators plus pending
-  additions/removals and a table of inactive pools. Routes stake to the right
-  validator, aggregates rewards, adjusts stake, and recomputes voting power at
-  epoch boundaries.
-- **`validator`** — A single validator: metadata, its `StakingPool`, commission
-  rate, gas price, and pending stake/withdraw bookkeeping. Wrapped via
-  `validator_wrapper` (`ValidatorWrapper`) for versioned storage.
-- **`staking_pool`** — Delegated-staking accounting for one validator. Mints
-  `StakedSui` on stake and burns it on withdrawal using a pool-token exchange
-  rate (`PoolTokenExchangeRate`) that tracks the SUI-per-pool-token ratio across
-  epochs. Also supports `FungibleStakedSui`. `MIN_STAKING_THRESHOLD = 1 SUI`.
-- **`stake_subsidy`** — A `Balance<SUI>` drawn down on a schedule; the
-  per-distribution amount decays by `stake_subsidy_decrease_rate` (basis points)
-  every `stake_subsidy_period_length` distributions.
-- **`storage_fund`** — Holds `total_object_storage_rebates` (invariant: equals
-  the sum of on-chain object storage rebates) and a `non_refundable_balance`.
-- **`voting_power`** — Assigns each active validator a voting power in basis
-  points; `TOTAL_VOTING_POWER = 10_000`, with a per-validator cap to bound
-  influence.
-- **`validator_cap`** — `ValidatorOperationCap` / unverified variant: capability
-  authorizing validator operations on behalf of a validator address.
-- **`validator_wrapper`** — Versioned `Validator` storage wrapper.
-- **`genesis`** — One-time network bootstrap of the initial system state.
-
-## Key data structures
-
-- `SuiSystemState` (key, `0x5`) → wraps `SuiSystemStateInner` (dynamic field).
-- `ValidatorSet { active_validators, pending_active_validators,
-  pending_removals, staking_pool_mappings, inactive_validators,
-  validator_candidates, ... }`.
-- `Validator { metadata, voting_power, staking_pool, commission_rate,
-  next_epoch_* pending changes, ... }`.
-- `StakingPool { activation_epoch, sui_balance, rewards_pool,
-  pool_token_balance, exchange_rates: Table<epoch, PoolTokenExchangeRate>,
-  pending_stake, pending_total_sui_withdraw, pending_pool_token_withdraw }`.
-- `StakedSui { pool_id, stake_activation_epoch, principal: Balance<SUI> }` —
-  the user-held staking receipt; principal cannot drop below 1 SUI.
-- `PoolTokenExchangeRate { sui_amount, pool_token_amount }`.
-- `StorageFund`, `StakeSubsidy`, `PoolTokenExchangeRate` as described above.
-
-## Core invariants / properties of interest
-
-- **Exchange-rate accounting**: pool-token ↔ SUI conversions are monotone and
-  consistent; `token_balances` always match the recorded exchange rate
-  (`ETokenBalancesDoNotMatchExchangeRate`). Rewards increase SUI per pool token,
-  never decrease principal owed.
-- **Stake conservation**: SUI moved into/out of a pool equals the change in the
-  pool's `sui_balance` + `rewards_pool`; no SUI is created or destroyed except
-  via reward inflow and subsidy.
-- **Minimum stake**: a `StakedSui`'s principal never drops below
-  `MIN_STAKING_THRESHOLD` (1 SUI); withdraw amounts are non-zero.
-- **Pool/validator matching**: stake operations target the correct pool
-  (`EWrongPool`, `EWrongDelegation`); no staking to inactive pools
-  (`EDelegationToInactivePool`).
-- **Voting power**: per-validator voting power respects the cap and the active
-  set sums to `TOTAL_VOTING_POWER = 10_000`.
-- **Storage-fund invariant**: `total_object_storage_rebates` equals the sum of
-  per-object storage rebates; only the non-refundable portion is retained.
-- **Subsidy decay**: the distribution amount decays by the configured rate each
-  period and is bounded by the remaining subsidy balance.
-- **Authorization**: `advance_epoch` is callable only by the system address;
-  validator operations require the appropriate `ValidatorOperationCap`.
-- **No unexpected aborts**: arithmetic on balances, exchange rates, and voting
-  power stays within `u64`/`u128` bounds under valid preconditions.
-
-
-## Target Function: `staking_pool_specs::pending_stake_withdraw_amount_spec`
-
-Visibility: `public` | Entry: `False` | Estimated complexity: **low** (0 transitive deps)
-
-```move
-/// Returns the total withdrawal from the staking pool this epoch.
-public fun pending_stake_withdraw_amount(staking_pool: &StakingPool): u64 {
-    staking_pool.pending_total_sui_withdraw
-}
-```
-
-## Full Module (`staking_pool.move`)
-
-The complete module containing the target function — use this to understand sibling functions, struct definitions, constants, and helper functions that inform the target's behavior.
-
-```move
-// Copyright (c) Mysten Labs, Inc.
-// SPDX-License-Identifier: Apache-2.0
-
-#[allow(unused_const)]
-module sui_system::staking_pool;
-
-use sui::bag::{Self, Bag};
-use sui::balance::{Self, Balance};
-use sui::sui::SUI;
-use sui::table::{Self, Table};
-
-/// StakedSui objects cannot be split to below this amount.
-const MIN_STAKING_THRESHOLD: u64 = 1_000_000_000; // 1 SUI
-
-const EInsufficientPoolTokenBalance: u64 = 0;
-const EWrongPool: u64 = 1;
-const EWithdrawAmountCannotBeZero: u64 = 2;
-const EInsufficientSuiTokenBalance: u64 = 3;
-const EInsufficientRewardsPoolBalance: u64 = 4;
-const EDestroyNonzeroBalance: u64 = 5;
-const ETokenTimeLockIsSome: u64 = 6;
-const EWrongDelegation: u64 = 7;
-const EPendingDelegationDoesNotExist: u64 = 8;
-const ETokenBalancesDoNotMatchExchangeRate: u64 = 9;
-const EDelegationToInactivePool: u64 = 10;
-const EDeactivationOfInactivePool: u64 = 11;
-const EIncompatibleStakedSui: u64 = 12;
-const EWithdrawalInSameEpoch: u64 = 13;
-const EPoolAlreadyActive: u64 = 14;
-const EPoolPreactiveOrInactive: u64 = 15;
-const EActivationOfInactivePool: u64 = 16;
-const EDelegationOfZeroSui: u64 = 17;
-const EStakedSuiBelowThreshold: u64 = 18;
-const ECannotMintFungibleStakedSuiYet: u64 = 19;
-const EInvariantFailure: u64 = 20;
-
-/// A staking pool embedded in each validator struct in the system state object.
-public struct StakingPool has key, store {
-    id: UID,
-    /// The epoch at which this pool became active.
-    /// The value is `None` if the pool is pre-active and `Some(<epoch_number>)` if active or inactive.
-    activation_epoch: Option<u64>,
-    /// The epoch at which this staking pool ceased to be active. `None` = {pre-active, active},
-    /// `Some(<epoch_number>)` if in-active, and it was de-activated at epoch `<epoch_number>`.
-    deactivation_epoch: Option<u64>,
-    /// The total number of SUI tokens in this pool, including the SUI in the rewards_pool, as well as in all the principal
-    /// in the `StakedSui` object, updated at epoch boundaries.
-    sui_balance: u64,
-    /// The epoch stake rewards will be added here at the end of each epoch.
-    rewards_pool: Balance<SUI>,
-    /// Total number of pool tokens issued by the pool.
-    pool_token_balance: u64,
-    /// Exchange rate history of previous epochs. Key is the epoch number.
-    /// The entries start from the `activation_epoch` of this pool and contains exchange rates at the beginning of each epoch,
-    /// i.e., right after the rewards for the previous epoch have been deposited into the pool.
-    exchange_rates: Table<u64, PoolTokenExchangeRate>,
-    /// Pending stake amount for this epoch, emptied at epoch boundaries.
-    pending_stake: u64,
-    /// Pending stake withdrawn during the current epoch, emptied at epoch boundaries.
-    /// This includes both the principal and rewards SUI withdrawn.
-    pending_total_sui_withdraw: u64,
-    /// Pending pool token withdrawn during the current epoch, emptied at epoch boundaries.
-    pending_pool_token_withdraw: u64,
-    /// Any extra fields that's not defined statically.
-    extra_fields: Bag,
-}
-
-/// Struct representing the exchange rate of the stake pool token to SUI.
-public struct PoolTokenExchangeRate has copy, drop, store {
-    sui_amount: u64,
-    pool_token_amount: u64,
-}
-
-/// A self-custodial object holding the staked SUI tokens.
-public struct StakedSui has key, store {
-    id: UID,
-    /// ID of the staking pool we are staking with.
-    pool_id: ID,
-    /// The epoch at which the stake becomes active.
-    stake_activation_epoch: u64,
-    /// The staked SUI tokens.
-    principal: Balance<SUI>,
-}
-
-/// An alternative to `StakedSui` that holds the pool token amount instead of the SUI balance.
-/// StakedSui objects can be converted to FungibleStakedSuis after the initial warmup period.
-/// The advantage of this is that you can now merge multiple StakedSui objects from different
-/// activation epochs into a single FungibleStakedSui object.
-public struct FungibleStakedSui has key, store {
-    id: UID,
-    /// ID of the staking pool we are staking with.
-    pool_id: ID,
-    /// The pool token amount.
-    value: u64,
-}
-
-/// Holds useful information
-public struct FungibleStakedSuiData has key, store {
-    id: UID,
-    /// fungible_staked_sui supply
-    total_supply: u64,
-    /// principal balance. Rewards are withdrawn from the reward pool
-    principal: Balance<SUI>,
-}
-
-// === dynamic field keys ===
-public struct FungibleStakedSuiDataKey has copy, drop, store {}
-
-/// Holds the amount of SUI that was underflowed when withdrawing from the pool
-/// post safe mode. Cleaned up in the same transaction.
-public struct UnderflowSuiBalance has copy, drop, store {}
-
-// ==== initializer ====
-
-/// Create a new, empty staking pool.
-public(package) fun new(ctx: &mut TxContext): StakingPool {
-    StakingPool {
-        id: object::new(ctx),
-        activation_epoch: option::none(),
-        deactivation_epoch: option::none(),
-        sui_balance: 0,
-        rewards_pool: balance::zero(),
-        pool_token_balance: 0,
-        exchange_rates: table::new(ctx),
-        pending_stake: 0,
-        pending_total_sui_withdraw: 0,
-        pending_pool_token_withdraw: 0,
-        extra_fields: bag::new(ctx),
-    }
-}
-
-// ==== stake requests ====
-
-/// Request to stake to a staking pool. The stake starts counting at the beginning of the next epoch,
-public(package) fun request_add_stake(
-    pool: &mut StakingPool,
-    stake: Balance<SUI>,
-    stake_activation_epoch: u64,
-    ctx: &mut TxContext,
-): StakedSui {
-    let sui_amount = stake.value();
-    assert!(!pool.is_inactive(), EDelegationToInactivePool);
-    assert!(sui_amount > 0, EDelegationOfZeroSui);
-
-    pool.pending_stake = pool.pending_stake + sui_amount;
-    StakedSui {
-        id: object::new(ctx),
-        pool_id: object::id(pool),
-        stake_activation_epoch,
-        principal: stake,
-    }
-}
-
-/// Request to withdraw the given stake plus rewards from a staking pool.
-/// Both the principal and corresponding rewards in SUI are withdrawn.
-/// A proportional amount of pool token withdraw is recorded and processed at epoch change time.
-public(package) fun request_withdraw_stake(
-    pool: &mut StakingPool,
-    staked_sui: StakedSui,
-    ctx: &TxContext,
-): Balance<SUI> {
-    // stake is inactive and the pool is not preactive - allow direct withdraw
-    // the reason why we exclude preactive pools is to avoid potential underflow
-    // on subtraction, and we need to enforce `pending_stake_withdraw` call.
-    if (staked_sui.stake_activation_epoch > ctx.epoch() && !pool.is_preactive()) {
-        let principal = staked_sui.into_balance();
-        pool.pending_stake = pool.pending_stake - principal.value();
-        return principal
-    };
-
-    let (pool_token_withdraw_amount, mut principal_withdraw) = pool.withdraw_from_principal(
-        staked_sui,
-    );
-    let principal_withdraw_amount = principal_withdraw.value();
-
-    let rewards_withdraw = pool.withdraw_rewards(
-        principal_withdraw_amount,
-        pool_token_withdraw_amount,
-        ctx.epoch(),
-    );
-    let total_sui_withdraw_amount = principal_withdraw_amount + rewards_withdraw.value();
-
-    pool.pending_total_sui_withdraw = pool.pending_total_sui_withdraw + total_sui_withdraw_amount;
-    pool.pending_pool_token_withdraw =
-        pool.pending_pool_token_withdraw + pool_token_withdraw_amount;
-
-    // If the pool is inactive or preactive, we immediately process the withdrawal.
-    if (pool.is_inactive() || pool.is_preactive()) pool.process_pending_stake_withdraw();
-
-    // TODO: implement withdraw bonding period here.
-    principal_withdraw.join(rewards_withdraw);
-    principal_withdraw
-}
-
-public(package) fun redeem_fungible_staked_sui(
-    pool: &mut StakingPool,
-    fungible_staked_sui: FungibleStakedSui,
-    ctx: &TxContext,
-): Balance<SUI> {
-    let FungibleStakedSui { id, pool_id, value } = fungible_staked_sui;
-    assert!(pool_id == object::id(pool), EWrongPool);
-
-    id.delete();
-
-    let latest_exchange_rate = pool.pool_token_exchange_rate_at_epoch(ctx.epoch());
-    let fungible_staked_sui_data: &mut FungibleStakedSuiData =
-        &mut pool.extra_fields[FungibleStakedSuiDataKey {}];
-
-    let (
-        principal_amount,
-        rewards_amount,
-    ) = latest_exchange_rate.calculate_fungible_staked_sui_withdraw_amount(
-        value,
-        fungible_staked_sui_data.principal.value(),
-        fungible_staked_sui_data.total_supply,
-    );
-
-    fungible_staked_sui_data.total_supply = fungible_staked_sui_data.total_supply - value;
-
-    let mut sui_out = fungible_staked_sui_data.principal.split(principal_amount);
-    sui_out.join(pool.rewards_pool.split(rewards_amount));
-
-    pool.pending_total_sui_withdraw = pool.pending_total_sui_withdraw + sui_out.value();
-    pool.pending_pool_token_withdraw = pool.pending_pool_token_withdraw + value;
-
-    sui_out
-}
-
-/// written in separate function so i can test with random values
-/// returns (principal_withdraw_amount, rewards_withdraw_amount)
-fun calculate_fungible_staked_sui_withdraw_amount(
-    latest_exchange_rate: PoolTokenExchangeRate,
-    fungible_staked_sui_value: u64,
-    fungible_staked_sui_data_principal_amount: u64, // fungible_staked_sui_data.principal.value()
-    fungible_staked_sui_data_total_supply: u64, // fungible_staked_sui_data.total_supply
-): (u64, u64) {
-    // 1. if the entire FungibleStakedSuiData supply is redeemed, how much sui should we receive?
-    let total_sui_amount = latest_exchange_rate.get_sui_amount(
-        fungible_staked_sui_data_total_supply,
-    );
-
-    // min with total_sui_amount to prevent underflow
-    let fungible_staked_sui_data_principal_amount = fungible_staked_sui_data_principal_amount.min(
-        total_sui_amount,
-    );
-
-    // 2. how much do we need to withdraw from the rewards pool?
-    let total_rewards = total_sui_amount - fungible_staked_sui_data_principal_amount;
-
-    // 3. proportionally withdraw from both wrt the fungible_staked_sui_value.
-    let principal_withdraw_amount = mul_div!(
-        fungible_staked_sui_value,
-        fungible_staked_sui_data_principal_amount,
-        fungible_staked_sui_data_total_supply,
-    );
-
-    let rewards_withdraw_amount = mul_div!(
-        fungible_staked_sui_value,
-        total_rewards,
-        fungible_staked_sui_data_total_supply,
-    );
-
-    // invariant check, just in case
-    let expected_sui_amount = latest_exchange_rate.get_sui_amount(fungible_staked_sui_value);
-    assert!(
-        principal_withdraw_amount + rewards_withdraw_amount <= expected_sui_amount,
-        EInvariantFailure,
-    );
-
-    (principal_withdraw_amount, rewards_withdraw_amount)
-}
-
-/// Convert the given staked SUI to an FungibleStakedSui object
-public(package) fun convert_to_fungible_staked_sui(
-    pool: &mut StakingPool,
-    staked_sui: StakedSui,
-    ctx: &mut TxContext,
-): FungibleStakedSui {
-    let StakedSui { id, pool_id, stake_activation_epoch, principal } = staked_sui;
-
-    assert!(pool_id == object::id(pool), EWrongPool);
-    assert!(ctx.epoch() >= stake_activation_epoch, ECannotMintFungibleStakedSuiYet);
-    assert!(!pool.is_preactive() && !pool.is_inactive(), EPoolPreactiveOrInactive);
-
-    id.delete();
-
-    let exchange_rate_at_staking_epoch = pool.pool_token_exchange_rate_at_epoch(
-        stake_activation_epoch,
-    );
-
-    let pool_token_amount = exchange_rate_at_staking_epoch.get_token_amount(principal.value());
-    assert!(pool_token_amount > 0, EStakedSuiBelowThreshold);
-
-    let key = FungibleStakedSuiDataKey {};
-
-    if (!pool.extra_fields.contains(key)) {
-        pool
-            .extra_fields
-            .add(
-                key,
-                FungibleStakedSuiData {
-                    id: object::new(ctx),
-                    total_supply: pool_token_amount,
-                    principal,
-                },
-            );
-    } else {
-        let fungible_staked_sui_data: &mut FungibleStakedSuiData = &mut pool.extra_fields[key];
-        fungible_staked_sui_data.total_supply =
-            fungible_staked_sui_data.total_supply + pool_token_amount;
-        fungible_staked_sui_data.principal.join(principal);
-    };
-
-    FungibleStakedSui {
-        id: object::new(ctx),
-        pool_id,
-        value: pool_token_amount,
-    }
-}
-
-/// Withdraw the principal SUI stored in the StakedSui object, and calculate the corresponding amount of pool
-/// tokens using exchange rate at staking epoch.
-/// Returns values are amount of pool tokens withdrawn and withdrawn principal portion of SUI.
-public(package) fun withdraw_from_principal(
-    pool: &StakingPool,
-    staked_sui: StakedSui,
-): (u64, Balance<SUI>) {
-    // Check that the stake information matches the pool.
-    assert!(staked_sui.pool_id == object::id(pool), EWrongPool);
-
-    let exchange_rate_at_staking_epoch = pool.pool_token_exchange_rate_at_epoch(staked_sui.stake_activation_epoch);
-    let principal_withdraw = staked_sui.into_balance();
-    let pool_token_withdraw_amount = exchange_rate_at_staking_epoch.get_token_amount(principal_withdraw.value());
-
-    (pool_token_withdraw_amount, principal_withdraw)
-}
-
-/// Allows calling `.into_balance()` on `StakedSui` to invoke `unwrap_staked_sui`
-use fun unwrap_staked_sui as StakedSui.into_balance;
-
-fun unwrap_staked_sui(staked_sui: StakedSui): Balance<SUI> {
-    let StakedSui { id, principal, .. } = staked_sui;
-    id.delete();
-    principal
-}
-
-// ==== functions called at epoch boundaries ===
-
-/// Called at epoch advancement times to add rewards (in SUI) to the staking pool.
-public(package) fun deposit_rewards(pool: &mut StakingPool, rewards: Balance<SUI>) {
-    pool.sui_balance = pool.sui_balance + rewards.value();
-    pool.rewards_pool.join(rewards);
-}
-
-public(package) fun process_pending_stakes_and_withdraws(pool: &mut StakingPool, ctx: &TxContext) {
-    let new_epoch = ctx.epoch() + 1;
-    pool.process_pending_stake_withdraw();
-    pool.process_pending_stake();
-    pool
-        .exchange_rates
-        .add(
-            new_epoch,
-            PoolTokenExchangeRate {
-                sui_amount: pool.sui_balance,
-                pool_token_amount: pool.pool_token_balance,
-            },
-        );
-
-    pool.check_balance_invariants(new_epoch);
-}
-
-/// Called at epoch boundaries to process pending stake withdraws requested during the epoch.
-/// Also called immediately upon withdrawal if the pool is inactive.
-fun process_pending_stake_withdraw(pool: &mut StakingPool) {
-    pool.sui_balance = if (pool.sui_balance >= pool.pending_total_sui_withdraw) {
-        pool.sui_balance - pool.pending_total_sui_withdraw
-    } else {
-        let diff = pool.pending_total_sui_withdraw - pool.sui_balance;
-        // While this key is expected to be removed in the next call to `process_pending_stake`,
-        // we do not call `process_pending_stake` for inactive pools — skip the bookkeeping.
-        if (!pool.is_inactive()) {
-            pool.extra_fields.add(UnderflowSuiBalance {}, diff);
-        };
-        0
-    };
-
-    pool.pool_token_balance = if (pool.pool_token_balance >= pool.pending_pool_token_withdraw) {
-        pool.pool_token_balance - pool.pending_pool_token_withdraw
-    } else {
-        0
-    };
-
-    pool.pending_total_sui_withdraw = 0;
-    pool.pending_pool_token_withdraw = 0;
-}
-
-/// Called at epoch boundaries to process the pending stake.
-public(package) fun process_pending_stake(pool: &mut StakingPool) {
-    // Use the most up to date exchange rate with the rewards deposited and withdraws effectuated.
-    let latest_exchange_rate = PoolTokenExchangeRate {
-        sui_amount: pool.sui_balance,
-        pool_token_amount: pool.pool_token_balance,
-    };
-
-    // This key is only present if the `sui_balance` underflowed, hence, the current value of `sui_balance`
-    // is `0`. Pool token balance will be recalculated automatically for `0` value.
-    let sui_diff = {
-        let key = UnderflowSuiBalance {};
-        if (pool.extra_fields.contains(key)) pool.extra_fields.remove(key) else 0
-    };
-
-    pool.sui_balance = pool.sui_balance + pool.pending_stake - sui_diff;
-    pool.pool_token_balance = latest_exchange_rate.get_token_amount(pool.sui_balance);
-    pool.pending_stake = 0;
-}
-
-/// This function does the following:
-///     1. Calculates the total amount of SUI (including principal and rewards) that the provided pool tokens represent
-///        at the current exchange rate.
-///     2. Using the above number and the given `principal_withdraw_amount`, calculates the rewards portion of the
-///        stake we should withdraw.
-///     3. Withdraws the rewards portion from the rewards pool at the current exchange rate. We only withdraw the rewards
-///        portion because the principal portion was already taken out of the staker's self custodied StakedSui.
-fun withdraw_rewards(
-    pool: &mut StakingPool,
-    principal_withdraw_amount: u64,
-    pool_token_withdraw_amount: u64,
-    epoch: u64,
-): Balance<SUI> {
-    let exchange_rate = pool.pool_token_exchange_rate_at_epoch(epoch);
-    let total_sui_withdraw_amount = exchange_rate.get_sui_amount(pool_token_withdraw_amount);
-    let mut reward_withdraw_amount = if (total_sui_withdraw_amount >= principal_withdraw_amount) {
-        total_sui_withdraw_amount - principal_withdraw_amount
-    } else 0;
-
-    // This may happen when we are withdrawing everything from the pool and
-    // the rewards pool balance may be less than reward_withdraw_amount.
-    // TODO: FIGURE OUT EXACTLY WHY THIS CAN HAPPEN.
-    reward_withdraw_amount = reward_withdraw_amount.min(pool.rewards_pool.value());
-    pool.rewards_pool.split(reward_withdraw_amount)
-}
-
-// ==== preactive pool related ====
-
-/// Called by `validator` module to activate a staking pool.
-public(package) fun activate_staking_pool(pool: &mut StakingPool, activation_epoch: u64) {
-    // Add the initial exchange rate to the table.
-    pool.exchange_rates.add(activation_epoch, initial_exchange_rate());
-    // Check that the pool is preactive and not inactive.
-    assert!(pool.is_preactive(), EPoolAlreadyActive);
-    assert!(!pool.is_inactive(), EActivationOfInactivePool);
-    // Fill in the active epoch.
-    pool.activation_epoch.fill(activation_epoch);
-}
-
-// ==== inactive pool related ====
-
-/// Deactivate a staking pool by setting the `deactivation_epoch`. After
-/// this pool deactivation, the pool stops earning rewards. Only stake
-/// withdraws can be made to the pool.
-public(package) fun deactivate_staking_pool(pool: &mut StakingPool, deactivation_epoch: u64) {
-    // We can't deactivate an already deactivated pool.
-    assert!(!pool.is_inactive(), EDeactivationOfInactivePool);
-    pool.deactivation_epoch = option::some(deactivation_epoch);
-}
-
-// ==== getters and misc utility functions ====
-
-public fun sui_balance(pool: &StakingPool): u64 { pool.sui_balance }
-
-public fun pool_id(staked_sui: &StakedSui): ID { staked_sui.pool_id }
-
-public use fun fungible_staked_sui_pool_id as FungibleStakedSui.pool_id;
-
-public fun fungible_staked_sui_pool_id(fungible_staked_sui: &FungibleStakedSui): ID {
-    fungible_staked_sui.pool_id
-}
-
-/// Allows calling `.amount()` on `StakedSui` to invoke `staked_sui_amount`
-public use fun staked_sui_amount as StakedSui.amount;
-
-/// Returns the principal amount of `StakedSui`.
-public fun staked_sui_amount(staked_sui: &StakedSui): u64 { staked_sui.principal.value() }
-
-public use fun stake_activation_epoch as StakedSui.activation_epoch;
-
-/// Returns the activation epoch of `StakedSui`.
-public fun stake_activation_epoch(staked_sui: &StakedSui): u64 {
-    staked_sui.stake_activation_epoch
-}
-
-/// Returns true if the input staking pool is preactive.
-public fun is_preactive(pool: &StakingPool): bool {
-    pool.activation_epoch.is_none()
-}
-
-/// Returns the activation epoch of the `StakingPool`. For validator candidates,
-/// or pending validators, the value returned is `None`. For active validators,
-/// the value is the epoch before the validator was activated.
-public(package) fun activation_epoch(pool: &StakingPool): Option<u64> {
-    pool.activation_epoch
-}
-
-/// Returns true if the input staking pool is inactive.
-public fun is_inactive(pool: &StakingPool): bool {
-    pool.deactivation_epoch.is_some()
-}
-
-public use fun fungible_staked_sui_value as FungibleStakedSui.value;
-
-public fun fungible_staked_sui_value(fungible_staked_sui: &FungibleStakedSui): u64 {
-    fungible_staked_sui.value
-}
-
-public use fun split_fungible_staked_sui as FungibleStakedSui.split;
-
-public fun split_fungible_staked_sui(
-    fungible_staked_sui: &mut FungibleStakedSui,
-    split_amount: u64,
-    ctx: &mut TxContext,
-): FungibleStakedSui {
-    assert!(split_amount <= fungible_staked_sui.value, EInsufficientPoolTokenBalance);
-
-    fungible_staked_sui.value = fungible_staked_sui.value - split_amount;
-
-    FungibleStakedSui {
-        id: object::new(ctx),
-        pool_id: fungible_staked_sui.pool_id,
-        value: split_amount,
-    }
-}
-
-public use fun join_fungible_staked_sui as FungibleStakedSui.join;
-
-public fun join_fungible_staked_sui(self: &mut FungibleStakedSui, other: FungibleStakedSui) {
-    let FungibleStakedSui { id, pool_id, value } = other;
-    assert!(self.pool_id == pool_id, EWrongPool);
-
-    id.delete();
-
-    self.value = self.value + value;
-}
-
-/// Split StakedSui `self` to two parts, one with principal `split_amount`,
-/// and the remaining principal is left in `self`.
-/// All the other parameters of the StakedSui like `stake_activation_epoch` or `pool_id` remain the same.
-public fun split(self: &mut StakedSui, split_amount: u64, ctx: &mut TxContext): StakedSui {
-    let original_amount = self.principal.value();
-    assert!(split_amount <= original_amount, EInsufficientSuiTokenBalance);
-    let remaining_amount = original_amount - split_amount;
-    // Both resulting parts should have at least MIN_STAKING_THRESHOLD.
-    assert!(remaining_amount >= MIN_STAKING_THRESHOLD, EStakedSuiBelowThreshold);
-    assert!(split_amount >= MIN_STAKING_THRESHOLD, EStakedSuiBelowThreshold);
-    StakedSui {
-        id: object::new(ctx),
-        pool_id: self.pool_id,
-        stake_activation_epoch: self.stake_activation_epoch,
-        principal: self.principal.split(split_amount),
-    }
-}
-
-/// Allows calling `.split_to_sender()` on `StakedSui` to invoke `split_staked_sui`
-public use fun split_staked_sui as StakedSui.split_to_sender;
-
-#[allow(lint(public_entry))]
-/// Split the given StakedSui to the two parts, one with principal `split_amount`,
-/// transfer the newly split part to the sender address.
-public entry fun split_staked_sui(stake: &mut StakedSui, split_amount: u64, ctx: &mut TxContext) {
-    transfer::transfer(stake.split(split_amount, ctx), ctx.sender());
-}
-
-/// Allows calling `.join()` on `StakedSui` to invoke `join_staked_sui`
-public use fun join_staked_sui as StakedSui.join;
-
-#[allow(lint(public_entry))]
-/// Consume the staked sui `other` and add its value to `self`.
-/// Aborts if some of the staking parameters are incompatible (pool id, stake activation epoch, etc.)
-public entry fun join_staked_sui(self: &mut StakedSui, other: StakedSui) {
-    assert!(is_equal_staking_metadata(self, &other), EIncompatibleStakedSui);
-    let StakedSui { id, principal, .. } = other;
-
-    id.delete();
-    self.principal.join(principal);
-}
-
-/// Returns true if all the staking parameters of the staked sui except the principal are identical
-public fun is_equal_staking_metadata(self: &StakedSui, other: &StakedSui): bool {
-    (self.pool_id == other.pool_id) &&
-    (self.stake_activation_epoch == other.stake_activation_epoch)
-}
-
-public fun pool_token_exchange_rate_at_epoch(
-    pool: &StakingPool,
-    epoch: u64,
-): PoolTokenExchangeRate {
-    // If the pool is preactive then the exchange rate is always 1:1.
-    if (pool.is_preactive_at_epoch(epoch)) {
-        return initial_exchange_rate()
-    };
-    let clamped_epoch = pool.deactivation_epoch.get_with_default(epoch);
-    let mut epoch = clamped_epoch.min(epoch);
-    let activation_epoch = *pool.activation_epoch.borrow();
-
-    // Find the latest epoch that's earlier than the given epoch with an entry in the table
-    while (epoch >= activation_epoch) {
-        if (pool.exchange_rates.contains(epoch)) {
-            return pool.exchange_rates[epoch]
-        };
-        epoch = epoch - 1;
-    };
-    // This line really should be unreachable. Do we want an assert false here?
-    initial_exchange_rate()
-}
-
-/// Returns the total value of the pending staking requests for this staking pool.
-public fun pending_stake_amount(staking_pool: &StakingPool): u64 {
-    staking_pool.pending_stake
-}
-
-/// Returns the total withdrawal from the staking pool this epoch.
-public fun pending_stake_withdraw_amount(staking_pool: &StakingPool): u64 {
-    staking_pool.pending_total_sui_withdraw
-}
-
-public(package) fun exchange_rates(pool: &StakingPool): &Table<u64, PoolTokenExchangeRate> {
-    &pool.exchange_rates
-}
-
-public fun sui_amount(exchange_rate: &PoolTokenExchangeRate): u64 {
-    exchange_rate.sui_amount
-}
-
-public fun pool_token_amount(exchange_rate: &PoolTokenExchangeRate): u64 {
-    exchange_rate.pool_token_amount
-}
-
-/// Returns true if the provided staking pool is preactive at the provided epoch.
-fun is_preactive_at_epoch(pool: &StakingPool, epoch: u64): bool {
-    // Either the pool is currently preactive or the pool's starting epoch is later than the provided epoch.
-    pool.is_preactive() || (*pool.activation_epoch.borrow() > epoch)
-}
-
-fun get_sui_amount(exchange_rate: &PoolTokenExchangeRate, token_amount: u64): u64 {
-    // When either amount is 0, that means we have no stakes with this pool.
-    // The other amount might be non-zero when there's dust left in the pool.
-    if (exchange_rate.sui_amount == 0 || exchange_rate.pool_token_amount == 0) {
-        return token_amount
-    };
-
-    mul_div!(exchange_rate.sui_amount, token_amount, exchange_rate.pool_token_amount)
-}
-
-fun get_token_amount(exchange_rate: &PoolTokenExchangeRate, sui_amount: u64): u64 {
-    // When either amount is 0, that means we have no stakes with this pool.
-    // The other amount might be non-zero when there's dust left in the pool.
-    if (exchange_rate.sui_amount == 0 || exchange_rate.pool_token_amount == 0) {
-        return sui_amount
-    };
-
-    mul_div!(exchange_rate.pool_token_amount, sui_amount, exchange_rate.sui_amount)
-}
-
-fun initial_exchange_rate(): PoolTokenExchangeRate {
-    PoolTokenExchangeRate { sui_amount: 0, pool_token_amount: 0 }
-}
-
-fun check_balance_invariants(pool: &StakingPool, epoch: u64) {
-    let exchange_rate = pool.pool_token_exchange_rate_at_epoch(epoch);
-    // check that the pool token balance and sui balance ratio matches the exchange rate stored.
-    let expected = exchange_rate.get_token_amount(pool.sui_balance);
-    let actual = pool.pool_token_balance;
-    assert!(expected == actual, ETokenBalancesDoNotMatchExchangeRate)
-}
-
-macro fun mul_div($a: u64, $b: u64, $c: u64): u64 {
-    (($a as u128) * ($b as u128) / ($c as u128)) as u64
-}
-
-// Given the `staked_sui` receipt calculate the current rewards (in terms of SUI) for it.
-public(package) fun calculate_rewards(
-    pool: &StakingPool,
-    staked_sui: &StakedSui,
-    current_epoch: u64,
-): u64 {
-    let staked_amount = staked_sui.amount();
-    let pool_token_withdraw_amount = {
-        let exchange_rate_at_staking_epoch = pool.pool_token_exchange_rate_at_epoch(staked_sui.stake_activation_epoch);
-        exchange_rate_at_staking_epoch.get_token_amount(staked_amount)
-    };
-
-    let new_epoch_exchange_rate = pool.pool_token_exchange_rate_at_epoch(current_epoch);
-    let total_sui_withdraw_amount = new_epoch_exchange_rate.get_sui_amount(
-        pool_token_withdraw_amount,
-    );
-
-    let mut reward_withdraw_amount = if (total_sui_withdraw_amount >= staked_amount) {
-        total_sui_withdraw_amount - staked_amount
-    } else 0;
-    reward_withdraw_amount = reward_withdraw_amount.min(pool.rewards_pool.value());
-
-    reward_withdraw_amount
-}
-
-// ==== test-related functions ====
-
-#[test_only]
-public(package) fun fungible_staked_sui_data(pool: &StakingPool): &FungibleStakedSuiData {
-    bag::borrow(&pool.extra_fields, FungibleStakedSuiDataKey {})
-}
-
-#[test_only]
-public use fun fungible_staked_sui_data_total_supply as FungibleStakedSuiData.total_supply;
-
-#[test_only]
-public(package) fun fungible_staked_sui_data_total_supply(
-    fungible_staked_sui_data: &FungibleStakedSuiData,
-): u64 {
-    fungible_staked_sui_data.total_supply
-}
-
-#[test_only]
-public use fun fungible_staked_sui_data_principal_value as FungibleStakedSuiData.principal_value;
-
-#[test_only]
-public(package) fun fungible_staked_sui_data_principal_value(
-    fungible_staked_sui_data: &FungibleStakedSuiData,
-): u64 {
-    fungible_staked_sui_data.principal.value()
-}
-
-#[test_only]
-public(package) fun pending_pool_token_withdraw_amount(pool: &StakingPool): u64 {
-    pool.pending_pool_token_withdraw
-}
-
-#[test_only]
-public(package) fun create_fungible_staked_sui_for_testing(
-    self: &StakingPool,
-    value: u64,
-    ctx: &mut TxContext,
-): FungibleStakedSui {
-    FungibleStakedSui {
-        id: object::new(ctx),
-        pool_id: object::id(self),
-        value,
-    }
-}
-
-#[test_only]
-public(package) fun process_pending_stake_withdraw_for_testing(pool: &mut StakingPool) {
-    pool.process_pending_stake_withdraw()
-}
-
-#[test_only]
-public(package) fun increase_pending_pool_token_withdraw_for_testing(
-    pool: &mut StakingPool,
-    delta: u64,
-) {
-    pool.pending_pool_token_withdraw = pool.pending_pool_token_withdraw + delta
-}
-
-#[test_only]
-public(package) fun increase_pending_total_sui_withdraw_for_testing(
-    pool: &mut StakingPool,
-    delta: u64,
-) {
-    pool.pending_total_sui_withdraw = pool.pending_total_sui_withdraw + delta
-}
-
-#[test_only]
-public(package) fun pool_token_balance(pool: &StakingPool): u64 {
-    pool.pool_token_balance
-}
-
-// ==== tests ====
-
-#[random_test]
-fun test_calculate_fungible_staked_sui_withdraw_amount(
-    mut total_sui_amount: u64,
-    // these are all in basis points
-    mut pool_token_frac: u16,
-    mut fungible_staked_sui_data_total_supply_frac: u16,
-    mut fungible_staked_sui_data_principal_frac: u16,
-    mut fungible_staked_sui_value_bps: u16,
-) {
-    total_sui_amount = total_sui_amount.max(1);
-
-    pool_token_frac = pool_token_frac % 10_000;
-    fungible_staked_sui_data_total_supply_frac =
-        fungible_staked_sui_data_total_supply_frac % 10_000;
-    fungible_staked_sui_data_principal_frac = fungible_staked_sui_data_principal_frac % 10_000;
-    fungible_staked_sui_value_bps = fungible_staked_sui_value_bps % 10_000;
-
-    let total_pool_token_amount = mul_div!(total_sui_amount, pool_token_frac as u64, 10_000).max(1);
-
-    let exchange_rate = PoolTokenExchangeRate {
-        sui_amount: total_sui_amount,
-        pool_token_amount: total_pool_token_amount,
-    };
-
-    let fungible_staked_sui_data_total_supply = mul_div!(
-        total_pool_token_amount,
-        fungible_staked_sui_data_total_supply_frac as u64,
-        10_000,
-    ).max(1);
-    let fungible_staked_sui_value = mul_div!(
-        fungible_staked_sui_data_total_supply,
-        fungible_staked_sui_value_bps as u64,
-        10_000,
-    );
-
-    let max_principal = exchange_rate.get_sui_amount(fungible_staked_sui_data_total_supply);
-    let fungible_staked_sui_data_principal_amount = mul_div!(
-        max_principal,
-        fungible_staked_sui_data_principal_frac as u64,
-        10_000,
-    ).max(1);
-
-    let (principal_amount, rewards_amount) = calculate_fungible_staked_sui_withdraw_amount(
-        exchange_rate,
-        fungible_staked_sui_value,
-        fungible_staked_sui_data_principal_amount,
-        fungible_staked_sui_data_total_supply,
-    );
-
-    let expected_out = exchange_rate.get_sui_amount(fungible_staked_sui_value);
-
-    assert!(principal_amount + rewards_amount <= expected_out, 0);
-
-    let min_out = if (expected_out > 2) expected_out - 2 else 0;
-    assert!(principal_amount + rewards_amount >= min_out, 0);
-}
-
-```
-
-## Direct Callees (0)
-
-No direct callees.
-
-## Transitive Dependency Graph
-
-0 transitive dependencies (names unavailable).
-
-## Entry Points Reaching `staking_pool_specs::pending_stake_withdraw_amount_spec`
-
-These are the entry and public functions that can reach the target through the call graph — use this to understand the target's role in the protocol.
-
-- **`staking_pool::pending_stake_withdraw_amount`**: `staking_pool::pending_stake_withdraw_amount`
-
-## Relevant Structs
-
-No relevant structs found.
-
----
-
-Produce the spec plan for `staking_pool_specs::pending_stake_withdraw_amount_spec`. Return it via `final_result(spec_plan)` as a Python dict matching the YAML schema in your system prompt.
+Improve the spec `staking_pool_specs::pending_stake_withdraw_amount_spec` targeting `staking_pool::pending_stake_withdraw_amount`. Current state: stub. Add abort coverage (asserts) and remove ignore_abort.
 
 ## Assistant
 
-### Code `toolu_01CRuXZ4S25j5gsBkUrX2wqv`
+I'll start by loading the spec_improve skill and examining the current state of the spec and target function.
+
+### Code `toolu_01R3q7nuFkibKk1uqjS1BLYx`
 
 ```python
+load_skill('spec_improve')
 
-from foxy.skills.function_knowledge.api import get_knowledge
+from foxy.skills.spec_knowledge.api import get_knowledge as get_spec_k
+from foxy.skills.project_env.api import get_project_root, get_packages
 
 project = get_project_root()
-k = get_knowledge(project)
-fn = k.item("staking_pool::pending_stake_withdraw_amount")
-foxy_inspect(fn.source)
-foxy_inspect(fn.all_accesses)
-
+packages = get_packages()
+foxy_inspect(f"project={project}")
+foxy_inspect(f"packages={packages}")
 ```
 
-> 12604 in, 131 out, 15801 cache read
+> 161 in, 197 out, 105847 cache read
 
-### Result `toolu_01CRuXZ4S25j5gsBkUrX2wqv`
+### Result `toolu_01R3q7nuFkibKk1uqjS1BLYx`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_d3w2pvjm.txt","to_foxy_logs":"project=/Users/cos/asymptotic/agent/clients/mysten/sui\npackages=['/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system', '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs']"} -->
+```
+project=/Users/cos/asymptotic/agent/clients/mysten/sui
+packages=['/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system', '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs']
+```
+
+---
+
+## Assistant
+
+### Code `toolu_01WvtxKHVy9H2RaEHA8GJC2B`
+
+```python
+sk = get_spec_k(project)
+spec = sk.item("staking_pool_specs::pending_stake_withdraw_amount_spec")
+
+foxy_inspect("=== SPEC SOURCE ===")
+foxy_inspect(spec.source)
+foxy_inspect("=== TARGET SOURCE ===")
+foxy_inspect(spec.target.get("source_code") if spec.target else "None")
+```
+
+> 220 in, 183 out, 105847 cache read, 358 cache create
+
+### Result `toolu_01WvtxKHVy9H2RaEHA8GJC2B`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_vzdhiyqr.txt","to_foxy_logs":"=== SPEC SOURCE ===\n#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, ignore_abort)]\nfun pending_stake_withdraw_amount_spec(\n    staking_pool: &StakingPool,\n): u64 {\n    staking_pool::pending_stake_withdraw_amount(staking_pool)\n}\n=== TARGET SOURCE ===\nNone"} -->
+```
+=== SPEC SOURCE ===
+#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, ignore_abort)]
+fun pending_stake_withdraw_amount_spec(
+    staking_pool: &StakingPool,
+): u64 {
+    staking_pool::pending_stake_withdraw_amount(staking_pool)
+}
+=== TARGET SOURCE ===
+None
+```
+
+---
+
+## Assistant
+
+The target source came back as None. Let me get it directly.
+
+### Code `toolu_01NhaPfeD1pmQ2CQuq9iha3r`
+
+```python
+from foxy.skills.function_knowledge.api import get_knowledge as get_fk
+
+fk = get_fk(project)
+fn = fk.item("staking_pool::pending_stake_withdraw_amount")
+foxy_inspect("=== TARGET ===")
+foxy_inspect(fn.source)
+foxy_inspect(f"file={fn.file} lines={fn.line_range}")
+foxy_inspect(f"callees={fn.callees}")
+```
+
+> 245 in, 214 out, 106205 cache read, 403 cache create
+
+### Result `toolu_01NhaPfeD1pmQ2CQuq9iha3r`
 
 <!-- {"error":"get_callees failed for staking_pool::pending_stake_withdraw_amount at /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system: Error: Compilation failed:\nerror: unbound module\n  \u250c\u2500 ./sources/genesis.move:6:5\n  \u2502\n6 \u2502 use sui::balance::{Self, Balance};\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n  \u250c\u2500 ./sources/genesis.move:7:5\n  \u2502\n7 \u2502 use sui::sui::SUI;\n  \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::sui'\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/genesis.move:138:24\n    \u2502\n138 \u2502     let storage_fund = balance::zero();\n    \u2502                        ^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/genesis.move:199:17\n    \u2502\n199 \u2502                 transfer::public_transfer(allocation_balance.into_coin(ctx), recipient_address);\n    \u2502                 ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./sources/stake_subsidy.move:6:5\n  \u2502\n6 \u2502 use sui::bag::{Self, Bag};\n  \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::bag'\n\nerror: unbound module\n  \u250c\u2500 ./sources/stake_subsidy.move:7:5\n  \u2502\n7 \u2502 use sui::balance::Balance;\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n  \u250c\u2500 ./sources/stake_subsidy.move:8:5\n  \u2502\n8 \u2502 use sui::sui::SUI;\n  \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::sui'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./sources/stake_subsidy.move:50:23\n   \u2502\n50 \u2502         extra_fields: bag::new(ctx),\n   \u2502                       ^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./sources/staking_pool.move:7:5\n  \u2502\n7 \u2502 use sui::bag::{Self, Bag};\n  \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::bag'\n\nerror: unbound module\n  \u250c\u2500 ./sources/staking_pool.move:8:5\n  \u2502\n8 \u2502 use sui::balance::{Self, Balance};\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n  \u250c\u2500 ./sources/staking_pool.move:9:5\n  \u2502\n9 \u2502 use sui::sui::SUI;\n  \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::sui'\n\nerror: unbound module\n   \u250c\u2500 ./sources/staking_pool.move:10:5\n   \u2502\n10 \u2502 use sui::table::{Self, Table};\n   \u2502     ^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::table'\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:118:13\n    \u2502\n118 \u2502         id: object::new(ctx),\n    \u2502             ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:119:27\n    \u2502\n119 \u2502         activation_epoch: option::none(),\n    \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:120:29\n    \u2502\n120 \u2502         deactivation_epoch: option::none(),\n    \u2502                             ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:122:23\n    \u2502\n122 \u2502         rewards_pool: balance::zero(),\n    \u2502                       ^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:124:25\n    \u2502\n124 \u2502         exchange_rates: table::new(ctx),\n    \u2502                         ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:128:23\n    \u2502\n128 \u2502         extra_fields: bag::new(ctx),\n    \u2502                       ^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:147:13\n    \u2502\n147 \u2502         id: object::new(ctx),\n    \u2502             ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:148:18\n    \u2502\n148 \u2502         pool_id: object::id(pool),\n    \u2502                  ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:201:24\n    \u2502\n201 \u2502     assert!(pool_id == object::id(pool), EWrongPool);\n    \u2502                        ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:281:24\n    \u2502\n281 \u2502     assert!(pool_id == object::id(pool), EWrongPool);\n    \u2502                        ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:302:25\n    \u2502\n302 \u2502                     id: object::new(ctx),\n    \u2502                         ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:315:13\n    \u2502\n315 \u2502         id: object::new(ctx),\n    \u2502             ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:329:35\n    \u2502\n329 \u2502     assert!(staked_sui.pool_id == object::id(pool), EWrongPool);\n    \u2502                                   ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:464:31\n    \u2502\n464 \u2502     pool.deactivation_epoch = option::some(deactivation_epoch);\n    \u2502                               ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:527:13\n    \u2502\n527 \u2502         id: object::new(ctx),\n    \u2502             ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:555:13\n    \u2502\n555 \u2502         id: object::new(ctx),\n    \u2502             ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:569:5\n    \u2502\n569 \u2502     transfer::transfer(stake.split(split_amount, ctx), ctx.sender());\n    \u2502     ^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:708:5\n    \u2502\n708 \u2502     bag::borrow(&pool.extra_fields, FungibleStakedSuiDataKey {})\n    \u2502     ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:743:13\n    \u2502\n743 \u2502         id: object::new(ctx),\n    \u2502             ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/staking_pool.move:744:18\n    \u2502\n744 \u2502         pool_id: object::id(self),\n    \u2502                  ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./sources/storage_fund.move:6:5\n  \u2502\n6 \u2502 use sui::balance::{Self, Balance};\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n  \u250c\u2500 ./sources/storage_fund.move:7:5\n  \u2502\n7 \u2502 use sui::sui::SUI;\n  \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::sui'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./sources/storage_fund.move:26:39\n   \u2502\n26 \u2502         total_object_storage_rebates: balance::zero(),\n   \u2502                                       ^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n   \u250c\u2500 ./sources/sui_system.move:42:5\n   \u2502\n42 \u2502 use sui::balance::Balance;\n   \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n   \u250c\u2500 ./sources/sui_system.move:43:5\n   \u2502\n43 \u2502 use sui::coin::Coin;\n   \u2502     ^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::coin'\n\nerror: unbound module\n   \u250c\u2500 ./sources/sui_system.move:44:5\n   \u2502\n44 \u2502 use sui::dynamic_field;\n   \u2502     ^^^^^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::dynamic_field'\n\nerror: unbound module\n   \u250c\u2500 ./sources/sui_system.move:45:5\n   \u2502\n45 \u2502 use sui::sui::SUI;\n   \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::sui'\n\nerror: unbound module\n   \u250c\u2500 ./sources/sui_system.move:46:5\n   \u2502\n46 \u2502 use sui::table::Table;\n   \u2502     ^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::table'\n\nerror: unbound module\n   \u250c\u2500 ./sources/sui_system.move:47:5\n   \u2502\n47 \u2502 use sui::vec_map::VecMap;\n   \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::vec_map'\n\nerror: unbound module\n   \u250c\u2500 ./sources/sui_system.move:60:5\n   \u2502\n60 \u2502 use sui::balance;\n   \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n   \u250c\u2500 ./sources/sui_system.move:64:5\n   \u2502\n64 \u2502 use sui::vec_set::VecSet;\n   \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::vec_set'\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system.move:102:5\n    \u2502\n102 \u2502     dynamic_field::add(&mut self.id, version, system_state);\n    \u2502     ^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system.move:103:5\n    \u2502\n103 \u2502     transfer::share_object(self);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system.move:236:5\n    \u2502\n236 \u2502     transfer::public_transfer(staked_sui, ctx.sender());\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system.move:254:19\n    \u2502\n254 \u2502     stake_amount: option::Option<u64>,\n    \u2502                   ^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid type\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system.move:262:5\n    \u2502\n262 \u2502     transfer::public_transfer(staked_sui, ctx.sender());\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system.move:273:5\n    \u2502\n273 \u2502     transfer::public_transfer(withdrawn_stake.into_coin(ctx), ctx.sender());\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system.move:634:41\n    \u2502\n634 \u2502     let inner: &SuiSystemStateInnerV2 = dynamic_field::borrow(\n    \u2502                                         ^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system.move:644:39\n    \u2502\n644 \u2502         let v1: SuiSystemStateInner = dynamic_field::remove(&mut self.id, self.version);\n    \u2502                                       ^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system.move:647:9\n    \u2502\n647 \u2502         dynamic_field::add(&mut self.id, self.version, v2);\n    \u2502         ^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system.move:650:45\n    \u2502\n650 \u2502     let inner: &mut SuiSystemStateInnerV2 = dynamic_field::borrow_mut(\n    \u2502                                             ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system.move:892:26\n    \u2502\n892 \u2502     let storage_reward = balance::create_for_testing(storage_charge);\n    \u2502                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system.move:893:30\n    \u2502\n893 \u2502     let computation_reward = balance::create_for_testing(computation_charge);\n    \u2502                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./sources/sui_system_state_inner.move:6:5\n  \u2502\n6 \u2502 use sui::bag::{Self, Bag};\n  \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::bag'\n\nerror: unbound module\n  \u250c\u2500 ./sources/sui_system_state_inner.move:7:5\n  \u2502\n7 \u2502 use sui::balance::{Self, Balance};\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n  \u250c\u2500 ./sources/sui_system_state_inner.move:8:5\n  \u2502\n8 \u2502 use sui::coin::Coin;\n  \u2502     ^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::coin'\n\nerror: unbound module\n  \u250c\u2500 ./sources/sui_system_state_inner.move:9:5\n  \u2502\n9 \u2502 use sui::event;\n  \u2502     ^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::event'\n\nerror: unbound module\n   \u250c\u2500 ./sources/sui_system_state_inner.move:10:5\n   \u2502\n10 \u2502 use sui::sui::SUI;\n   \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::sui'\n\nerror: unbound module\n   \u250c\u2500 ./sources/sui_system_state_inner.move:11:5\n   \u2502\n11 \u2502 use sui::table::Table;\n   \u2502     ^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::table'\n\nerror: unbound module\n   \u250c\u2500 ./sources/sui_system_state_inner.move:12:5\n   \u2502\n12 \u2502 use sui::vec_map::{Self, VecMap};\n   \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::vec_map'\n\nerror: unbound module\n   \u250c\u2500 ./sources/sui_system_state_inner.move:13:5\n   \u2502\n13 \u2502 use sui::vec_set::{Self, VecSet};\n   \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::vec_set'\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system_state_inner.move:239:35\n    \u2502\n239 \u2502         validator_report_records: vec_map::empty(),\n    \u2502                                   ^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system_state_inner.move:242:36\n    \u2502\n242 \u2502         safe_mode_storage_rewards: balance::zero(),\n    \u2502                                    ^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system_state_inner.move:243:40\n    \u2502\n243 \u2502         safe_mode_computation_rewards: balance::zero(),\n    \u2502                                        ^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system_state_inner.move:247:23\n    \u2502\n247 \u2502         extra_fields: bag::new(ctx),\n    \u2502                       ^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system_state_inner.move:271:23\n    \u2502\n271 \u2502         extra_fields: bag::new(ctx),\n    \u2502                       ^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system_state_inner.move:567:56\n    \u2502\n567 \u2502         validator_report_records.insert(reportee_addr, vec_set::singleton(reporter_address));\n    \u2502                                                        ^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/sui_system_state_inner.move:907:29\n    \u2502\n907 \u2502     let mut stake_subsidy = balance::zero();\n    \u2502                             ^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1000:5\n     \u2502\n1000 \u2502     event::emit(SystemEpochInfoEvent {\n     \u2502     ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1068:29\n     \u2502\n1068 \u2502     let mut voting_powers = vec_map::empty();\n     \u2502                             ^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1095:10\n     \u2502\n1095 \u2502     else vec_set::empty()\n     \u2502          ^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1140:13\n     \u2502\n1140 \u2502             transfer::public_transfer(total_balance.into_coin(ctx), ctx.sender());\n     \u2502             ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1299:9\n     \u2502\n1299 \u2502         option::none(),\n     \u2502         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./sources/validator.move:7:5\n  \u2502\n7 \u2502 use std::bcs;\n  \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'std::bcs'\n\nerror: unbound module\n  \u250c\u2500 ./sources/validator.move:8:5\n  \u2502\n8 \u2502 use std::string::String;\n  \u2502     ^^^^^^^^^^^ Invalid 'use'. Unbound module: 'std::string'\n\nerror: unbound module\n  \u250c\u2500 ./sources/validator.move:9:5\n  \u2502\n9 \u2502 use sui::bag::{Self, Bag};\n  \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::bag'\n\nerror: unbound module\n   \u250c\u2500 ./sources/validator.move:10:5\n   \u2502\n10 \u2502 use sui::balance::Balance;\n   \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n   \u250c\u2500 ./sources/validator.move:11:5\n   \u2502\n11 \u2502 use sui::event;\n   \u2502     ^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::event'\n\nerror: unbound module\n   \u250c\u2500 ./sources/validator.move:12:5\n   \u2502\n12 \u2502 use sui::sui::SUI;\n   \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::sui'\n\nerror: unbound module\n   \u250c\u2500 ./sources/validator.move:13:5\n   \u2502\n13 \u2502 use sui::url::{Self, Url};\n   \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::url'\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:199:43\n    \u2502\n199 \u2502         next_epoch_protocol_pubkey_bytes: option::none(),\n    \u2502                                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:200:42\n    \u2502\n200 \u2502         next_epoch_network_pubkey_bytes: option::none(),\n    \u2502                                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:201:41\n    \u2502\n201 \u2502         next_epoch_worker_pubkey_bytes: option::none(),\n    \u2502                                         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:202:41\n    \u2502\n202 \u2502         next_epoch_proof_of_possession: option::none(),\n    \u2502                                         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:203:33\n    \u2502\n203 \u2502         next_epoch_net_address: option::none(),\n    \u2502                                 ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:204:33\n    \u2502\n204 \u2502         next_epoch_p2p_address: option::none(),\n    \u2502                                 ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:205:37\n    \u2502\n205 \u2502         next_epoch_primary_address: option::none(),\n    \u2502                                     ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:206:36\n    \u2502\n206 \u2502         next_epoch_worker_address: option::none(),\n    \u2502                                    ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:251:9\n    \u2502\n251 \u2502         url::new_unsafe_from_bytes(image_url),\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:252:9\n    \u2502\n252 \u2502         url::new_unsafe_from_bytes(project_url),\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:257:9\n    \u2502\n257 \u2502         bag::new(ctx),\n    \u2502         ^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:297:5\n    \u2502\n297 \u2502     event::emit(StakingRequestEvent {\n    \u2502     ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:316:5\n    \u2502\n316 \u2502     event::emit(ConvertingToFungibleStakedSuiEvent {\n    \u2502     ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:336:5\n    \u2502\n336 \u2502     event::emit(RedeemingFungibleStakedSuiEvent {\n    \u2502     ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:359:5\n    \u2502\n359 \u2502     transfer::public_transfer(staked_sui, staker_address);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:378:5\n    \u2502\n378 \u2502     event::emit(UnstakingRequestEvent {\n    \u2502     ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:591:5\n    \u2502\n591 \u2502     object::id(&self.staking_pool)\n    \u2502     ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:682:31\n    \u2502\n682 \u2502     self.metadata.image_url = url::new_unsafe_from_bytes(image_url);\n    \u2502                               ^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:691:33\n    \u2502\n691 \u2502     self.metadata.project_url = url::new_unsafe_from_bytes(project_url);\n    \u2502                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:704:44\n    \u2502\n704 \u2502     self.metadata.next_epoch_net_address = option::some(net_address);\n    \u2502                                            ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:730:44\n    \u2502\n730 \u2502     self.metadata.next_epoch_p2p_address = option::some(p2p_address);\n    \u2502                                            ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:756:48\n    \u2502\n756 \u2502     self.metadata.next_epoch_primary_address = option::some(primary_address);\n    \u2502                                                ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:785:47\n    \u2502\n785 \u2502     self.metadata.next_epoch_worker_address = option::some(worker_address);\n    \u2502                                               ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:811:54\n    \u2502\n811 \u2502     self.metadata.next_epoch_protocol_pubkey_bytes = option::some(protocol_pubkey);\n    \u2502                                                      ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:812:52\n    \u2502\n812 \u2502     self.metadata.next_epoch_proof_of_possession = option::some(proof_of_possession);\n    \u2502                                                    ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:834:53\n    \u2502\n834 \u2502     self.metadata.next_epoch_network_pubkey_bytes = option::some(network_pubkey);\n    \u2502                                                     ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:853:52\n    \u2502\n853 \u2502     self.metadata.next_epoch_worker_pubkey_bytes = option::some(worker_pubkey);\n    \u2502                                                    ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:907:27\n    \u2502\n907 \u2502     validate_metadata_bcs(bcs::to_bytes(metadata));\n    \u2502                           ^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:943:23\n    \u2502\n943 \u2502         extra_fields: bag::new(ctx),\n    \u2502                       ^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:982:13\n    \u2502\n982 \u2502             url::new_unsafe_from_bytes(image_url),\n    \u2502             ^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:983:13\n    \u2502\n983 \u2502             url::new_unsafe_from_bytes(project_url),\n    \u2502             ^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator.move:988:13\n    \u2502\n988 \u2502             bag::new(ctx),\n    \u2502             ^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./sources/validator_cap.move:51:13\n   \u2502\n51 \u2502         id: object::new(ctx),\n   \u2502             ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./sources/validator_cap.move:54:28\n   \u2502\n54 \u2502     let operation_cap_id = object::id(&operation_cap);\n   \u2502                            ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./sources/validator_cap.move:55:5\n   \u2502\n55 \u2502     transfer::public_transfer(operation_cap, validator_address);\n   \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./sources/validator_set.move:6:5\n  \u2502\n6 \u2502 use sui::bag::{Self, Bag};\n  \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::bag'\n\nerror: unbound module\n  \u250c\u2500 ./sources/validator_set.move:7:5\n  \u2502\n7 \u2502 use sui::balance::Balance;\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n  \u250c\u2500 ./sources/validator_set.move:8:5\n  \u2502\n8 \u2502 use sui::event;\n  \u2502     ^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::event'\n\nerror: unbound module\n  \u250c\u2500 ./sources/validator_set.move:9:5\n  \u2502\n9 \u2502 use sui::priority_queue as pq;\n  \u2502     ^^^^^^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::priority_queue'\n\nerror: unbound module\n   \u250c\u2500 ./sources/validator_set.move:10:5\n   \u2502\n10 \u2502 use sui::sui::SUI;\n   \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::sui'\n\nerror: unbound module\n   \u250c\u2500 ./sources/validator_set.move:11:5\n   \u2502\n11 \u2502 use sui::table::{Self, Table};\n   \u2502     ^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::table'\n\nerror: unbound module\n   \u250c\u2500 ./sources/validator_set.move:12:5\n   \u2502\n12 \u2502 use sui::table_vec::{Self, TableVec};\n   \u2502     ^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::table_vec'\n\nerror: unbound module\n   \u250c\u2500 ./sources/validator_set.move:13:5\n   \u2502\n13 \u2502 use sui::vec_map::{Self, VecMap};\n   \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::vec_map'\n\nerror: unbound module\n   \u250c\u2500 ./sources/validator_set.move:14:5\n   \u2502\n14 \u2502 use sui::vec_set::VecSet;\n   \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::vec_set'\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:146:37\n    \u2502\n146 \u2502     let mut staking_pool_mappings = table::new(ctx);\n    \u2502                                     ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:153:36\n    \u2502\n153 \u2502         pending_active_validators: table_vec::empty(ctx),\n    \u2502                                    ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:156:30\n    \u2502\n156 \u2502         inactive_validators: table::new(ctx),\n    \u2502                              ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:157:31\n    \u2502\n157 \u2502         validator_candidates: table::new(ctx),\n    \u2502                               ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:158:29\n    \u2502\n158 \u2502         at_risk_validators: vec_map::empty(),\n    \u2502                             ^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:159:23\n    \u2502\n159 \u2502         extra_fields: bag::new(ctx),\n    \u2502                       ^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: invalid use of reserved name\n    \u250c\u2500 ./sources/validator_set.move:501:37\n    \u2502\n501 \u2502     let pending_active_validators = vector::tabulate!(\n    \u2502                                     ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:501:37\n    \u2502\n501 \u2502     let pending_active_validators = vector::tabulate!(\n    \u2502                                     ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:585:13\n    \u2502\n585 \u2502             event::emit(ValidatorJoinEvent {\n    \u2502             ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:611:23\n    \u2502\n611 \u2502         .map_ref!(|v| pq::new_entry(v.gas_price(), v.voting_power()));\n    \u2502                       ^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:614:18\n    \u2502\n614 \u2502     let mut pq = pq::new(entries);\n    \u2502                  ^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:757:32\n    \u2502\n757 \u2502                 return 'search option::some(i)\n    \u2502                                ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:761:9\n    \u2502\n761 \u2502         option::none()\n    \u2502         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:913:46\n    \u2502\n913 \u2502     assert!(validator.operation_cap_id() == &object::id(cap), EInvalidCap);\n    \u2502                                              ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./sources/validator_set.move:961:5\n    \u2502\n961 \u2502     event::emit(ValidatorLeaveEvent {\n    \u2502     ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n     \u250c\u2500 ./sources/validator_set.move:1019:53\n     \u2502\n1019 \u2502     let mut individual_staking_reward_adjustments = vec_map::empty();\n     \u2502                                                     ^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n     \u250c\u2500 ./sources/validator_set.move:1021:58\n     \u2502\n1021 \u2502     let mut individual_storage_fund_reward_adjustments = vec_map::empty();\n     \u2502                                                          ^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n     \u250c\u2500 ./sources/validator_set.move:1220:13\n     \u2502\n1220 \u2502             transfer::public_transfer(rewards_stake, validator_address);\n     \u2502             ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n     \u250c\u2500 ./sources/validator_set.move:1254:9\n     \u2502\n1254 \u2502         event::emit(ValidatorEpochInfoEventV2 {\n     \u2502         ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./sources/validator_wrapper.move:6:5\n  \u2502\n6 \u2502 use sui::versioned::{Self, Versioned};\n  \u2502     ^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::versioned'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./sources/validator_wrapper.move:18:16\n   \u2502\n18 \u2502         inner: versioned::create(1, validator, ctx),\n   \u2502                ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./tests/builders/test_runner.move:9:5\n  \u2502\n9 \u2502 use sui::balance::{Self, Balance};\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n   \u250c\u2500 ./tests/builders/test_runner.move:10:5\n   \u2502\n10 \u2502 use sui::coin::{Self, Coin};\n   \u2502     ^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::coin'\n\nerror: unbound module\n   \u250c\u2500 ./tests/builders/test_runner.move:11:5\n   \u2502\n11 \u2502 use sui::sui::SUI;\n   \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::sui'\n\nerror: unbound module\n   \u250c\u2500 ./tests/builders/test_runner.move:12:5\n   \u2502\n12 \u2502 use sui::test_scenario::{Self, Scenario};\n   \u2502     ^^^^^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::test_scenario'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:41:21\n   \u2502\n41 \u2502         validators: option::none(),\n   \u2502                     ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:42:27\n   \u2502\n42 \u2502         validators_count: option::none(),\n   \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:43:28\n   \u2502\n43 \u2502         sui_supply_amount: option::none(),\n   \u2502                            ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:44:30\n   \u2502\n44 \u2502         storage_fund_amount: option::none(),\n   \u2502                              ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:45:35\n   \u2502\n45 \u2502         validators_initial_stake: option::none(),\n   \u2502                                   ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:46:27\n   \u2502\n46 \u2502         protocol_version: option::none(),\n   \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:47:37\n   \u2502\n47 \u2502         stake_distribution_counter: option::none(),\n   \u2502                                     ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:48:25\n   \u2502\n48 \u2502         epoch_duration: option::none(),\n   \u2502                         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:49:22\n   \u2502\n49 \u2502         start_epoch: option::none(),\n   \u2502                      ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:50:33\n   \u2502\n50 \u2502         low_stake_grace_period: option::none(),\n   \u2502                                 ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:55:24\n   \u2502\n55 \u2502     let mut scenario = test_scenario::begin(@0);\n   \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: invalid use of reserved name\n   \u250c\u2500 ./tests/builders/test_runner.move:73:9\n   \u2502\n73 \u2502         vector::tabulate!(validators_count, |idx| {\n   \u2502         ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:73:9\n   \u2502\n73 \u2502         vector::tabulate!(validators_count, |idx| {\n   \u2502         ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/test_runner.move:99:9\n   \u2502\n99 \u2502         balance::create_for_testing<SUI>(sui_supply_amount.destroy_or!(1000) * MIST_PER_SUI), // sui_supply\n   \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:116:9\n    \u2502\n116 \u2502         object::new(scenario.ctx()), // it doesn't matter what ID sui system state has in tests\n    \u2502         ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:118:9\n    \u2502\n118 \u2502         balance::create_for_testing<SUI>(storage_fund_amount.destroy_or!(0) * MIST_PER_SUI), // storage_fund\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:152:30\n    \u2502\n152 \u2502     builder.epoch_duration = option::some(epoch_duration);\n    \u2502                              ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:168:32\n    \u2502\n168 \u2502     builder.validators_count = option::some(validators_count);\n    \u2502                                ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:176:33\n    \u2502\n176 \u2502     builder.sui_supply_amount = option::some(sui_supply_amount);\n    \u2502                                 ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:184:35\n    \u2502\n184 \u2502     builder.storage_fund_amount = option::some(storage_fund_amount);\n    \u2502                                   ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:192:40\n    \u2502\n192 \u2502     builder.validators_initial_stake = option::some(validators_initial_stake);\n    \u2502                                        ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:197:27\n    \u2502\n197 \u2502     builder.start_epoch = option::some(start_epoch);\n    \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:205:32\n    \u2502\n205 \u2502     builder.protocol_version = option::some(protocol_version);\n    \u2502                                ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:213:42\n    \u2502\n213 \u2502     builder.stake_distribution_counter = option::some(stake_distribution_counter);\n    \u2502                                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:231:27\n    \u2502\n231 \u2502         protocol_version: option::none(),\n    \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:232:25\n    \u2502\n232 \u2502         storage_charge: option::none(),\n    \u2502                         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:233:29\n    \u2502\n233 \u2502         computation_charge: option::none(),\n    \u2502                             ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:234:25\n    \u2502\n234 \u2502         storage_rebate: option::none(),\n    \u2502                         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:235:37\n    \u2502\n235 \u2502         non_refundable_storage_fee: option::none(),\n    \u2502                                     ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:236:37\n    \u2502\n236 \u2502         storage_fund_reinvest_rate: option::none(),\n    \u2502                                     ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:237:31\n    \u2502\n237 \u2502         reward_slashing_rate: option::none(),\n    \u2502                               ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:238:27\n    \u2502\n238 \u2502         epoch_start_time: option::none(),\n    \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:248:29\n    \u2502\n248 \u2502     opts.protocol_version = option::some(protocol_version);\n    \u2502                             ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:253:27\n    \u2502\n253 \u2502     opts.storage_charge = option::some(storage_charge);\n    \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:261:31\n    \u2502\n261 \u2502     opts.computation_charge = option::some(computation_charge);\n    \u2502                               ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:266:27\n    \u2502\n266 \u2502     opts.storage_rebate = option::some(storage_rebate);\n    \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:274:39\n    \u2502\n274 \u2502     opts.non_refundable_storage_fee = option::some(non_refundable_storage_fee);\n    \u2502                                       ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:282:39\n    \u2502\n282 \u2502     opts.storage_fund_reinvest_rate = option::some(storage_fund_reinvest_rate);\n    \u2502                                       ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:290:33\n    \u2502\n290 \u2502     opts.reward_slashing_rate = option::some(reward_slashing_rate);\n    \u2502                                 ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:298:29\n    \u2502\n298 \u2502     opts.epoch_start_time = option::some(epoch_start_time);\n    \u2502                             ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:331:5\n    \u2502\n331 \u2502     transfer::public_transfer(object, runner.sender);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:339:5\n    \u2502\n339 \u2502     balance::create_for_testing(amount * MIST_PER_SUI)\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:381:5\n    \u2502\n381 \u2502     test_scenario::return_shared(system_state);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:467:13\n    \u2502\n467 \u2502             coin::mint_for_testing(amount * MIST_PER_SUI, ctx),\n    \u2502             ^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:486:17\n    \u2502\n486 \u2502                 coin::mint_for_testing(amount * MIST_PER_SUI, ctx),\n    \u2502                 ^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:599:5\n    \u2502\n599 \u2502     test_scenario::return_shared(system);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/test_runner.move:615:26\n    \u2502\n615 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n   \u250c\u2500 ./tests/builders/validator_builder.move:12:5\n   \u2502\n12 \u2502 use sui::bag;\n   \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::bag'\n\nerror: unbound module\n   \u250c\u2500 ./tests/builders/validator_builder.move:13:5\n   \u2502\n13 \u2502 use sui::balance;\n   \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n   \u250c\u2500 ./tests/builders/validator_builder.move:14:5\n   \u2502\n14 \u2502 use sui::sui::SUI;\n   \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::sui'\n\nerror: unbound module\n   \u250c\u2500 ./tests/builders/validator_builder.move:15:5\n   \u2502\n15 \u2502 use sui::url;\n   \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::url'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:44:22\n   \u2502\n44 \u2502         sui_address: option::none(),\n   \u2502                      ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:45:32\n   \u2502\n45 \u2502         protocol_pubkey_bytes: option::none(),\n   \u2502                                ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:46:31\n   \u2502\n46 \u2502         network_pubkey_bytes: option::none(),\n   \u2502                               ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:47:30\n   \u2502\n47 \u2502         worker_pubkey_bytes: option::none(),\n   \u2502                              ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:48:30\n   \u2502\n48 \u2502         proof_of_possession: option::none(),\n   \u2502                              ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:49:15\n   \u2502\n49 \u2502         name: option::none(),\n   \u2502               ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:50:22\n   \u2502\n50 \u2502         description: option::none(),\n   \u2502                      ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:51:20\n   \u2502\n51 \u2502         image_url: option::none(),\n   \u2502                    ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:52:22\n   \u2502\n52 \u2502         project_url: option::none(),\n   \u2502                      ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:53:22\n   \u2502\n53 \u2502         net_address: option::none(),\n   \u2502                      ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:54:22\n   \u2502\n54 \u2502         p2p_address: option::none(),\n   \u2502                      ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:55:26\n   \u2502\n55 \u2502         primary_address: option::none(),\n   \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:56:25\n   \u2502\n56 \u2502         worker_address: option::none(),\n   \u2502                         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:57:20\n   \u2502\n57 \u2502         gas_price: option::none(),\n   \u2502                    ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:58:26\n   \u2502\n58 \u2502         commission_rate: option::none(),\n   \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:60:24\n   \u2502\n60 \u2502         initial_stake: option::none(),\n   \u2502                        ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:66:22\n   \u2502\n66 \u2502         sui_address: option::some(preset.account_address()),\n   \u2502                      ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:67:32\n   \u2502\n67 \u2502         protocol_pubkey_bytes: option::some(preset.protocol_pubkey_bytes()),\n   \u2502                                ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:68:31\n   \u2502\n68 \u2502         network_pubkey_bytes: option::some(preset.network_pubkey_bytes()),\n   \u2502                               ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:69:30\n   \u2502\n69 \u2502         worker_pubkey_bytes: option::some(preset.worker_pubkey_bytes()),\n   \u2502                              ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:70:30\n   \u2502\n70 \u2502         proof_of_possession: option::some(preset.proof_of_possession()),\n   \u2502                              ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:71:15\n   \u2502\n71 \u2502         name: option::some(preset.name()),\n   \u2502               ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:72:22\n   \u2502\n72 \u2502         description: option::some(preset.description()),\n   \u2502                      ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:73:20\n   \u2502\n73 \u2502         image_url: option::some(preset.image_url()),\n   \u2502                    ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:74:22\n   \u2502\n74 \u2502         project_url: option::some(preset.project_url()),\n   \u2502                      ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:75:22\n   \u2502\n75 \u2502         net_address: option::some(preset.net_address()),\n   \u2502                      ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:76:22\n   \u2502\n76 \u2502         p2p_address: option::some(preset.p2p_address()),\n   \u2502                      ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:77:26\n   \u2502\n77 \u2502         primary_address: option::some(preset.primary_address()),\n   \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:78:25\n   \u2502\n78 \u2502         worker_address: option::some(preset.worker_address()),\n   \u2502                         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:79:20\n   \u2502\n79 \u2502         gas_price: option::none(),\n   \u2502                    ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:80:26\n   \u2502\n80 \u2502         commission_rate: option::none(),\n   \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/builders/validator_builder.move:82:24\n   \u2502\n82 \u2502         initial_stake: option::none(),\n   \u2502                        ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:127:37\n    \u2502\n127 \u2502         initial_stake.map!(|amount| balance::create_for_testing<SUI>(amount * 1_000_000_000)),\n    \u2502                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:165:9\n    \u2502\n165 \u2502         url::new_unsafe_from_bytes(image_url.destroy_or!(b\"image_url\")),\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:166:9\n    \u2502\n166 \u2502         url::new_unsafe_from_bytes(project_url.destroy_or!(b\"project_url\")),\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:171:9\n    \u2502\n171 \u2502         bag::new(ctx),\n    \u2502         ^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:178:27\n    \u2502\n178 \u2502     builder.sui_address = option::some(sui_address);\n    \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:186:37\n    \u2502\n186 \u2502     builder.protocol_pubkey_bytes = option::some(protocol_pubkey_bytes);\n    \u2502                                     ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:194:36\n    \u2502\n194 \u2502     builder.network_pubkey_bytes = option::some(network_pubkey_bytes);\n    \u2502                                    ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:202:35\n    \u2502\n202 \u2502     builder.worker_pubkey_bytes = option::some(worker_pubkey_bytes);\n    \u2502                                   ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:210:35\n    \u2502\n210 \u2502     builder.proof_of_possession = option::some(proof_of_possession);\n    \u2502                                   ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:215:20\n    \u2502\n215 \u2502     builder.name = option::some(name);\n    \u2502                    ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:220:27\n    \u2502\n220 \u2502     builder.description = option::some(description);\n    \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:225:25\n    \u2502\n225 \u2502     builder.image_url = option::some(image_url);\n    \u2502                         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:230:27\n    \u2502\n230 \u2502     builder.project_url = option::some(project_url);\n    \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:235:27\n    \u2502\n235 \u2502     builder.net_address = option::some(net_address);\n    \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:240:27\n    \u2502\n240 \u2502     builder.p2p_address = option::some(p2p_address);\n    \u2502                           ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:248:31\n    \u2502\n248 \u2502     builder.primary_address = option::some(primary_address);\n    \u2502                               ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:256:30\n    \u2502\n256 \u2502     builder.worker_address = option::some(worker_address);\n    \u2502                              ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:261:25\n    \u2502\n261 \u2502     builder.gas_price = option::some(gas_price);\n    \u2502                         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:266:31\n    \u2502\n266 \u2502     builder.commission_rate = option::some(commission_rate);\n    \u2502                               ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/builders/validator_builder.move:272:29\n    \u2502\n272 \u2502     builder.initial_stake = option::some(initial_stake);\n    \u2502                             ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./tests/delegation_tests.move:7:5\n  \u2502\n7 \u2502 use std::unit_test::assert_eq;\n  \u2502     ^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'std::unit_test'\n\nerror: unbound module\n  \u250c\u2500 ./tests/delegation_tests.move:8:5\n  \u2502\n8 \u2502 use sui::table::Table;\n  \u2502     ^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::table'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/delegation_tests.move:72:26\n   \u2502\n72 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n   \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:143:26\n    \u2502\n143 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:159:26\n    \u2502\n159 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:198:26\n    \u2502\n198 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:208:9\n    \u2502\n208 \u2502         option::some(runner.advance_epoch_opts().computation_charge(80))\n    \u2502         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:210:9\n    \u2502\n210 \u2502         option::none()\n    \u2502         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:258:26\n    \u2502\n258 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:264:26\n    \u2502\n264 \u2502     runner.advance_epoch(option::some(options)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:307:26\n    \u2502\n307 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:313:26\n    \u2502\n313 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:343:26\n    \u2502\n343 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:347:26\n    \u2502\n347 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:410:26\n    \u2502\n410 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:433:26\n    \u2502\n433 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:449:26\n    \u2502\n449 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:463:26\n    \u2502\n463 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:499:26\n    \u2502\n499 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:504:26\n    \u2502\n504 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:510:26\n    \u2502\n510 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:555:26\n    \u2502\n555 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:591:26\n    \u2502\n591 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:597:26\n    \u2502\n597 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:598:26\n    \u2502\n598 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:599:26\n    \u2502\n599 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:660:26\n    \u2502\n660 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:676:26\n    \u2502\n676 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:716:26\n    \u2502\n716 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/delegation_tests.move:721:26\n    \u2502\n721 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./tests/governance_test_utils.move:8:5\n  \u2502\n8 \u2502 use std::unit_test::{assert_eq, destroy};\n  \u2502     ^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'std::unit_test'\n\nerror: unbound module\n  \u250c\u2500 ./tests/governance_test_utils.move:9:5\n  \u2502\n9 \u2502 use sui::balance::{Self, Balance};\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n   \u250c\u2500 ./tests/governance_test_utils.move:10:5\n   \u2502\n10 \u2502 use sui::coin::{Self, Coin};\n   \u2502     ^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::coin'\n\nerror: unbound module\n   \u250c\u2500 ./tests/governance_test_utils.move:11:5\n   \u2502\n11 \u2502 use sui::sui::SUI;\n   \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::sui'\n\nerror: unbound module\n   \u250c\u2500 ./tests/governance_test_utils.move:12:5\n   \u2502\n12 \u2502 use sui::test_scenario::{Self, Scenario};\n   \u2502     ^^^^^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::test_scenario'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/governance_test_utils.move:40:9\n   \u2502\n40 \u2502         option::some(balance::create_for_testing<SUI>(init_stake_amount_in_sui * MIST_PER_SUI)),\n   \u2502         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/governance_test_utils.move:40:22\n   \u2502\n40 \u2502         option::some(balance::create_for_testing<SUI>(init_stake_amount_in_sui * MIST_PER_SUI)),\n   \u2502                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/governance_test_utils.move:67:9\n   \u2502\n67 \u2502         balance::create_for_testing<SUI>(sui_supply_amount * MIST_PER_SUI), // sui_supply\n   \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/governance_test_utils.move:75:9\n   \u2502\n75 \u2502         object::new(ctx), // it doesn't matter what ID sui system state has in tests\n   \u2502         ^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/governance_test_utils.move:77:9\n   \u2502\n77 \u2502         balance::create_for_testing<SUI>(storage_fund_amount * MIST_PER_SUI), // storage_fund\n   \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/governance_test_utils.move:87:24\n   \u2502\n87 \u2502     let mut scenario = test_scenario::begin(@0x0);\n   \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:130:5\n    \u2502\n130 \u2502     test_scenario::return_shared(system_state);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:175:5\n    \u2502\n175 \u2502     test_scenario::return_shared(system_state);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:186:9\n    \u2502\n186 \u2502         coin::mint_for_testing(amount * MIST_PER_SUI, ctx),\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:190:5\n    \u2502\n190 \u2502     test_scenario::return_shared(system_state);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:201:5\n    \u2502\n201 \u2502     test_scenario::return_shared(system_state);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:236:9\n    \u2502\n236 \u2502         coin::mint_for_testing<SUI>(init_stake_amount * MIST_PER_SUI, ctx),\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:241:5\n    \u2502\n241 \u2502     test_scenario::return_shared(system_state);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:274:5\n    \u2502\n274 \u2502     test_scenario::return_shared(system_state);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:283:5\n    \u2502\n283 \u2502     test_scenario::return_shared(system_state);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:292:5\n    \u2502\n292 \u2502     test_scenario::return_shared(system_state);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:302:5\n    \u2502\n302 \u2502     test_scenario::return_shared(system_state);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:323:9\n    \u2502\n323 \u2502         test_scenario::return_shared(system_state);\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:342:9\n    \u2502\n342 \u2502         test_scenario::return_shared(system_state);\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/governance_test_utils.move:361:9\n    \u2502\n361 \u2502         test_scenario::return_shared(system_state);\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./tests/rewards_distribution_tests.move:7:5\n  \u2502\n7 \u2502 use std::unit_test::assert_eq;\n  \u2502     ^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'std::unit_test'\n\nerror: unbound module\n  \u250c\u2500 ./tests/rewards_distribution_tests.move:8:5\n  \u2502\n8 \u2502 use sui::address;\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::address'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:39:26\n   \u2502\n39 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n   \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:52:26\n   \u2502\n52 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n   \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:78:26\n   \u2502\n78 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n   \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:108:26\n    \u2502\n108 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:127:26\n    \u2502\n127 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:141:26\n    \u2502\n141 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:157:26\n    \u2502\n157 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:188:26\n    \u2502\n188 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:193:26\n    \u2502\n193 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:200:26\n    \u2502\n200 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:227:24\n    \u2502\n227 \u2502         .advance_epoch(option::none())\n    \u2502                        ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:240:26\n    \u2502\n240 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:266:24\n    \u2502\n266 \u2502         .advance_epoch(option::none())\n    \u2502                        ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:270:26\n    \u2502\n270 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:321:26\n    \u2502\n321 \u2502     runner.advance_epoch(option::none()).destroy_zero();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:322:26\n    \u2502\n322 \u2502     runner.advance_epoch(option::none()).destroy_zero();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:348:26\n    \u2502\n348 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:355:26\n    \u2502\n355 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:393:26\n    \u2502\n393 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:403:26\n    \u2502\n403 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:446:26\n    \u2502\n446 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:451:26\n    \u2502\n451 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:465:26\n    \u2502\n465 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:520:26\n    \u2502\n520 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:554:26\n    \u2502\n554 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:560:26\n    \u2502\n560 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:567:26\n    \u2502\n567 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:574:26\n    \u2502\n574 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:603:26\n    \u2502\n603 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: invalid use of reserved name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:616:22\n    \u2502\n616 \u2502     let validators = vector::tabulate!(num_validators, |i| {\n    \u2502                      ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:616:22\n    \u2502\n616 \u2502     let validators = vector::tabulate!(num_validators, |i| {\n    \u2502                      ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:619:26\n    \u2502\n619 \u2502             .sui_address(address::from_u256(i as u256))\n    \u2502                          ^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:626:26\n    \u2502\n626 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:631:24\n    \u2502\n631 \u2502             let addr = address::from_u256(i as u256);\n    \u2502                        ^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:668:26\n    \u2502\n668 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:683:26\n    \u2502\n683 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:725:26\n    \u2502\n725 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:740:26\n    \u2502\n740 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:774:26\n    \u2502\n774 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:839:26\n    \u2502\n839 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:846:19\n    \u2502\n846 \u2502         pool_id = object::id(pool);\n    \u2502                   ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:859:26\n    \u2502\n859 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:904:26\n    \u2502\n904 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:932:26\n    \u2502\n932 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:973:26\n    \u2502\n973 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:982:19\n    \u2502\n982 \u2502         pool_id = object::id(pool);\n    \u2502                   ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1024:26\n     \u2502\n1024 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n     \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./tests/staking_pool_tests.move:7:5\n  \u2502\n7 \u2502 use std::unit_test::{assert_eq, destroy};\n  \u2502     ^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'std::unit_test'\n\nerror: unbound module\n  \u250c\u2500 ./tests/staking_pool_tests.move:8:5\n  \u2502\n8 \u2502 use sui::balance;\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n  \u250c\u2500 ./tests/staking_pool_tests.move:9:5\n  \u2502\n9 \u2502 use sui::test_scenario::{Self, Scenario};\n  \u2502     ^^^^^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::test_scenario'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/staking_pool_tests.move:14:24\n   \u2502\n14 \u2502     let mut scenario = test_scenario::begin(@0x0);\n   \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/staking_pool_tests.move:38:24\n   \u2502\n38 \u2502     let mut scenario = test_scenario::begin(@0x0);\n   \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/staking_pool_tests.move:58:24\n   \u2502\n58 \u2502     let mut scenario = test_scenario::begin(@0x0);\n   \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/staking_pool_tests.move:80:24\n   \u2502\n80 \u2502     let mut scenario = test_scenario::begin(@0x0);\n   \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/staking_pool_tests.move:95:24\n   \u2502\n95 \u2502     let mut scenario = test_scenario::begin(@0x0);\n   \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/staking_pool_tests.move:98:15\n   \u2502\n98 \u2502     let sui = balance::create_for_testing(1_000_000_000);\n   \u2502               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:114:24\n    \u2502\n114 \u2502     let mut scenario = test_scenario::begin(@0x0);\n    \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:117:15\n    \u2502\n117 \u2502     let sui = balance::create_for_testing(1_000_000_000);\n    \u2502               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:136:24\n    \u2502\n136 \u2502     let mut scenario = test_scenario::begin(@0x0);\n    \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:139:15\n    \u2502\n139 \u2502     let sui = balance::create_for_testing(1_000_000_000);\n    \u2502               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:159:24\n    \u2502\n159 \u2502     let mut scenario = test_scenario::begin(@0x0);\n    \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:163:15\n    \u2502\n163 \u2502     let sui = balance::create_for_testing(1_000_000_000);\n    \u2502               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:180:24\n    \u2502\n180 \u2502     let mut scenario = test_scenario::begin(@0x0);\n    \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:186:15\n    \u2502\n186 \u2502     let sui = balance::create_for_testing(1_000_000_000);\n    \u2502               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:199:15\n    \u2502\n199 \u2502     let sui = balance::create_for_testing(1_000_000_000);\n    \u2502               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:226:49\n    \u2502\n226 \u2502     assert_eq!(fungible_staked_sui_1.pool_id(), object::id(&staking_pool));\n    \u2502                                                 ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:237:49\n    \u2502\n237 \u2502     assert_eq!(fungible_staked_sui_2.pool_id(), object::id(&staking_pool));\n    \u2502                                                 ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:253:20\n    \u2502\n253 \u2502     let mut test = test_scenario::begin(@0x0);\n    \u2502                    ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:257:15\n    \u2502\n257 \u2502     let sui = balance::create_for_testing(1_000_000_000);\n    \u2502               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:278:24\n    \u2502\n278 \u2502     let mut scenario = test_scenario::begin(@0x0);\n    \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:284:15\n    \u2502\n284 \u2502     let sui = balance::create_for_testing(1_000_000_000);\n    \u2502               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:297:15\n    \u2502\n297 \u2502     let sui = balance::create_for_testing(1_000_000_000);\n    \u2502               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:322:49\n    \u2502\n322 \u2502     assert_eq!(fungible_staked_sui_1.pool_id(), object::id(&staking_pool));\n    \u2502                                                 ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:333:49\n    \u2502\n333 \u2502     assert_eq!(fungible_staked_sui_2.pool_id(), object::id(&staking_pool));\n    \u2502                                                 ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:385:24\n    \u2502\n385 \u2502     let mut scenario = test_scenario::begin(@0x0);\n    \u2502                        ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:391:15\n    \u2502\n391 \u2502     let sui = balance::create_for_testing(1_000_000_000);\n    \u2502               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:404:15\n    \u2502\n404 \u2502     let sui = balance::create_for_testing(1_000_000_001);\n    \u2502               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:429:47\n    \u2502\n429 \u2502     assert_eq!(fungible_staked_sui.pool_id(), object::id(&staking_pool));\n    \u2502                                               ^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n    \u250c\u2500 ./tests/staking_pool_tests.move:455:9\n    \u2502\n455 \u2502     use sui::tx_context::epoch;\n    \u2502         ^^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::tx_context'\n\nerror: unbound module\n    \u250c\u2500 ./tests/staking_pool_tests.move:456:9\n    \u2502\n456 \u2502     use sui::coin;\n    \u2502         ^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::coin'\n\nerror: unbound module\n    \u250c\u2500 ./tests/staking_pool_tests.move:457:9\n    \u2502\n457 \u2502     use sui::sui::SUI;\n    \u2502         ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::sui'\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:459:19\n    \u2502\n459 \u2502     let rewards = coin::mint_for_testing<SUI>(reward_amount, scenario.ctx());\n    \u2502                   ^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:460:34\n    \u2502\n460 \u2502     staking_pool.deposit_rewards(coin::into_balance(rewards));\n    \u2502                                  ^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/staking_pool_tests.move:463:5\n    \u2502\n463 \u2502     test_scenario::next_epoch(scenario, @0x0);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n   \u250c\u2500 ./tests/sui_system_tests.move:11:5\n   \u2502\n11 \u2502 use std::unit_test::assert_eq;\n   \u2502     ^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'std::unit_test'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/sui_system_tests.move:58:26\n   \u2502\n58 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n   \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/sui_system_tests.move:79:26\n   \u2502\n79 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n   \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/sui_system_tests.move:86:26\n   \u2502\n86 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n   \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:116:9\n    \u2502\n116 \u2502         transfer::public_transfer(cap, stakee);\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:135:9\n    \u2502\n135 \u2502         transfer::public_transfer(cap, new_stakee);\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:163:26\n    \u2502\n163 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:171:26\n    \u2502\n171 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:193:9\n    \u2502\n193 \u2502         transfer::public_transfer(cap, stakee);\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:222:9\n    \u2502\n222 \u2502         transfer::public_transfer(cap, stakee);\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:357:26\n    \u2502\n357 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:381:26\n    \u2502\n381 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:421:26\n    \u2502\n421 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:431:26\n    \u2502\n431 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:441:26\n    \u2502\n441 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:512:26\n    \u2502\n512 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/sui_system_tests.move:535:26\n    \u2502\n535 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./tests/validator_metadata_tests.move:7:5\n  \u2502\n7 \u2502 use std::unit_test;\n  \u2502     ^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'std::unit_test'\n\nerror: unbound module\n  \u250c\u2500 ./tests/validator_metadata_tests.move:8:5\n  \u2502\n8 \u2502 use sui::test_scenario::{Self, Scenario};\n  \u2502     ^^^^^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::test_scenario'\n\nerror: unbound module\n  \u250c\u2500 ./tests/validator_metadata_tests.move:9:5\n  \u2502\n9 \u2502 use sui::url;\n  \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::url'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/validator_metadata_tests.move:21:20\n   \u2502\n21 \u2502     let ctx = &mut tx_context::dummy();\n   \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/validator_metadata_tests.move:27:5\n   \u2502\n27 \u2502     unit_test::destroy(vector[validator_0, validator_1, validator_2, validator_3]);\n   \u2502     ^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:327:26\n    \u2502\n327 \u2502     runner.advance_epoch(option::none()).destroy_zero();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:520:9\n    \u2502\n520 \u2502         test_scenario::return_shared(system_state);\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:551:26\n    \u2502\n551 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:594:9\n    \u2502\n594 \u2502         test_scenario::return_shared(system_state);\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:600:26\n    \u2502\n600 \u2502     runner.advance_epoch(option::some(opts)).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:669:26\n    \u2502\n669 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:675:26\n    \u2502\n675 \u2502     runner.advance_epoch(option::none()).destroy_for_testing();\n    \u2502                          ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:843:52\n    \u2502\n843 \u2502         validator.next_epoch_network_address() == &option::some(new_network_address.to_string()),\n    \u2502                                                    ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:845:52\n    \u2502\n845 \u2502     assert!(validator.next_epoch_p2p_address() == &option::some(new_p2p_address.to_string()));\n    \u2502                                                    ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:847:52\n    \u2502\n847 \u2502         validator.next_epoch_primary_address() == &option::some(new_primary_address.to_string()),\n    \u2502                                                    ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:849:55\n    \u2502\n849 \u2502     assert!(validator.next_epoch_worker_address() == &option::some(new_worker_address.to_string()));\n    \u2502                                                       ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:850:62\n    \u2502\n850 \u2502     assert!(validator.next_epoch_protocol_pubkey_bytes() == &option::some(new_protocol_pub_key), 0);\n    \u2502                                                              ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:851:60\n    \u2502\n851 \u2502     assert!(validator.next_epoch_proof_of_possession() == &option::some(new_pop), 0);\n    \u2502                                                            ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:852:60\n    \u2502\n852 \u2502     assert!(validator.next_epoch_worker_pubkey_bytes() == &option::some(new_worker_pubkey), 0);\n    \u2502                                                            ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:853:61\n    \u2502\n853 \u2502     assert!(validator.next_epoch_network_pubkey_bytes() == &option::some(new_network_pubkey), 0);\n    \u2502                                                             ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:871:39\n    \u2502\n871 \u2502     assert!(validator.image_url() == &url::new_unsafe_from_bytes(b\"new_image_url\"));\n    \u2502                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_metadata_tests.move:872:41\n    \u2502\n872 \u2502     assert!(validator.project_url() == &url::new_unsafe_from_bytes(b\"new_project_url\"));\n    \u2502                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./tests/validator_set_tests.move:7:5\n  \u2502\n7 \u2502 use std::unit_test::{assert_eq, destroy};\n  \u2502     ^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'std::unit_test'\n\nerror: unbound module\n  \u250c\u2500 ./tests/validator_set_tests.move:8:5\n  \u2502\n8 \u2502 use sui::address;\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::address'\n\nerror: unbound module\n  \u250c\u2500 ./tests/validator_set_tests.move:9:5\n  \u2502\n9 \u2502 use sui::balance;\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n   \u250c\u2500 ./tests/validator_set_tests.move:10:5\n   \u2502\n10 \u2502 use sui::coin;\n   \u2502     ^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::coin'\n\nerror: unbound module\n   \u250c\u2500 ./tests/validator_set_tests.move:11:5\n   \u2502\n11 \u2502 use sui::test_scenario::{Self, Scenario};\n   \u2502     ^^^^^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::test_scenario'\n\nerror: unbound module\n   \u250c\u2500 ./tests/validator_set_tests.move:12:5\n   \u2502\n12 \u2502 use sui::vec_map;\n   \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::vec_map'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/validator_set_tests.move:21:28\n   \u2502\n21 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n   \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/validator_set_tests.move:49:28\n   \u2502\n49 \u2502     let mut scenario_val = test_scenario::begin(@0x1);\n   \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/validator_set_tests.move:55:13\n   \u2502\n55 \u2502             coin::mint_for_testing(500 * MIST_PER_SUI, ctx1).into_balance(),\n   \u2502             ^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/validator_set_tests.move:58:9\n   \u2502\n58 \u2502         transfer::public_transfer(stake, @0x1);\n   \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/validator_set_tests.move:94:28\n   \u2502\n94 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n   \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:145:28\n    \u2502\n145 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:154:28\n    \u2502\n154 \u2502     let mut scenario_val = test_scenario::begin(@0x1);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:160:9\n    \u2502\n160 \u2502         balance::create_for_testing(MIST_PER_SUI - 1), // 1 MIST lower than the threshold\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:163:5\n    \u2502\n163 \u2502     transfer::public_transfer(stake, @0x1);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:170:28\n    \u2502\n170 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:179:28\n    \u2502\n179 \u2502     let mut scenario_val = test_scenario::begin(@0x1);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:184:9\n    \u2502\n184 \u2502         balance::create_for_testing(MIST_PER_SUI), // min possible stake\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:187:5\n    \u2502\n187 \u2502     transfer::public_transfer(stake, @0x1);\n    \u2502     ^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:198:28\n    \u2502\n198 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:250:28\n    \u2502\n250 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:283:28\n    \u2502\n283 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:298:28\n    \u2502\n298 \u2502     let mut scenario_val = test_scenario::begin(@0x1);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:320:28\n    \u2502\n320 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:335:9\n    \u2502\n335 \u2502         balance::create_for_testing(3 * MIST_PER_SUI),\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:348:28\n    \u2502\n348 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:361:9\n    \u2502\n361 \u2502         balance::create_for_testing(4 * MIST_PER_SUI),\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:385:28\n    \u2502\n385 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:399:9\n    \u2502\n399 \u2502         balance::create_for_testing(4 * MIST_PER_SUI),\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:426:28\n    \u2502\n426 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:440:9\n    \u2502\n440 \u2502         balance::create_for_testing(4 * MIST_PER_SUI),\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:485:28\n    \u2502\n485 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:499:9\n    \u2502\n499 \u2502         balance::create_for_testing(4 * MIST_PER_SUI),\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:531:28\n    \u2502\n531 \u2502     let mut scenario_val = test_scenario::begin(@0x0);\n    \u2502                            ^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:544:9\n    \u2502\n544 \u2502         balance::create_for_testing(1000 * MIST_PER_SUI),\n    \u2502         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:556:13\n    \u2502\n556 \u2502             address::from_u256((i + 1 as u256)),\n    \u2502             ^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:557:13\n    \u2502\n557 \u2502             balance::create_for_testing(to_add),\n    \u2502             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:600:9\n    \u2502\n600 \u2502         option::some(balance::create_for_testing(stake_value)),\n    \u2502         ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:600:22\n    \u2502\n600 \u2502         option::some(balance::create_for_testing(stake_value)),\n    \u2502                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:632:13\n    \u2502\n632 \u2502             option::some(balance::create_for_testing(initial_stake * MIST_PER_SUI))\n    \u2502             ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:632:26\n    \u2502\n632 \u2502             option::some(balance::create_for_testing(initial_stake * MIST_PER_SUI))\n    \u2502                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:633:18\n    \u2502\n633 \u2502         } else { option::none() },\n    \u2502                  ^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:653:40\n    \u2502\n653 \u2502     let mut dummy_computation_reward = balance::zero();\n    \u2502                                        ^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:654:41\n    \u2502\n654 \u2502     let mut dummy_storage_fund_reward = balance::zero();\n    \u2502                                         ^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_set_tests.move:659:14\n    \u2502\n659 \u2502         &mut vec_map::empty(),\n    \u2502              ^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./tests/validator_tests.move:7:5\n  \u2502\n7 \u2502 use std::unit_test::{assert_eq, destroy};\n  \u2502     ^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'std::unit_test'\n\nerror: unbound module\n  \u250c\u2500 ./tests/validator_tests.move:8:5\n  \u2502\n8 \u2502 use sui::balance;\n  \u2502     ^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'sui::balance'\n\nerror: unbound module\n  \u250c\u2500 ./tests/validator_tests.move:9:5\n  \u2502\n9 \u2502 use sui::url;\n  \u2502     ^^^^^^^^ Invalid 'use'. Unbound module: 'sui::url'\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/validator_tests.move:84:41\n   \u2502\n84 \u2502         validator.deposit_stake_rewards(balance::zero());\n   \u2502                                         ^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/validator_tests.move:99:20\n   \u2502\n99 \u2502     let ctx = &mut tx_context::dummy();\n   \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:107:20\n    \u2502\n107 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:119:20\n    \u2502\n119 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:131:20\n    \u2502\n131 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:143:20\n    \u2502\n143 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:153:20\n    \u2502\n153 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:163:20\n    \u2502\n163 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:173:20\n    \u2502\n173 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:183:20\n    \u2502\n183 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:194:20\n    \u2502\n194 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:205:20\n    \u2502\n205 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:228:20\n    \u2502\n228 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:248:40\n    \u2502\n248 \u2502     assert_eq!(*validator.image_url(), url::new_unsafe_from_bytes(b\"new_image_url\"));\n    \u2502                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:249:42\n    \u2502\n249 \u2502     assert_eq!(*validator.project_url(), url::new_unsafe_from_bytes(b\"new_proj_url\"));\n    \u2502                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:298:20\n    \u2502\n298 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:311:20\n    \u2502\n311 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:321:20\n    \u2502\n321 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:331:20\n    \u2502\n331 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:341:20\n    \u2502\n341 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:351:20\n    \u2502\n351 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:361:20\n    \u2502\n361 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:376:20\n    \u2502\n376 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: invalid use of reserved name\n    \u250c\u2500 ./tests/validator_tests.move:379:49\n    \u2502\n379 \u2502     validator.update_next_epoch_primary_address(vector::tabulate!(257, |_| 0));\n    \u2502                                                 ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:379:49\n    \u2502\n379 \u2502     validator.update_next_epoch_primary_address(vector::tabulate!(257, |_| 0));\n    \u2502                                                 ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:390:20\n    \u2502\n390 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: invalid use of reserved name\n    \u250c\u2500 ./tests/validator_tests.move:393:49\n    \u2502\n393 \u2502     validator.update_next_epoch_network_address(vector::tabulate!(257, |_| 0));\n    \u2502                                                 ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:393:49\n    \u2502\n393 \u2502     validator.update_next_epoch_network_address(vector::tabulate!(257, |_| 0));\n    \u2502                                                 ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:405:20\n    \u2502\n405 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: invalid use of reserved name\n    \u250c\u2500 ./tests/validator_tests.move:408:48\n    \u2502\n408 \u2502     validator.update_next_epoch_worker_address(vector::tabulate!(257, |_| 0));\n    \u2502                                                ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:408:48\n    \u2502\n408 \u2502     validator.update_next_epoch_worker_address(vector::tabulate!(257, |_| 0));\n    \u2502                                                ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:420:20\n    \u2502\n420 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: invalid use of reserved name\n    \u250c\u2500 ./tests/validator_tests.move:423:45\n    \u2502\n423 \u2502     validator.update_next_epoch_p2p_address(vector::tabulate!(257, |_| 0));\n    \u2502                                             ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:423:45\n    \u2502\n423 \u2502     validator.update_next_epoch_p2p_address(vector::tabulate!(257, |_| 0));\n    \u2502                                             ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:435:20\n    \u2502\n435 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: invalid use of reserved name\n    \u250c\u2500 ./tests/validator_tests.move:438:27\n    \u2502\n438 \u2502     validator.update_name(vector::tabulate!(257, |_| 0));\n    \u2502                           ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:438:27\n    \u2502\n438 \u2502     validator.update_name(vector::tabulate!(257, |_| 0));\n    \u2502                           ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:450:20\n    \u2502\n450 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: invalid use of reserved name\n    \u250c\u2500 ./tests/validator_tests.move:453:34\n    \u2502\n453 \u2502     validator.update_description(vector::tabulate!(257, |_| 0));\n    \u2502                                  ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:453:34\n    \u2502\n453 \u2502     validator.update_description(vector::tabulate!(257, |_| 0));\n    \u2502                                  ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:465:20\n    \u2502\n465 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: invalid use of reserved name\n    \u250c\u2500 ./tests/validator_tests.move:468:34\n    \u2502\n468 \u2502     validator.update_project_url(vector::tabulate!(257, |_| 0));\n    \u2502                                  ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:468:34\n    \u2502\n468 \u2502     validator.update_project_url(vector::tabulate!(257, |_| 0));\n    \u2502                                  ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:480:20\n    \u2502\n480 \u2502     let ctx = &mut tx_context::dummy();\n    \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: invalid use of reserved name\n    \u250c\u2500 ./tests/validator_tests.move:483:32\n    \u2502\n483 \u2502     validator.update_image_url(vector::tabulate!(257, |_| 0));\n    \u2502                                ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/validator_tests.move:483:32\n    \u2502\n483 \u2502     validator.update_image_url(vector::tabulate!(257, |_| 0));\n    \u2502                                ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound module\n  \u250c\u2500 ./tests/voting_power_tests.move:7:5\n  \u2502\n7 \u2502 use std::unit_test::{assert_eq, destroy};\n  \u2502     ^^^^^^^^^^^^^^ Invalid 'use'. Unbound module: 'std::unit_test'\n\nerror: invalid use of reserved name\n   \u250c\u2500 ./tests/voting_power_tests.move:21:25\n   \u2502\n21 \u2502     let voting_powers = vector::tabulate!(\n   \u2502                         ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/voting_power_tests.move:21:25\n   \u2502\n21 \u2502     let voting_powers = vector::tabulate!(\n   \u2502                         ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/voting_power_tests.move:32:20\n   \u2502\n32 \u2502     let ctx = &mut tx_context::dummy();\n   \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/voting_power_tests.move:72:20\n   \u2502\n72 \u2502     let ctx = &mut tx_context::dummy();\n   \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unexpected name in this position\n   \u250c\u2500 ./tests/voting_power_tests.move:98:20\n   \u2502\n98 \u2502     let ctx = &mut tx_context::dummy();\n   \u2502                    ^^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: invalid use of reserved name\n    \u250c\u2500 ./tests/voting_power_tests.move:118:5\n    \u2502\n118 \u2502     vector::tabulate!(stakes.length(), |i| {\n    \u2502     ^^^^^^ Invalid address name 'vector'. 'vector' is restricted and cannot be used to name an address\n\nerror: unexpected name in this position\n    \u250c\u2500 ./tests/voting_power_tests.move:118:5\n    \u2502\n118 \u2502     vector::tabulate!(stakes.length(), |i| {\n    \u2502     ^^^^^^^^^^^^^^^^ Unexpected module identifier. A module identifier is not a valid expression\n\nerror: unbound type\n    \u250c\u2500 ./tests/delegation_tests.move:736:36\n    \u2502\n736 \u2502 use fun assert_exchange_rate_eq as Table.assert_exchange_rate_eq;\n    \u2502                                    ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:603:5\n    \u2502\n603 \u2502     assert_eq!(runner.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:415:9\n    \u2502\n415 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 250 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:416:9\n    \u2502\n416 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_2), 250 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:417:9\n    \u2502\n417 \u2502         assert_eq!(\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:438:9\n    \u2502\n438 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 250 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:439:9\n    \u2502\n439 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_2), 250 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:440:9\n    \u2502\n440 \u2502         assert_eq!(system.validator_stake_amount(NEW_VALIDATOR_ADDR), 250 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:441:9\n    \u2502\n441 \u2502         assert_eq!(\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:456:5\n    \u2502\n456 \u2502     assert_eq!(runner.sui_balance(), 110002000000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:459:5\n    \u2502\n459 \u2502     assert_eq!(runner.sui_balance(), 110002000000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:468:5\n    \u2502\n468 \u2502     assert_eq!(runner.sui_balance(), 78862939078);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:514:5\n    \u2502\n514 \u2502     assert_eq!(runner.sui_balance(), 130006000000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:351:5\n    \u2502\n351 \u2502     assert_eq!(runner.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:138:9\n    \u2502\n138 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:139:9\n    \u2502\n139 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_2), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:149:13\n    \u2502\n149 \u2502             assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 160 * MIST_PER_SUI);\n    \u2502             ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:150:13\n    \u2502\n150 \u2502             assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_2), 100 * MIST_PER_SUI);\n    \u2502             ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:154:13\n    \u2502\n154 \u2502             assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 160 * MIST_PER_SUI);\n    \u2502             ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:161:9\n    \u2502\n161 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:545:9\n    \u2502\n545 \u2502         assert_eq!(validator.total_stake(), 200 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:546:9\n    \u2502\n546 \u2502         assert_eq!(validator.pending_stake_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:547:9\n    \u2502\n547 \u2502         assert_eq!(validator.pending_stake_withdraw_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:552:5\n    \u2502\n552 \u2502     assert_eq!(runner.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:559:5\n    \u2502\n559 \u2502     assert_eq!(runner.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:565:9\n    \u2502\n565 \u2502         assert_eq!(validator.total_stake(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:566:9\n    \u2502\n566 \u2502         assert_eq!(validator.pending_stake_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:567:9\n    \u2502\n567 \u2502         assert_eq!(validator.pending_stake_withdraw_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/delegation_tests.move:739:13\n    \u2502\n739 \u2502     rates: &Table<u64, PoolTokenExchangeRate>,\n    \u2502             ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:745:5\n    \u2502\n745 \u2502     assert_eq!(rate.sui_amount(), sui_amount * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:746:5\n    \u2502\n746 \u2502     assert_eq!(rate.pool_token_amount(), pool_token_amount * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:273:9\n    \u2502\n273 \u2502         assert_eq!(stake.amount(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:281:5\n    \u2502\n281 \u2502     assert_eq!(runner.sui_balance(), 100 * MIST_PER_SUI + reward_amt);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:289:5\n    \u2502\n289 \u2502     assert_eq!(runner.sui_balance(), 100 * MIST_PER_SUI + reward_amt + validator_reward_amt);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:634:5\n    \u2502\n634 \u2502     assert_eq!(runner.set_sender(validator_address).sui_balance(), 100 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:202:9\n    \u2502\n202 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 200 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:203:9\n    \u2502\n203 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_2), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:224:9\n    \u2502\n224 \u2502         assert_eq!(stake.amount(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:233:5\n    \u2502\n233 \u2502     assert_eq!(runner.sui_balance(), 100 * MIST_PER_SUI + reward_amt);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:239:5\n    \u2502\n239 \u2502     assert_eq!(runner.sui_balance(), 100 * MIST_PER_SUI + reward_amt + validator_reward_amt);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/delegation_tests.move:45:9\n   \u2502\n45 \u2502         assert_eq!(ids.length(), 2);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/delegation_tests.move:50:9\n   \u2502\n50 \u2502         assert_eq!(stake_1.amount(), 20 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/delegation_tests.move:51:9\n   \u2502\n51 \u2502         assert_eq!(stake_2.amount(), 40 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/delegation_tests.move:58:9\n   \u2502\n58 \u2502         assert_eq!(stake.amount(), 60 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/delegation_tests.move:726:9\n    \u2502\n726 \u2502         assert_eq!(rates.length(), 3);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./tests/delegation_tests.move:5:1\n    \u2502  \n  5 \u2502 \u256d module sui_system::delegation_tests;\n  6 \u2502 \u2502 \n  7 \u2502 \u2502 use std::unit_test::assert_eq;\n  8 \u2502 \u2502 use sui::table::Table;\n    \u00b7 \u2502\n746 \u2502 \u2502     assert_eq!(rate.pool_token_amount(), pool_token_amount * MIST_PER_SUI);\n747 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n   \u250c\u2500 ./sources/genesis.move:57:28\n   \u2502\n57 \u2502     staked_with_validator: Option<address>,\n   \u2502                            ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/genesis.move:179:21\n    \u2502\n179 \u2502     mut sui_supply: Balance<SUI>,\n    \u2502                     ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/genesis.move:182:15\n    \u2502\n182 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/genesis.move:73:26\n   \u2502\n73 \u2502     sui_system_state_id: UID,\n   \u2502                          ^^^ Unbound type 'UID' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/genesis.move:74:21\n   \u2502\n74 \u2502     mut sui_supply: Balance<SUI>,\n   \u2502                     ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/genesis.move:78:15\n   \u2502\n78 \u2502     ctx: &mut TxContext,\n   \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./sources/genesis.move:4:1\n    \u2502  \n  4 \u2502 \u256d module sui_system::genesis;\n  5 \u2502 \u2502 \n  6 \u2502 \u2502 use sui::balance::{Self, Balance};\n  7 \u2502 \u2502 use sui::sui::SUI;\n    \u00b7 \u2502\n206 \u2502 \u2502     sui_supply.destroy_zero();\n207 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:286:61\n    \u2502\n286 \u2502 public fun add_validator(validator: address, scenario: &mut Scenario) {\n    \u2502                                                             ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:250:20\n    \u2502\n250 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:211:20\n    \u2502\n211 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:101:41\n    \u2502\n101 \u2502 public fun advance_epoch(scenario: &mut Scenario) {\n    \u2502                                         ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:138:20\n    \u2502\n138 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/governance_test_utils.move:147:5\n    \u2502\n147 \u2502     destroy(storage_rebate)\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:154:20\n    \u2502\n154 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/governance_test_utils.move:174:5\n    \u2502\n174 \u2502     destroy(storage_rebate);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:110:20\n    \u2502\n110 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:111:4\n    \u2502\n111 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:350:20\n    \u2502\n350 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/governance_test_utils.move:360:9\n    \u2502\n360 \u2502         assert_eq!(non_self_stake_amount, amount);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:308:20\n    \u2502\n308 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/governance_test_utils.move:322:9\n    \u2502\n322 \u2502         assert_eq!(stake_plus_rewards, amount);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:331:20\n    \u2502\n331 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/governance_test_utils.move:53:15\n   \u2502\n53 \u2502     ctx: &mut TxContext,\n   \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/governance_test_utils.move:24:15\n   \u2502\n24 \u2502     ctx: &mut TxContext,\n   \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:295:64\n    \u2502\n295 \u2502 public fun remove_validator(validator: address, scenario: &mut Scenario) {\n    \u2502                                                                ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:277:74\n    \u2502\n277 \u2502 public fun remove_validator_candidate(validator: address, scenario: &mut Scenario) {\n    \u2502                                                                          ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:380:20\n    \u2502\n380 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:370:20\n    \u2502\n370 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:179:88\n    \u2502\n179 \u2502 public fun stake_with(staker: address, validator: address, amount: u64, scenario: &mut Scenario) {\n    \u2502                                                                                        ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:397:60\n    \u2502\n397 \u2502 public fun total_sui_balance(addr: address, scenario: &mut Scenario): u64 {\n    \u2502                                                            ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:400:44\n    \u2502\n400 \u2502     let coin_ids = scenario.ids_for_sender<Coin<SUI>>();\n    \u2502                                            ^^^^ Unbound type 'Coin' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:403:52\n    \u2502\n403 \u2502         let coin = scenario.take_from_sender_by_id<Coin<SUI>>(coin_ids[i]);\n    \u2502                                                    ^^^^ Unbound type 'Coin' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./tests/governance_test_utils.move:6:1\n    \u2502  \n  6 \u2502 \u256d module sui_system::governance_test_utils;\n  7 \u2502 \u2502 \n  8 \u2502 \u2502 use std::unit_test::{assert_eq, destroy};\n  9 \u2502 \u2502 use sui::balance::{Self, Balance};\n    \u00b7 \u2502\n408 \u2502 \u2502     sum\n409 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n    \u250c\u2500 ./tests/governance_test_utils.move:193:73\n    \u2502\n193 \u2502 public fun unstake(staker: address, staked_sui_idx: u64, scenario: &mut Scenario) {\n    \u2502                                                                         ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1057:9\n     \u2502\n1057 \u2502         assert_eq!(sum_rewards, expected_amount);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:312:9\n    \u2502\n312 \u2502         assert_eq!(validator.commission_rate(), 100);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:316:9\n    \u2502\n316 \u2502         assert_eq!(validator.commission_rate(), 101);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:326:9\n    \u2502\n326 \u2502         assert_eq!(validator.commission_rate(), 101);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1043:77\n     \u2502\n1043 \u2502 fun check_distribution_counter_invariant(system: &mut SuiSystemState, ctx: &TxContext) {\n     \u2502                                                                             ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1044:5\n     \u2502\n1044 \u2502     assert_eq!(ctx.epoch(), system.epoch());\n     \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1046:5\n     \u2502\n1046 \u2502     assert_eq!(system.get_stake_subsidy_distribution_counter() + 20, ctx.epoch());\n     \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:425:5\n    \u2502\n425 \u2502     assert_eq!(runner.set_sender(STAKER_ADDR_1).sui_balance(), (550 + 150) * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:426:5\n    \u2502\n426 \u2502     assert_eq!(runner.set_sender(STAKER_ADDR_2).sui_balance(), 100 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:531:9\n    \u2502\n531 \u2502         assert_eq!(system.get_storage_fund_total_balance(), 4000 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:533:9\n    \u2502\n533 \u2502         assert_eq!(system.get_storage_fund_object_rebates(), 1000 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:578:9\n    \u2502\n578 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 140 * 23 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:591:5\n    \u2502\n591 \u2502     assert_eq!(\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:596:5\n    \u2502\n596 \u2502     assert_eq!(runner.set_sender(STAKER_ADDR_2).sui_balance(), (480 + 40 * 2) * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:599:5\n    \u2502\n599 \u2502     assert_eq!(runner.set_sender(STAKER_ADDR_3).sui_balance(), (390 + 280 + 30) * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:601:5\n    \u2502\n601 \u2502     assert_eq!(runner.set_sender(STAKER_ADDR_4).sui_balance(), 1400 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:607:9\n    \u2502\n607 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 140 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:805:9\n    \u2502\n805 \u2502         assert_eq!(pool.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:806:9\n    \u2502\n806 \u2502         assert_eq!(pool.pool_token_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:816:9\n    \u2502\n816 \u2502         assert_eq!(pool.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:817:9\n    \u2502\n817 \u2502         assert_eq!(pool.pool_token_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:818:9\n    \u2502\n818 \u2502         assert_eq!(pool.pending_stake_amount(), 101 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:830:9\n    \u2502\n830 \u2502         assert_eq!(pool.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:831:9\n    \u2502\n831 \u2502         assert_eq!(pool.pool_token_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:832:9\n    \u2502\n832 \u2502         assert_eq!(pool.pending_stake_amount(), 101 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:833:9\n    \u2502\n833 \u2502         assert_eq!(pool.pending_stake_withdraw_amount(), 101 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:834:9\n    \u2502\n834 \u2502         assert_eq!(pool.pending_pool_token_withdraw_amount(), 101 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:842:18\n    \u2502\n842 \u2502     let pool_id: ID;\n    \u2502                  ^^ Unbound type 'ID' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:848:9\n    \u2502\n848 \u2502         assert_eq!(pool.pending_stake_amount(), 0 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:849:9\n    \u2502\n849 \u2502         assert_eq!(pool.pending_stake_withdraw_amount(), 0 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:850:9\n    \u2502\n850 \u2502         assert_eq!(pool.pending_pool_token_withdraw_amount(), 0 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:851:9\n    \u2502\n851 \u2502         assert_eq!(pool.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:852:9\n    \u2502\n852 \u2502         assert_eq!(pool.pool_token_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:868:9\n    \u2502\n868 \u2502         assert_eq!(pool.sui_balance(), 0 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:869:9\n    \u2502\n869 \u2502         assert_eq!(pool.pool_token_balance(), 0 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:893:9\n    \u2502\n893 \u2502         assert_eq!(pool.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:894:9\n    \u2502\n894 \u2502         assert_eq!(pool.pool_token_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:906:9\n    \u2502\n906 \u2502         assert_eq!(system.epoch(), 1);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:909:9\n    \u2502\n909 \u2502         assert_eq!(pool.sui_balance(), 125 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:910:9\n    \u2502\n910 \u2502         assert_eq!(pool.pool_token_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:937:9\n    \u2502\n937 \u2502         assert_eq!(exchange_rate.sui_amount(), 250 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:941:9\n    \u2502\n941 \u2502         assert_eq!(exchange_rate.pool_token_amount(), 166666666666);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:942:9\n    \u2502\n942 \u2502         assert_eq!(pool.sui_balance(), 250 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:943:9\n    \u2502\n943 \u2502         assert_eq!(pool.pool_token_balance(), 166666666666);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:948:9\n    \u2502\n948 \u2502         assert_eq!(stake.stake_activation_epoch(), 3);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:960:13\n    \u2502\n960 \u2502             assert_eq!(pool.pending_pool_token_withdraw_amount(), 80 * MIST_PER_SUI);\n    \u2502             ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:963:13\n    \u2502\n963 \u2502             assert_eq!(pool.pending_stake_withdraw_amount(), 120 * MIST_PER_SUI); // 100 principal + 20 rewards\n    \u2502             ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:978:18\n    \u2502\n978 \u2502     let pool_id: ID;\n    \u2502                  ^^ Unbound type 'ID' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:984:9\n    \u2502\n984 \u2502         assert_eq!(pool.sui_balance(), 155 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:985:9\n    \u2502\n985 \u2502         assert_eq!(pool.pending_stake_withdraw_amount(), 155 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:994:9\n    \u2502\n994 \u2502         assert_eq!(pool.pending_stake_withdraw_amount(), 155 * MIST_PER_SUI); // 100 principal + 55 rewards\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:997:9\n    \u2502\n997 \u2502         assert_eq!(exchange_rate_epoch_0.sui_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:998:9\n    \u2502\n998 \u2502         assert_eq!(exchange_rate_epoch_0.pool_token_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1000:9\n     \u2502\n1000 \u2502         assert_eq!(exchange_rate_epoch_1.sui_amount(), 125000000000);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1001:9\n     \u2502\n1001 \u2502         assert_eq!(exchange_rate_epoch_1.pool_token_amount(), 100000000000);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1006:9\n     \u2502\n1006 \u2502         assert_eq!(exchange_rate_epoch_5.sui_amount(), 250000000000);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1007:9\n     \u2502\n1007 \u2502         assert_eq!(exchange_rate_epoch_5.pool_token_amount(), 166666666666);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1009:9\n     \u2502\n1009 \u2502         assert_eq!(exchange_rate_epoch_6.sui_amount(), 155000000000);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1010:9\n     \u2502\n1010 \u2502         assert_eq!(exchange_rate_epoch_6.pool_token_amount(), 86666666666);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1013:9\n     \u2502\n1013 \u2502         assert_eq!(pool.sui_balance(), 155000000000);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1014:9\n     \u2502\n1014 \u2502         assert_eq!(pool.pending_stake_withdraw_amount(), 155000000000);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1015:9\n     \u2502\n1015 \u2502         assert_eq!(pool.pool_token_balance(), 86666666666);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1016:9\n     \u2502\n1016 \u2502         assert_eq!(pool.pending_pool_token_withdraw_amount(), 100000000000);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1032:9\n     \u2502\n1032 \u2502         assert_eq!(validator.pending_stake_amount(), 0);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1033:9\n     \u2502\n1033 \u2502         assert_eq!(validator.pending_stake_withdraw_amount(), 0);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1034:9\n     \u2502\n1034 \u2502         assert_eq!(validator.get_staking_pool_ref().pending_pool_token_withdraw_amount(), 0);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1035:9\n     \u2502\n1035 \u2502         assert_eq!(validator.get_staking_pool_ref().sui_balance(), 0);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:1036:9\n     \u2502\n1036 \u2502         assert_eq!(validator.get_staking_pool_ref().pool_token_balance(), 0);\n     \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:371:5\n    \u2502\n371 \u2502     assert_eq!(runner.set_sender(STAKER_ADDR_1).sui_balance(), 565 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:372:5\n    \u2502\n372 \u2502     assert_eq!(runner.set_sender(STAKER_ADDR_2).sui_balance(), 370 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:483:5\n    \u2502\n483 \u2502     assert_eq!(runner.set_sender(STAKER_ADDR_1).sui_balance(), (100 + 80) * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:485:5\n    \u2502\n485 \u2502     assert_eq!(runner.set_sender(STAKER_ADDR_2).sui_balance(), (100 + 48) * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:113:9\n    \u2502\n113 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 300 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:114:9\n    \u2502\n114 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_2), 300 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:115:9\n    \u2502\n115 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_3), 300 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:116:9\n    \u2502\n116 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_4), 400 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:150:5\n    \u2502\n150 \u2502     assert_eq!(runner.set_sender(STAKER_ADDR_1).sui_balance(), 220 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:154:5\n    \u2502\n154 \u2502     assert_eq!(runner.set_sender(STAKER_ADDR_2).sui_balance(), 120 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:168:5\n    \u2502\n168 \u2502     assert_eq!(runner.set_sender(STAKER_ADDR_2).sui_balance(), 728108108107);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:81:9\n   \u2502\n81 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 100_000_025 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:82:9\n   \u2502\n82 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_2), 200_000_025 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:83:9\n   \u2502\n83 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_3), 300_000_025 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:84:9\n   \u2502\n84 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_4), 400_000_025 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:661:9\n    \u2502\n661 \u2502         assert_eq!(ctx.epoch(), 562);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:662:9\n    \u2502\n662 \u2502         assert_eq!(system.epoch(), 562);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:663:9\n    \u2502\n663 \u2502         assert_eq!(system.get_stake_subsidy_distribution_counter(), start_distribution_counter);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:672:9\n    \u2502\n672 \u2502         assert_eq!(ctx.epoch(), 563);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:673:9\n    \u2502\n673 \u2502         assert_eq!(system.epoch(), 563);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:674:9\n    \u2502\n674 \u2502         assert_eq!(system.get_stake_subsidy_distribution_counter(), start_distribution_counter + 3);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:687:9\n    \u2502\n687 \u2502         assert_eq!(ctx.epoch(), 564);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:688:9\n    \u2502\n688 \u2502         assert_eq!(system.epoch(), 564);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:689:9\n    \u2502\n689 \u2502         assert_eq!(system.get_stake_subsidy_distribution_counter(), start_distribution_counter + 4);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:718:9\n    \u2502\n718 \u2502         assert_eq!(ctx.epoch(), 563);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:719:9\n    \u2502\n719 \u2502         assert_eq!(system.epoch(), 563);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:720:9\n    \u2502\n720 \u2502         assert_eq!(system.get_stake_subsidy_distribution_counter(), start_distribution_counter);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:729:9\n    \u2502\n729 \u2502         assert_eq!(ctx.epoch(), 564);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:730:9\n    \u2502\n730 \u2502         assert_eq!(system.epoch(), 564);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:731:9\n    \u2502\n731 \u2502         assert_eq!(system.get_stake_subsidy_distribution_counter(), start_distribution_counter + 4);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:744:9\n    \u2502\n744 \u2502         assert_eq!(ctx.epoch(), 565);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:745:9\n    \u2502\n745 \u2502         assert_eq!(system.epoch(), 565);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:746:9\n    \u2502\n746 \u2502         assert_eq!(system.get_stake_subsidy_distribution_counter(), start_distribution_counter + 5);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:767:9\n    \u2502\n767 \u2502         assert_eq!(ctx.epoch(), 540);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:768:9\n    \u2502\n768 \u2502         assert_eq!(system.epoch(), 540);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:769:9\n    \u2502\n769 \u2502         assert_eq!(system.get_stake_subsidy_distribution_counter(), 540);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:778:9\n    \u2502\n778 \u2502         assert_eq!(ctx.epoch(), 541);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:779:9\n    \u2502\n779 \u2502         assert_eq!(system.epoch(), 541);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:780:9\n    \u2502\n780 \u2502         assert_eq!(system.get_stake_subsidy_distribution_counter(), 541);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:632:13\n    \u2502\n632 \u2502             assert_eq!(system.validator_stake_amount(addr), (962 + i * 4) * MIST_PER_SUI);\n    \u2502             ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound module\n     \u250c\u2500 ./tests/rewards_distribution_tests.move:5:1\n     \u2502  \n   5 \u2502 \u256d module sui_system::rewards_distribution_tests;\n   6 \u2502 \u2502 \n   7 \u2502 \u2502 use std::unit_test::assert_eq;\n   8 \u2502 \u2502 use sui::address;\n     \u00b7 \u2502\n1058 \u2502 \u2502     });\n1059 \u2502 \u2502 }\n     \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:233:9\n    \u2502\n233 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 200 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:234:9\n    \u2502\n234 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_2), 300 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:235:9\n    \u2502\n235 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_3), 300 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:236:9\n    \u2502\n236 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_4), 400 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:244:9\n    \u2502\n244 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 230 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:245:9\n    \u2502\n245 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_2), 330 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:246:9\n    \u2502\n246 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_3), 330 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:247:9\n    \u2502\n247 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_4), 430 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:272:9\n    \u2502\n272 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 290 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:273:9\n    \u2502\n273 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_2), 390 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:274:9\n    \u2502\n274 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_3), 390 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:275:9\n    \u2502\n275 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_4), 490 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:43:9\n   \u2502\n43 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 125 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:44:9\n   \u2502\n44 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_2), 225 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:45:9\n   \u2502\n45 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_3), 325 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:46:9\n   \u2502\n46 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_4), 425 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:56:9\n   \u2502\n56 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_1), 150 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:57:9\n   \u2502\n57 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_2), 970 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:58:9\n   \u2502\n58 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_3), 350 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/rewards_distribution_tests.move:59:9\n   \u2502\n59 \u2502         assert_eq!(system.validator_stake_amount(VALIDATOR_ADDR_4), 450 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/stake_subsidy.move:16:14\n   \u2502\n16 \u2502     balance: Balance<SUI>,\n   \u2502              ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/stake_subsidy.move:28:19\n   \u2502\n28 \u2502     extra_fields: Bag,\n   \u2502                   ^^^ Unbound type 'Bag' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/stake_subsidy.move:55:61\n   \u2502\n55 \u2502 public(package) fun advance_epoch(self: &mut StakeSubsidy): Balance<SUI> {\n   \u2502                                                             ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/stake_subsidy.move:32:14\n   \u2502\n32 \u2502     balance: Balance<SUI>,\n   \u2502              ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/stake_subsidy.move:36:15\n   \u2502\n36 \u2502     ctx: &mut TxContext,\n   \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound module\n   \u250c\u2500 ./sources/stake_subsidy.move:4:1\n   \u2502  \n 4 \u2502 \u256d module sui_system::stake_subsidy;\n 5 \u2502 \u2502 \n 6 \u2502 \u2502 use sui::bag::{Self, Bag};\n 7 \u2502 \u2502 use sui::balance::Balance;\n   \u00b7 \u2502\n90 \u2502 \u2502     self.distribution_counter = distribution_counter;\n91 \u2502 \u2502 }\n   \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n   \u250c\u2500 ./sources/staking_pool.move:90:9\n   \u2502\n90 \u2502     id: UID,\n   \u2502         ^^^ Unbound type 'UID' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/staking_pool.move:92:14\n   \u2502\n92 \u2502     pool_id: ID,\n   \u2502              ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/staking_pool.move:99:9\n   \u2502\n99 \u2502     id: UID,\n   \u2502         ^^^ Unbound type 'UID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:103:16\n    \u2502\n103 \u2502     principal: Balance<SUI>,\n    \u2502                ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/staking_pool.move:76:9\n   \u2502\n76 \u2502     id: UID,\n   \u2502         ^^^ Unbound type 'UID' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/staking_pool.move:78:14\n   \u2502\n78 \u2502     pool_id: ID,\n   \u2502              ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/staking_pool.move:82:16\n   \u2502\n82 \u2502     principal: Balance<SUI>,\n   \u2502                ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/staking_pool.move:42:23\n   \u2502\n42 \u2502     activation_epoch: Option<u64>,\n   \u2502                       ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/staking_pool.move:45:25\n   \u2502\n45 \u2502     deactivation_epoch: Option<u64>,\n   \u2502                         ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/staking_pool.move:56:21\n   \u2502\n56 \u2502     exchange_rates: Table<u64, PoolTokenExchangeRate>,\n   \u2502                     ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/staking_pool.move:65:19\n   \u2502\n65 \u2502     extra_fields: Bag,\n   \u2502                   ^^^ Unbound type 'Bag' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/staking_pool.move:39:9\n   \u2502\n39 \u2502     id: UID,\n   \u2502         ^^^ Unbound type 'UID' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/staking_pool.move:50:19\n   \u2502\n50 \u2502     rewards_pool: Balance<SUI>,\n   \u2502                   ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:500:59\n    \u2502\n500 \u2502 public(package) fun activation_epoch(pool: &StakingPool): Option<u64> {\n    \u2502                                                           ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:277:15\n    \u2502\n277 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:740:15\n    \u2502\n740 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:350:70\n    \u2502\n350 \u2502 public(package) fun deposit_rewards(pool: &mut StakingPool, rewards: Balance<SUI>) {\n    \u2502                                                                      ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:625:58\n    \u2502\n625 \u2502 public(package) fun exchange_rates(pool: &StakingPool): &Table<u64, PoolTokenExchangeRate> {\n    \u2502                                                          ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:475:82\n    \u2502\n475 \u2502 public fun fungible_staked_sui_pool_id(fungible_staked_sui: &FungibleStakedSui): ID {\n    \u2502                                                                                  ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:116:35\n    \u2502\n116 \u2502 public(package) fun new(ctx: &mut TxContext): StakingPool {\n    \u2502                                   ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:471:45\n    \u2502\n471 \u2502 public fun pool_id(staked_sui: &StakedSui): ID { staked_sui.pool_id }\n    \u2502                                             ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:355:88\n    \u2502\n355 \u2502 public(package) fun process_pending_stakes_and_withdraws(pool: &mut StakingPool, ctx: &TxContext) {\n    \u2502                                                                                        ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:198:11\n    \u2502\n198 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:199:4\n    \u2502\n199 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:137:12\n    \u2502\n137 \u2502     stake: Balance<SUI>,\n    \u2502            ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:139:15\n    \u2502\n139 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:160:11\n    \u2502\n160 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:161:4\n    \u2502\n161 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:547:69\n    \u2502\n547 \u2502 public fun split(self: &mut StakedSui, split_amount: u64, ctx: &mut TxContext): StakedSui {\n    \u2502                                                                     ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:520:15\n    \u2502\n520 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:568:87\n    \u2502\n568 \u2502 public entry fun split_staked_sui(stake: &mut StakedSui, split_amount: u64, ctx: &mut TxContext) {\n    \u2502                                                                                       ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./sources/staking_pool.move:5:1\n    \u2502  \n  5 \u2502 \u256d module sui_system::staking_pool;\n  6 \u2502 \u2502 \n  7 \u2502 \u2502 use sui::bag::{Self, Bag};\n  8 \u2502 \u2502 use sui::balance::{Self, Balance};\n    \u00b7 \u2502\n831 \u2502 \u2502     assert!(principal_amount + rewards_amount >= min_out, 0);\n832 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:341:47\n    \u2502\n341 \u2502 fun unwrap_staked_sui(staked_sui: StakedSui): Balance<SUI> {\n    \u2502                                               ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:327:10\n    \u2502\n327 \u2502 ): (u64, Balance<SUI>) {\n    \u2502          ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/staking_pool.move:429:4\n    \u2502\n429 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:193:5\n    \u2502\n193 \u2502     assert_eq!(distribute_rewards_and_advance_epoch(&mut staking_pool, &mut scenario, 0), 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:196:5\n    \u2502\n196 \u2502     assert_eq!(latest_exchange_rate.sui_amount(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:197:5\n    \u2502\n197 \u2502     assert_eq!(latest_exchange_rate.pool_token_amount(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:206:5\n    \u2502\n206 \u2502     assert_eq!(\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:216:5\n    \u2502\n216 \u2502     assert_eq!(latest_exchange_rate.sui_amount(), 3_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:217:5\n    \u2502\n217 \u2502     assert_eq!(latest_exchange_rate.pool_token_amount(), 1_500_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:225:5\n    \u2502\n225 \u2502     assert_eq!(fungible_staked_sui_1.value(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:226:5\n    \u2502\n226 \u2502     assert_eq!(fungible_staked_sui_1.pool_id(), object::id(&staking_pool));\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:229:5\n    \u2502\n229 \u2502     assert_eq!(fungible_staked_sui_data.total_supply(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:230:5\n    \u2502\n230 \u2502     assert_eq!(fungible_staked_sui_data.principal_value(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:236:5\n    \u2502\n236 \u2502     assert_eq!(fungible_staked_sui_2.value(), 500_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:237:5\n    \u2502\n237 \u2502     assert_eq!(fungible_staked_sui_2.pool_id(), object::id(&staking_pool));\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:240:5\n    \u2502\n240 \u2502     assert_eq!(fungible_staked_sui_data.total_supply(), 1_500_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:241:5\n    \u2502\n241 \u2502     assert_eq!(fungible_staked_sui_data.principal_value(), 2_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:243:5\n    \u2502\n243 \u2502     destroy(staking_pool);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:245:5\n    \u2502\n245 \u2502     destroy(fungible_staked_sui_1);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:246:5\n    \u2502\n246 \u2502     destroy(fungible_staked_sui_2);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/staking_pool_tests.move:452:20\n    \u2502\n452 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/staking_pool_tests.move:28:5\n   \u2502\n28 \u2502     assert_eq!(fungible_staked_sui_1.value(), 300_000_000_000);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/staking_pool_tests.move:30:5\n   \u2502\n30 \u2502     destroy(staking_pool);\n   \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/staking_pool_tests.move:31:5\n   \u2502\n31 \u2502     destroy(fungible_staked_sui_1);\n   \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:291:5\n    \u2502\n291 \u2502     assert_eq!(distribute_rewards_and_advance_epoch(&mut staking_pool, &mut scenario, 0), 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:294:5\n    \u2502\n294 \u2502     assert_eq!(latest_exchange_rate.sui_amount(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:295:5\n    \u2502\n295 \u2502     assert_eq!(latest_exchange_rate.pool_token_amount(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:304:5\n    \u2502\n304 \u2502     assert_eq!(\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:314:5\n    \u2502\n314 \u2502     assert_eq!(latest_exchange_rate.sui_amount(), 3_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:315:5\n    \u2502\n315 \u2502     assert_eq!(latest_exchange_rate.pool_token_amount(), 1_500_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:321:5\n    \u2502\n321 \u2502     assert_eq!(fungible_staked_sui_1.value(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:322:5\n    \u2502\n322 \u2502     assert_eq!(fungible_staked_sui_1.pool_id(), object::id(&staking_pool));\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:325:5\n    \u2502\n325 \u2502     assert_eq!(fungible_staked_sui_data.total_supply(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:326:5\n    \u2502\n326 \u2502     assert_eq!(fungible_staked_sui_data.principal_value(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:332:5\n    \u2502\n332 \u2502     assert_eq!(fungible_staked_sui_2.value(), 500_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:333:5\n    \u2502\n333 \u2502     assert_eq!(fungible_staked_sui_2.pool_id(), object::id(&staking_pool));\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:336:5\n    \u2502\n336 \u2502     assert_eq!(fungible_staked_sui_data.total_supply(), 1_500_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:337:5\n    \u2502\n337 \u2502     assert_eq!(fungible_staked_sui_data.principal_value(), 2_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:340:5\n    \u2502\n340 \u2502     assert_eq!(\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:350:5\n    \u2502\n350 \u2502     assert_eq!(latest_exchange_rate.sui_amount(), 6_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:351:5\n    \u2502\n351 \u2502     assert_eq!(latest_exchange_rate.pool_token_amount(), 1_500_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:353:5\n    \u2502\n353 \u2502     assert_eq!(staking_pool.pending_stake_withdraw_amount(), 0);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:354:5\n    \u2502\n354 \u2502     assert_eq!(staking_pool.pending_pool_token_withdraw_amount(), 0);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:357:5\n    \u2502\n357 \u2502     assert_eq!(sui_1.value(), 4_000_000_000 - 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:360:5\n    \u2502\n360 \u2502     assert_eq!(fungible_staked_sui_data.total_supply(), 500_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:361:5\n    \u2502\n361 \u2502     assert_eq!(fungible_staked_sui_data.principal_value(), 2_000_000_000 / 3 + 1); // round against user\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:363:5\n    \u2502\n363 \u2502     assert_eq!(staking_pool.pending_stake_withdraw_amount(), 4_000_000_000 - 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:364:5\n    \u2502\n364 \u2502     assert_eq!(staking_pool.pending_pool_token_withdraw_amount(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:367:5\n    \u2502\n367 \u2502     assert_eq!(sui_2.value(), 2_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:370:5\n    \u2502\n370 \u2502     assert_eq!(fungible_staked_sui_data.total_supply(), 0);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:371:5\n    \u2502\n371 \u2502     assert_eq!(fungible_staked_sui_data.principal_value(), 0);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:373:5\n    \u2502\n373 \u2502     assert_eq!(staking_pool.pending_stake_withdraw_amount(), 6_000_000_000 - 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:374:5\n    \u2502\n374 \u2502     assert_eq!(staking_pool.pending_pool_token_withdraw_amount(), 1_500_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:376:5\n    \u2502\n376 \u2502     destroy(staking_pool);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:377:5\n    \u2502\n377 \u2502     destroy(sui_1);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:378:5\n    \u2502\n378 \u2502     destroy(sui_2);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:398:5\n    \u2502\n398 \u2502     assert_eq!(distribute_rewards_and_advance_epoch(&mut staking_pool, &mut scenario, 0), 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:401:5\n    \u2502\n401 \u2502     assert_eq!(latest_exchange_rate.sui_amount(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:402:5\n    \u2502\n402 \u2502     assert_eq!(latest_exchange_rate.pool_token_amount(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:411:5\n    \u2502\n411 \u2502     assert_eq!(\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:421:5\n    \u2502\n421 \u2502     assert_eq!(latest_exchange_rate.sui_amount(), 3_000_000_001);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:422:5\n    \u2502\n422 \u2502     assert_eq!(latest_exchange_rate.pool_token_amount(), 1_500_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:428:5\n    \u2502\n428 \u2502     assert_eq!(fungible_staked_sui.value(), 500_000_000); // rounding!\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:429:5\n    \u2502\n429 \u2502     assert_eq!(fungible_staked_sui.pool_id(), object::id(&staking_pool));\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:432:5\n    \u2502\n432 \u2502     assert_eq!(fungible_staked_sui_data.total_supply(), 500_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:433:5\n    \u2502\n433 \u2502     assert_eq!(fungible_staked_sui_data.principal_value(), 1_000_000_001);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:437:5\n    \u2502\n437 \u2502     assert_eq!(sui.value(), 1_000_000_000);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:440:5\n    \u2502\n440 \u2502     assert_eq!(fungible_staked_sui_data.total_supply(), 0);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:441:5\n    \u2502\n441 \u2502     assert_eq!(fungible_staked_sui_data.principal_value(), 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:443:5\n    \u2502\n443 \u2502     destroy(staking_pool);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:444:5\n    \u2502\n444 \u2502     destroy(staked_sui_1);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:445:5\n    \u2502\n445 \u2502     destroy(sui);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/staking_pool_tests.move:68:5\n   \u2502\n68 \u2502     assert_eq!(fungible_staked_sui_1.value(), 25_000_000_000);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/staking_pool_tests.move:69:5\n   \u2502\n69 \u2502     assert_eq!(fungible_staked_sui_2.value(), 75_000_000_000);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/staking_pool_tests.move:71:5\n   \u2502\n71 \u2502     destroy(staking_pool);\n   \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/staking_pool_tests.move:72:5\n   \u2502\n72 \u2502     destroy(fungible_staked_sui_1);\n   \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/staking_pool_tests.move:73:5\n   \u2502\n73 \u2502     destroy(fungible_staked_sui_2);\n   \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:259:5\n    \u2502\n259 \u2502     assert_eq!(distribute_rewards_and_advance_epoch(&mut staking_pool, &mut test, 0), 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:266:5\n    \u2502\n266 \u2502     assert_eq!(staking_pool.sui_balance(), 0);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:267:5\n    \u2502\n267 \u2502     assert_eq!(staking_pool.pending_stake_withdraw_amount(), 0);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:268:5\n    \u2502\n268 \u2502     assert_eq!(staking_pool.pool_token_balance(), 0);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:269:5\n    \u2502\n269 \u2502     assert_eq!(staking_pool.pending_pool_token_withdraw_amount(), 0);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:271:5\n    \u2502\n271 \u2502     destroy(staking_pool);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/staking_pool_tests.move:272:5\n    \u2502\n272 \u2502     destroy(staked_sui_1);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./tests/staking_pool_tests.move:5:1\n    \u2502  \n  5 \u2502 \u256d module sui_system::staking_pool_tests;\n  6 \u2502 \u2502 \n  7 \u2502 \u2502 use std::unit_test::{assert_eq, destroy};\n  8 \u2502 \u2502 use sui::balance;\n    \u00b7 \u2502\n465 \u2502 \u2502     scenario.ctx().epoch()\n466 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n   \u250c\u2500 ./sources/storage_fund.move:19:29\n   \u2502\n19 \u2502     non_refundable_balance: Balance<SUI>,\n   \u2502                             ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/storage_fund.move:18:35\n   \u2502\n18 \u2502     total_object_storage_rebates: Balance<SUI>,\n   \u2502                                   ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/storage_fund.move:34:22\n   \u2502\n34 \u2502     storage_charges: Balance<SUI>,\n   \u2502                      ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/storage_fund.move:35:32\n   \u2502\n35 \u2502     storage_fund_reinvestment: Balance<SUI>,\n   \u2502                                ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/storage_fund.move:36:31\n   \u2502\n36 \u2502     leftover_staking_rewards: Balance<SUI>,\n   \u2502                               ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/storage_fund.move:39:4\n   \u2502\n39 \u2502 ): Balance<SUI> {\n   \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/storage_fund.move:23:39\n   \u2502\n23 \u2502 public(package) fun new(initial_fund: Balance<SUI>): StorageFund {\n   \u2502                                       ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound module\n   \u250c\u2500 ./sources/storage_fund.move:4:1\n   \u2502  \n 4 \u2502 \u256d module sui_system::storage_fund;\n 5 \u2502 \u2502 \n 6 \u2502 \u2502 use sui::balance::{Self, Balance};\n 7 \u2502 \u2502 use sui::sui::SUI;\n   \u00b7 \u2502\n70 \u2502 \u2502     self.total_object_storage_rebates.value() + self.non_refundable_balance.value()\n71 \u2502 \u2502 }\n   \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n   \u250c\u2500 ./sources/sui_system.move:67:9\n   \u2502\n67 \u2502     id: UID,\n   \u2502         ^^^ Unbound type 'UID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:556:70\n    \u2502\n556 \u2502 public fun active_validator_voting_powers(wrapper: &SuiSystemState): VecMap<address, u64> {\n    \u2502                                                                      ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:590:21\n    \u2502\n590 \u2502     storage_reward: Balance<SUI>,\n    \u2502                     ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:591:25\n    \u2502\n591 \u2502     computation_reward: Balance<SUI>,\n    \u2502                         ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:601:15\n    \u2502\n601 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:602:4\n    \u2502\n602 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:890:15\n    \u2502\n890 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:891:4\n    \u2502\n891 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:570:11\n    \u2502\n570 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:280:15\n    \u2502\n280 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/sui_system.move:79:9\n   \u2502\n79 \u2502     id: UID,\n   \u2502         ^^^ Unbound type 'UID' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/sui_system.move:81:19\n   \u2502\n81 \u2502     storage_fund: Balance<SUI>,\n   \u2502                   ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/sui_system.move:86:15\n   \u2502\n86 \u2502     ctx: &mut TxContext,\n   \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:756:75\n    \u2502\n756 \u2502 public fun get_reporters_of(wrapper: &mut SuiSystemState, addr: address): VecSet<address> {\n    \u2502                                                                           ^^^^^^ Unbound type 'VecSet' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:540:15\n    \u2502\n540 \u2502     pool_id: &ID,\n    \u2502               ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:541:5\n    \u2502\n541 \u2502 ): &Table<u64, PoolTokenExchangeRate> {\n    \u2502     ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:289:11\n    \u2502\n289 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:290:4\n    \u2502\n290 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:231:12\n    \u2502\n231 \u2502     stake: Coin<SUI>,\n    \u2502            ^^^^ Unbound type 'Coin' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:233:15\n    \u2502\n233 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:253:20\n    \u2502\n253 \u2502     stakes: vector<Coin<SUI>>,\n    \u2502                    ^^^^ Unbound type 'Coin' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:256:15\n    \u2502\n256 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:242:12\n    \u2502\n242 \u2502     stake: Coin<SUI>,\n    \u2502            ^^^^ Unbound type 'Coin' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:244:15\n    \u2502\n244 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:169:80\n    \u2502\n169 \u2502 public entry fun request_add_validator(wrapper: &mut SuiSystemState, ctx: &mut TxContext) {\n    \u2502                                                                                ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:131:15\n    \u2502\n131 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:854:15\n    \u2502\n854 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:805:82\n    \u2502\n805 \u2502 public fun request_add_validator_for_testing(wrapper: &mut SuiSystemState, ctx: &TxContext) {\n    \u2502                                                                                  ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:179:83\n    \u2502\n179 \u2502 public entry fun request_remove_validator(wrapper: &mut SuiSystemState, ctx: &mut TxContext) {\n    \u2502                                                                                   ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:159:15\n    \u2502\n159 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:210:15\n    \u2502\n210 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:270:15\n    \u2502\n270 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:298:15\n    \u2502\n298 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:299:4\n    \u2502\n299 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:336:76\n    \u2502\n336 \u2502 public entry fun rotate_operation_cap(self: &mut SuiSystemState, ctx: &mut TxContext) {\n    \u2502                                                                            ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:220:15\n    \u2502\n220 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./sources/sui_system.move:40:1\n    \u2502  \n 40 \u2502 \u256d module sui_system::sui_system;\n 41 \u2502 \u2502 \n 42 \u2502 \u2502 use sui::balance::Balance;\n 43 \u2502 \u2502 use sui::coin::Coin;\n    \u00b7 \u2502\n907 \u2502 \u2502     storage_rebate\n908 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:396:11\n    \u2502\n396 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:528:11\n    \u2502\n528 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:417:11\n    \u2502\n417 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:438:11\n    \u2502\n438 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:484:11\n    \u2502\n484 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:459:11\n    \u2502\n459 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:507:11\n    \u2502\n507 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:355:11\n    \u2502\n355 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:365:11\n    \u2502\n365 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:345:11\n    \u2502\n345 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:386:11\n    \u2502\n386 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:518:11\n    \u2502\n518 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:407:11\n    \u2502\n407 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:428:11\n    \u2502\n428 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:471:11\n    \u2502\n471 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:449:11\n    \u2502\n449 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:497:11\n    \u2502\n497 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:375:11\n    \u2502\n375 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:533:81\n    \u2502\n533 \u2502 public fun validator_address_by_pool_id(wrapper: &mut SuiSystemState, pool_id: &ID): address {\n    \u2502                                                                                 ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:744:94\n    \u2502\n744 \u2502 public fun validator_staking_pool_id(wrapper: &mut SuiSystemState, validator_addr: address): ID {\n    \u2502                                                                                              ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:750:76\n    \u2502\n750 \u2502 public fun validator_staking_pool_mappings(wrapper: &mut SuiSystemState): &Table<ID, address> {\n    \u2502                                                                            ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:660:60\n    \u2502\n660 \u2502 fun validator_voting_powers(wrapper: &mut SuiSystemState): VecMap<address, u64> {\n    \u2502                                                            ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:717:79\n    \u2502\n717 \u2502 public fun validator_voting_powers_for_testing(wrapper: &mut SuiSystemState): VecMap<address, u64> {\n    \u2502                                                                               ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system.move:703:11\n    \u2502\n703 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:149:19\n    \u2502\n149 \u2502     extra_fields: Bag,\n    \u2502                   ^^^ Unbound type 'Bag' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:143:36\n    \u2502\n143 \u2502     safe_mode_computation_rewards: Balance<SUI>,\n    \u2502                                    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:142:32\n    \u2502\n142 \u2502     safe_mode_storage_rewards: Balance<SUI>,\n    \u2502                                ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:132:31\n    \u2502\n132 \u2502     validator_report_records: VecMap<address, VecSet<address>>,\n    \u2502                               ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:195:19\n    \u2502\n195 \u2502     extra_fields: Bag,\n    \u2502                   ^^^ Unbound type 'Bag' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:189:36\n    \u2502\n189 \u2502     safe_mode_computation_rewards: Balance<SUI>,\n    \u2502                                    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:188:32\n    \u2502\n188 \u2502     safe_mode_storage_rewards: Balance<SUI>,\n    \u2502                                ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:178:31\n    \u2502\n178 \u2502     validator_report_records: VecMap<address, VecSet<address>>,\n    \u2502                               ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/sui_system_state_inner.move:73:19\n   \u2502\n73 \u2502     extra_fields: Bag,\n   \u2502                   ^^^ Unbound type 'Bag' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:103:19\n    \u2502\n103 \u2502     extra_fields: Bag,\n    \u2502                   ^^^ Unbound type 'Bag' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1066:4\n     \u2502\n1066 \u2502 ): VecMap<address, u64> {\n     \u2502    ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:862:25\n    \u2502\n862 \u2502     mut storage_reward: Balance<SUI>,\n    \u2502                         ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:863:29\n    \u2502\n863 \u2502     mut computation_reward: Balance<SUI>,\n    \u2502                             ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:872:15\n    \u2502\n872 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:873:4\n    \u2502\n873 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:513:15\n    \u2502\n513 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:221:27\n    \u2502\n221 \u2502     initial_storage_fund: Balance<SUI>,\n    \u2502                           ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:226:15\n    \u2502\n226 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:261:15\n    \u2502\n261 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1206:66\n     \u2502\n1206 \u2502 public(package) fun extra_fields(self: &SuiSystemStateInnerV2): &Bag {\n     \u2502                                                                  ^^^ Unbound type 'Bag' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1210:78\n     \u2502\n1210 \u2502 public(package) fun extra_fields_mut(self: &mut SuiSystemStateInnerV2): &mut Bag {\n     \u2502                                                                              ^^^ Unbound type 'Bag' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1127:23\n     \u2502\n1127 \u2502     mut coins: vector<Coin<SUI>>,\n     \u2502                       ^^^^ Unbound type 'Coin' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1128:13\n     \u2502\n1128 \u2502     amount: Option<u64>,\n     \u2502             ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1129:15\n     \u2502\n1129 \u2502     ctx: &mut TxContext,\n     \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1130:4\n     \u2502\n1130 \u2502 ): Balance<SUI> {\n     \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1093:84\n     \u2502\n1093 \u2502 public(package) fun get_reporters_of(self: &SuiSystemStateInnerV2, addr: address): VecSet<address> {\n     \u2502                                                                                    ^^^^^^ Unbound type 'VecSet' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1115:14\n     \u2502\n1115 \u2502     pool_id: ID,\n     \u2502              ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1116:5\n     \u2502\n1116 \u2502 ): &Table<u64, PoolTokenExchangeRate> {\n     \u2502     ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:521:11\n    \u2502\n521 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:522:4\n    \u2502\n522 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:562:36\n    \u2502\n562 \u2502     validator_report_records: &mut VecMap<address, VecSet<address>>,\n    \u2502                                    ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:480:12\n    \u2502\n480 \u2502     stake: Coin<SUI>,\n    \u2502            ^^^^ Unbound type 'Coin' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:482:15\n    \u2502\n482 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:490:20\n    \u2502\n490 \u2502     stakes: vector<Coin<SUI>>,\n    \u2502                    ^^^^ Unbound type 'Coin' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:491:19\n    \u2502\n491 \u2502     stake_amount: Option<u64>,\n    \u2502                   ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:493:15\n    \u2502\n493 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:395:83\n    \u2502\n395 \u2502 public(package) fun request_add_validator(self: &mut SuiSystemStateInnerV2, ctx: &TxContext) {\n    \u2502                                                                                   ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:358:15\n    \u2502\n358 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1283:15\n     \u2502\n1283 \u2502     ctx: &mut TxContext,\n     \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:409:86\n    \u2502\n409 \u2502 public(package) fun request_remove_validator(self: &mut SuiSystemStateInnerV2, ctx: &TxContext) {\n    \u2502                                                                                      ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:386:15\n    \u2502\n386 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:457:11\n    \u2502\n457 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:503:11\n    \u2502\n503 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:504:4\n    \u2502\n504 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:597:86\n    \u2502\n597 \u2502 public(package) fun rotate_operation_cap(self: &mut SuiSystemStateInnerV2, ctx: &mut TxContext) {\n    \u2502                                                                                      ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:469:11\n    \u2502\n469 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:579:36\n    \u2502\n579 \u2502     validator_report_records: &mut VecMap<address, VecSet<address>>,\n    \u2502                                    ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound module\n     \u250c\u2500 ./sources/sui_system_state_inner.move:4:1\n     \u2502  \n   4 \u2502 \u256d module sui_system::sui_system_state_inner;\n   5 \u2502 \u2502 \n   6 \u2502 \u2502 use sui::bag::{Self, Bag};\n   7 \u2502 \u2502 use sui::balance::{Self, Balance};\n     \u00b7 \u2502\n1310 \u2502 \u2502     (($a as u128) * ($b as u128) / ($c as u128)) as u64\n1311 \u2502 \u2502 }\n     \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:676:11\n    \u2502\n676 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:843:11\n    \u2502\n843 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:704:11\n    \u2502\n704 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:729:11\n    \u2502\n729 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:787:11\n    \u2502\n787 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:757:11\n    \u2502\n757 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:815:11\n    \u2502\n815 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:629:11\n    \u2502\n629 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:639:11\n    \u2502\n639 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:613:11\n    \u2502\n613 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:663:11\n    \u2502\n663 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:830:11\n    \u2502\n830 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:691:11\n    \u2502\n691 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:716:11\n    \u2502\n716 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:773:11\n    \u2502\n773 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:744:11\n    \u2502\n744 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:802:11\n    \u2502\n802 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/sui_system_state_inner.move:649:11\n    \u2502\n649 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1108:15\n     \u2502\n1108 \u2502     pool_id: &ID,\n     \u2502               ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1081:4\n     \u2502\n1081 \u2502 ): ID {\n     \u2502    ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/sui_system_state_inner.move:1088:5\n     \u2502\n1088 \u2502 ): &Table<ID, address> {\n     \u2502     ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:502:9\n    \u2502\n502 \u2502         assert_eq!(pool.pending_stake_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:503:9\n    \u2502\n503 \u2502         assert_eq!(pool.pending_stake_withdraw_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:504:9\n    \u2502\n504 \u2502         assert_eq!(pool.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:509:5\n    \u2502\n509 \u2502     assert_eq!(staked_sui.amount(), stake_amount * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:515:9\n    \u2502\n515 \u2502         assert_eq!(pool.pending_stake_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:516:9\n    \u2502\n516 \u2502         assert_eq!(pool.pending_stake_withdraw_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:517:9\n    \u2502\n517 \u2502         assert_eq!(pool.sui_balance(), (100 + stake_amount) * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:526:5\n    \u2502\n526 \u2502     assert_eq!(fungible_staked_sui.value(), stake_amount * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:533:5\n    \u2502\n533 \u2502     assert_eq!(sui.destroy_for_testing(), stake_amount * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:538:9\n    \u2502\n538 \u2502         assert_eq!(pool.pending_stake_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:539:9\n    \u2502\n539 \u2502         assert_eq!(pool.pending_stake_withdraw_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:540:9\n    \u2502\n540 \u2502         assert_eq!(pool.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/sui_system_tests.move:37:9\n   \u2502\n37 \u2502         assert_eq!(system.get_reporters_of(@2).into_keys(), vector[@1])\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/sui_system_tests.move:43:9\n   \u2502\n43 \u2502         assert_eq!(system.get_reporters_of(@2).into_keys(), vector[@1, @3])\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/sui_system_tests.move:49:9\n   \u2502\n49 \u2502         assert_eq!(system.get_reporters_of(@2).into_keys(), vector[@1, @3])\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/sui_system_tests.move:55:9\n   \u2502\n55 \u2502         assert_eq!(system.get_reporters_of(@2).into_keys(), vector[@1])\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/sui_system_tests.move:62:9\n   \u2502\n62 \u2502         assert_eq!(system.get_reporters_of(@2).into_keys(), vector[@1])\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/sui_system_tests.move:68:9\n   \u2502\n68 \u2502         assert_eq!(system.get_reporters_of(@1).into_keys(), vector[@2])\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/sui_system_tests.move:74:9\n   \u2502\n74 \u2502         assert_eq!(system.get_reporters_of(@2).into_keys(), vector[@1, @3])\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/sui_system_tests.move:81:9\n   \u2502\n81 \u2502         assert_eq!(system.get_reporters_of(@2).into_keys(), vector[@1])\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:122:9\n    \u2502\n122 \u2502         assert_eq!(system.get_reporters_of(@2).into_keys(), vector[@1]);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:141:9\n    \u2502\n141 \u2502         assert_eq!(system.get_reporters_of(@2).into_keys(), vector[@1]);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:159:9\n    \u2502\n159 \u2502         assert_eq!(system.active_validator_by_address(@1).next_epoch_gas_price(), 666);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:160:9\n    \u2502\n160 \u2502         assert_eq!(system.pending_validator_by_address(new_validator).next_epoch_gas_price(), 777);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:167:9\n    \u2502\n167 \u2502         assert_eq!(system.active_validator_by_address(@1).gas_price(), 666);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:168:9\n    \u2502\n168 \u2502         assert_eq!(system.active_validator_by_address(new_validator).gas_price(), 1);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:175:9\n    \u2502\n175 \u2502         assert_eq!(system.active_validator_by_address(new_validator).gas_price(), 777);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:424:9\n    \u2502\n424 \u2502         assert_eq!(counter, 1);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:434:9\n    \u2502\n434 \u2502         assert_eq!(counter, 1);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:444:9\n    \u2502\n444 \u2502         assert_eq!(counter, 2);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:344:9\n    \u2502\n344 \u2502         assert_eq!(pool_mappings.length(), 4);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:345:9\n    \u2502\n345 \u2502         assert_eq!(pool_mappings[pool_id_1], @1);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:346:9\n    \u2502\n346 \u2502         assert_eq!(pool_mappings[pool_id_2], @2);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:347:9\n    \u2502\n347 \u2502         assert_eq!(pool_mappings[pool_id_3], @3);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:348:9\n    \u2502\n348 \u2502         assert_eq!(pool_mappings[pool_id_4], @4);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:371:9\n    \u2502\n371 \u2502         assert_eq!(pool_mappings.length(), 5);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:372:9\n    \u2502\n372 \u2502         assert_eq!(pool_mappings[pool_id_1], @1);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:373:9\n    \u2502\n373 \u2502         assert_eq!(pool_mappings[pool_id_2], @2);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:374:9\n    \u2502\n374 \u2502         assert_eq!(pool_mappings[pool_id_3], @3);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:375:9\n    \u2502\n375 \u2502         assert_eq!(pool_mappings[pool_id_4], @4);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:376:9\n    \u2502\n376 \u2502         assert_eq!(pool_mappings[pool_id_5], new_validator);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:392:9\n    \u2502\n392 \u2502         assert_eq!(pool_mappings.length(), 4);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:393:9\n    \u2502\n393 \u2502         assert_eq!(pool_mappings[pool_id_2], @2);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:394:9\n    \u2502\n394 \u2502         assert_eq!(pool_mappings[pool_id_3], @3);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:395:9\n    \u2502\n395 \u2502         assert_eq!(pool_mappings[pool_id_4], @4);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:396:9\n    \u2502\n396 \u2502         assert_eq!(pool_mappings[pool_id_5], new_validator);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./tests/sui_system_tests.move:9:1\n    \u2502  \n  9 \u2502 \u256d module sui_system::sui_system_tests;\n 10 \u2502 \u2502 \n 11 \u2502 \u2502 use std::unit_test::assert_eq;\n 12 \u2502 \u2502 use sui_system::test_runner;\n    \u00b7 \u2502\n543 \u2502 \u2502     runner.finish();\n544 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:319:9\n    \u2502\n319 \u2502         assert_eq!(system.validator_address_by_pool_id(&pool_id), @1);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:460:9\n    \u2502\n460 \u2502         assert_eq!(pool.pending_stake_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:461:9\n    \u2502\n461 \u2502         assert_eq!(pool.pending_stake_withdraw_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:462:9\n    \u2502\n462 \u2502         assert_eq!(pool.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:471:9\n    \u2502\n471 \u2502         assert_eq!(pool.pending_stake_amount(), stake_amount * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:472:9\n    \u2502\n472 \u2502         assert_eq!(pool.pending_stake_withdraw_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:473:9\n    \u2502\n473 \u2502         assert_eq!(pool.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:482:9\n    \u2502\n482 \u2502         assert_eq!(pool.pending_stake_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:483:9\n    \u2502\n483 \u2502         assert_eq!(pool.pending_stake_withdraw_amount(), 0);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/sui_system_tests.move:484:9\n    \u2502\n484 \u2502         assert_eq!(pool.sui_balance(), 100 * MIST_PER_SUI);\n    \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:221:25\n    \u2502\n221 \u2502     computation_charge: Option<u64>,\n    \u2502                         ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:226:23\n    \u2502\n226 \u2502     epoch_start_time: Option<u64>,\n    \u2502                       ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:223:33\n    \u2502\n223 \u2502     non_refundable_storage_fee: Option<u64>,\n    \u2502                                 ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:219:23\n    \u2502\n219 \u2502     protocol_version: Option<u64>,\n    \u2502                       ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:225:27\n    \u2502\n225 \u2502     reward_slashing_rate: Option<u64>,\n    \u2502                           ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:220:21\n    \u2502\n220 \u2502     storage_charge: Option<u64>,\n    \u2502                     ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:224:33\n    \u2502\n224 \u2502     storage_fund_reinvest_rate: Option<u64>,\n    \u2502                                 ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:222:21\n    \u2502\n222 \u2502     storage_rebate: Option<u64>,\n    \u2502                     ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:306:15\n    \u2502\n306 \u2502     scenario: Scenario,\n    \u2502               ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/test_runner.move:35:21\n   \u2502\n35 \u2502     epoch_duration: Option<u64>,\n   \u2502                     ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/test_runner.move:36:29\n   \u2502\n36 \u2502     low_stake_grace_period: Option<u64>,\n   \u2502                             ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/test_runner.move:32:23\n   \u2502\n32 \u2502     protocol_version: Option<u64>,\n   \u2502                       ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/test_runner.move:33:33\n   \u2502\n33 \u2502     stake_distribution_counter: Option<u64>,\n   \u2502                                 ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/test_runner.move:34:18\n   \u2502\n34 \u2502     start_epoch: Option<u64>,\n   \u2502                  ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/test_runner.move:28:26\n   \u2502\n28 \u2502     storage_fund_amount: Option<u64>,\n   \u2502                          ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/test_runner.move:27:24\n   \u2502\n27 \u2502     sui_supply_amount: Option<u64>,\n   \u2502                        ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/test_runner.move:26:17\n   \u2502\n26 \u2502     validators: Option<vector<ValidatorBuilder>>,\n   \u2502                 ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/test_runner.move:30:23\n   \u2502\n30 \u2502     validators_count: Option<u64>,\n   \u2502                       ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/test_runner.move:31:31\n   \u2502\n31 \u2502     validators_initial_stake: Option<u64>,\n   \u2502                               ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:409:14\n    \u2502\n409 \u2502     options: Option<AdvanceEpochOptions>,\n    \u2502              ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:410:4\n    \u2502\n410 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:319:47\n    \u2502\n319 \u2502 public fun ctx(runner: &mut TestRunner): &mut TxContext { runner.scenario.ctx() }\n    \u2502                                               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./tests/builders/test_runner.move:344:5\n    \u2502\n344 \u2502     std::unit_test::destroy(v);\n    \u2502     ^^^^^^^^^^^^^^ Unbound module 'std::unit_test'\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:338:31\n    \u2502\n338 \u2502 public fun mint(amount: u64): Balance<SUI> {\n    \u2502                               ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:356:66\n    \u2502\n356 \u2502 public macro fun scenario_fn($runner: &mut TestRunner, $f: |&mut Scenario|) {\n    \u2502                                                                  ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:322:56\n    \u2502\n322 \u2502 public fun scenario_mut(runner: &mut TestRunner): &mut Scenario { &mut runner.scenario }\n    \u2502                                                        ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:575:29\n    \u2502\n575 \u2502     scenario.ids_for_sender<Coin<SUI>>().fold!(0, |mut sum, coin_id| {\n    \u2502                             ^^^^ Unbound type 'Coin' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:576:52\n    \u2502\n576 \u2502         let coin = scenario.take_from_sender_by_id<Coin<SUI>>(coin_id);\n    \u2502                                                    ^^^^ Unbound type 'Coin' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/test_runner.move:374:36\n    \u2502\n374 \u2502     $f: |&mut SuiSystemState, &mut TxContext|,\n    \u2502                                    ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./tests/builders/test_runner.move:7:1\n    \u2502  \n  7 \u2502 \u256d module sui_system::test_runner;\n  8 \u2502 \u2502 \n  9 \u2502 \u2502 use sui::balance::{Self, Balance};\n 10 \u2502 \u2502 use sui::coin::{Self, Coin};\n    \u00b7 \u2502\n617 \u2502 \u2502     runner.finish();\n618 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:156:14\n    \u2502\n156 \u2502     pool_id: ID,\n    \u2502              ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:164:14\n    \u2502\n164 \u2502     pool_id: ID,\n    \u2502              ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:136:14\n    \u2502\n136 \u2502     pool_id: ID,\n    \u2502              ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:145:14\n    \u2502\n145 \u2502     pool_id: ID,\n    \u2502              ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:131:19\n    \u2502\n131 \u2502     extra_fields: Bag,\n    \u2502                   ^^^ Unbound type 'Bag' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:117:23\n    \u2502\n117 \u2502     operation_cap_id: ID,\n    \u2502                       ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator.move:85:18\n   \u2502\n85 \u2502     description: String,\n   \u2502                  ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:107:19\n    \u2502\n107 \u2502     extra_fields: Bag,\n    \u2502                   ^^^ Unbound type 'Bag' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator.move:86:16\n   \u2502\n86 \u2502     image_url: Url,\n   \u2502                ^^^ Unbound type 'Url' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator.move:84:11\n   \u2502\n84 \u2502     name: String,\n   \u2502           ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator.move:89:18\n   \u2502\n89 \u2502     net_address: String,\n   \u2502                  ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:102:29\n    \u2502\n102 \u2502     next_epoch_net_address: Option<String>,\n    \u2502                             ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:100:38\n    \u2502\n100 \u2502     next_epoch_network_pubkey_bytes: Option<vector<u8>>,\n    \u2502                                      ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:103:29\n    \u2502\n103 \u2502     next_epoch_p2p_address: Option<String>,\n    \u2502                             ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:104:33\n    \u2502\n104 \u2502     next_epoch_primary_address: Option<String>,\n    \u2502                                 ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator.move:99:37\n   \u2502\n99 \u2502     next_epoch_proof_of_possession: Option<vector<u8>>,\n   \u2502                                     ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator.move:98:39\n   \u2502\n98 \u2502     next_epoch_protocol_pubkey_bytes: Option<vector<u8>>,\n   \u2502                                       ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:105:32\n    \u2502\n105 \u2502     next_epoch_worker_address: Option<String>,\n    \u2502                                ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:101:37\n    \u2502\n101 \u2502     next_epoch_worker_pubkey_bytes: Option<vector<u8>>,\n    \u2502                                     ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator.move:91:18\n   \u2502\n91 \u2502     p2p_address: String,\n   \u2502                  ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator.move:93:22\n   \u2502\n93 \u2502     primary_address: String,\n   \u2502                      ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator.move:87:18\n   \u2502\n87 \u2502     project_url: Url,\n   \u2502                  ^^^ Unbound type 'Url' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator.move:95:21\n   \u2502\n95 \u2502     worker_address: String,\n   \u2502                     ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:642:39\n    \u2502\n642 \u2502 macro fun both_some_and_equal<$T>($a: Option<$T>, $b: Option<$T>): bool {\n    \u2502                                       ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:642:55\n    \u2502\n642 \u2502 macro fun both_some_and_equal<$T>($a: Option<$T>, $b: Option<$T>): bool {\n    \u2502                                                       ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:310:15\n    \u2502\n310 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:432:73\n    \u2502\n432 \u2502 public(package) fun deposit_stake_rewards(self: &mut Validator, reward: Balance<SUI>) {\n    \u2502                                                                         ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:461:44\n    \u2502\n461 \u2502 public fun description(self: &Validator): &String {\n    \u2502                                            ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:896:35\n    \u2502\n896 \u2502 macro fun do_extract<$T>($o: &mut Option<$T>, $f: |$T|) {\n    \u2502                                   ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:465:42\n    \u2502\n465 \u2502 public fun image_url(self: &Validator): &Url {\n    \u2502                                          ^^^ Unbound type 'Url' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:457:37\n    \u2502\n457 \u2502 public fun name(self: &Validator): &String {\n    \u2502                                     ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:473:48\n    \u2502\n473 \u2502 public fun network_address(self: &Validator): &String {\n    \u2502                                                ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:227:15\n    \u2502\n227 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:967:27\n    \u2502\n967 \u2502     initial_stake_option: Option<Balance<SUI>>,\n    \u2502                           ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:971:15\n    \u2502\n971 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:921:15\n    \u2502\n921 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:175:11\n    \u2502\n175 \u2502     name: String,\n    \u2502           ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:176:18\n    \u2502\n176 \u2502     description: String,\n    \u2502                  ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:177:16\n    \u2502\n177 \u2502     image_url: Url,\n    \u2502                ^^^ Unbound type 'Url' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:178:18\n    \u2502\n178 \u2502     project_url: Url,\n    \u2502                  ^^^ Unbound type 'Url' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:179:18\n    \u2502\n179 \u2502     net_address: String,\n    \u2502                  ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:180:18\n    \u2502\n180 \u2502     p2p_address: String,\n    \u2502                  ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:181:22\n    \u2502\n181 \u2502     primary_address: String,\n    \u2502                      ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:182:21\n    \u2502\n182 \u2502     worker_address: String,\n    \u2502                     ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:183:19\n    \u2502\n183 \u2502     extra_fields: Bag,\n    \u2502                   ^^^ Unbound type 'Bag' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:653:15\n    \u2502\n653 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:505:59\n    \u2502\n505 \u2502 public fun next_epoch_network_address(self: &Validator): &Option<String> {\n    \u2502                                                           ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:529:64\n    \u2502\n529 \u2502 public fun next_epoch_network_pubkey_bytes(self: &Validator): &Option<vector<u8>> {\n    \u2502                                                                ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:509:55\n    \u2502\n509 \u2502 public fun next_epoch_p2p_address(self: &Validator): &Option<String> {\n    \u2502                                                       ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:513:59\n    \u2502\n513 \u2502 public fun next_epoch_primary_address(self: &Validator): &Option<String> {\n    \u2502                                                           ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:525:63\n    \u2502\n525 \u2502 public fun next_epoch_proof_of_possession(self: &Validator): &Option<vector<u8>> {\n    \u2502                                                               ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:521:65\n    \u2502\n521 \u2502 public fun next_epoch_protocol_pubkey_bytes(self: &Validator): &Option<vector<u8>> {\n    \u2502                                                                 ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:517:58\n    \u2502\n517 \u2502 public fun next_epoch_worker_address(self: &Validator): &Option<String> {\n    \u2502                                                          ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:533:63\n    \u2502\n533 \u2502 public fun next_epoch_worker_pubkey_bytes(self: &Validator): &Option<vector<u8>> {\n    \u2502                                                               ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:537:49\n    \u2502\n537 \u2502 public fun operation_cap_id(self: &Validator): &ID {\n    \u2502                                                 ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:477:44\n    \u2502\n477 \u2502 public fun p2p_address(self: &Validator): &String {\n    \u2502                                            ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:481:48\n    \u2502\n481 \u2502 public fun primary_address(self: &Validator): &String {\n    \u2502                                                ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:438:86\n    \u2502\n438 \u2502 public(package) fun process_pending_stakes_and_withdraws(self: &mut Validator, ctx: &TxContext) {\n    \u2502                                                                                      ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:469:44\n    \u2502\n469 \u2502 public fun project_url(self: &Validator): &Url {\n    \u2502                                            ^^^ Unbound type 'Url' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:329:11\n    \u2502\n329 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:330:4\n    \u2502\n330 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:284:12\n    \u2502\n284 \u2502     stake: Balance<SUI>,\n    \u2502            ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:286:15\n    \u2502\n286 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:348:12\n    \u2502\n348 \u2502     stake: Balance<SUI>,\n    \u2502            ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:350:15\n    \u2502\n350 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:370:11\n    \u2502\n370 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:371:4\n    \u2502\n371 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:590:47\n    \u2502\n590 \u2502 public fun staking_pool_id(self: &Validator): ID {\n    \u2502                                               ^^ Unbound type 'ID' in current scope\n\nerror: unbound module\n     \u250c\u2500 ./sources/validator.move:5:1\n     \u2502  \n   5 \u2502 \u256d module sui_system::validator;\n   6 \u2502 \u2502 \n   7 \u2502 \u2502 use std::bcs;\n   8 \u2502 \u2502 use std::string::String;\n     \u00b7 \u2502\n1009 \u2502 \u2502     validator\n1010 \u2502 \u2502 }\n     \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator.move:485:47\n    \u2502\n485 \u2502 public fun worker_address(self: &Validator): &String {\n    \u2502                                               ^^^^^^ Unbound type 'String' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:36:22\n   \u2502\n36 \u2502     commission_rate: Option<u64>,\n   \u2502                      ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:28:18\n   \u2502\n28 \u2502     description: Option<vector<u8>>,\n   \u2502                  ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:35:16\n   \u2502\n35 \u2502     gas_price: Option<u64>,\n   \u2502                ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:29:16\n   \u2502\n29 \u2502     image_url: Option<vector<u8>>,\n   \u2502                ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:38:20\n   \u2502\n38 \u2502     initial_stake: Option<u64>,\n   \u2502                    ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:27:11\n   \u2502\n27 \u2502     name: Option<vector<u8>>,\n   \u2502           ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:31:18\n   \u2502\n31 \u2502     net_address: Option<vector<u8>>,\n   \u2502                  ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:24:27\n   \u2502\n24 \u2502     network_pubkey_bytes: Option<vector<u8>>,\n   \u2502                           ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:32:18\n   \u2502\n32 \u2502     p2p_address: Option<vector<u8>>,\n   \u2502                  ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:33:22\n   \u2502\n33 \u2502     primary_address: Option<vector<u8>>,\n   \u2502                      ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:30:18\n   \u2502\n30 \u2502     project_url: Option<vector<u8>>,\n   \u2502                  ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:26:26\n   \u2502\n26 \u2502     proof_of_possession: Option<vector<u8>>,\n   \u2502                          ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:23:28\n   \u2502\n23 \u2502     protocol_pubkey_bytes: Option<vector<u8>>,\n   \u2502                            ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:22:18\n   \u2502\n22 \u2502     sui_address: Option<address>,\n   \u2502                  ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:34:21\n   \u2502\n34 \u2502     worker_address: Option<vector<u8>>,\n   \u2502                     ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:25:26\n   \u2502\n25 \u2502     worker_pubkey_bytes: Option<vector<u8>>,\n   \u2502                          ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./tests/builders/validator_builder.move:92:55\n   \u2502\n92 \u2502 public fun build(builder: ValidatorBuilder, ctx: &mut TxContext): Validator {\n   \u2502                                                       ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/builders/validator_builder.move:135:64\n    \u2502\n135 \u2502 public fun build_metadata(builder: ValidatorBuilder, ctx: &mut TxContext): ValidatorMetadata {\n    \u2502                                                                ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./tests/builders/validator_builder.move:10:1\n    \u2502  \n 10 \u2502 \u256d module sui_system::validator_builder;\n 11 \u2502 \u2502 \n 12 \u2502 \u2502 use sui::bag;\n 13 \u2502 \u2502 use sui::balance;\n    \u00b7 \u2502\n340 \u2502 \u2502     preset.protocol_pubkey_bytes()\n341 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator_cap.move:18:9\n   \u2502\n18 \u2502     id: UID,\n   \u2502         ^^^ Unbound type 'UID' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator_cap.move:42:15\n   \u2502\n42 \u2502     ctx: &mut TxContext,\n   \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator_cap.move:43:4\n   \u2502\n43 \u2502 ): ID {\n   \u2502    ^^ Unbound type 'ID' in current scope\n\nerror: unbound module\n   \u250c\u2500 ./sources/validator_cap.move:4:1\n   \u2502  \n 4 \u2502 \u256d module sui_system::validator_cap;\n 5 \u2502 \u2502 \n 6 \u2502 \u2502 /// The capability object is created when creating a new `Validator` or when the\n 7 \u2502 \u2502 /// validator explicitly creates a new capability object for rotation/revocation.\n   \u00b7 \u2502\n62 \u2502 \u2502     ValidatorOperationCap { authorizer_validator_address: cap.authorizer_validator_address }\n63 \u2502 \u2502 }\n   \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound module\n    \u250c\u2500 ./tests/validator_metadata_tests.move:5:1\n    \u2502  \n  5 \u2502 \u256d module sui_system::validator_metadata_tests;\n  6 \u2502 \u2502 \n  7 \u2502 \u2502 use std::unit_test;\n  8 \u2502 \u2502 use sui::test_scenario::{Self, Scenario};\n    \u00b7 \u2502\n917 \u2502 \u2502     assert!(validator.next_epoch_network_pubkey_bytes().is_none());\n918 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n    \u250c\u2500 ./tests/validator_metadata_tests.move:777:20\n    \u2502\n777 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./tests/builders/validator_preset.move:186:26\n    \u2502\n186 \u2502         account_address: sui::address::from_bytes(preset[1]),\n    \u2502                          ^^^^^^^^^^^^ Unbound module 'sui::address'\n\nerror: unbound module\n    \u250c\u2500 ./tests/builders/validator_preset.move:5:1\n    \u2502  \n  5 \u2502 \u256d module sui_system::validator_preset;\n  6 \u2502 \u2502 \n  7 \u2502 \u2502 const VALID_NET_PUBKEY: vector<u8> = vector[\n  8 \u2502 \u2502     171, 2, 39, 3, 139, 105, 166, 171, 153, 151, 102, 197, 151, 186, 140, 116, 114, 90, 213, 225, 20,\n    \u00b7 \u2502\n250 \u2502 \u2502     preset.project_url\n251 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:123:22\n    \u2502\n123 \u2502     staking_pool_id: ID,\n    \u2502                      ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:131:22\n    \u2502\n131 \u2502     staking_pool_id: ID,\n    \u2502                      ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator_set.move:82:25\n   \u2502\n82 \u2502     at_risk_validators: VecMap<address, u64>,\n   \u2502                         ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator_set.move:84:19\n   \u2502\n84 \u2502     extra_fields: Bag,\n   \u2502                   ^^^ Unbound type 'Bag' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator_set.move:74:26\n   \u2502\n74 \u2502     inactive_validators: Table<ID, ValidatorWrapper>,\n   \u2502                          ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator_set.move:65:32\n   \u2502\n65 \u2502     pending_active_validators: TableVec<Validator>,\n   \u2502                                ^^^^^^^^ Unbound type 'TableVec' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator_set.move:70:28\n   \u2502\n70 \u2502     staking_pool_mappings: Table<ID, address>,\n   \u2502                            ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator_set.move:80:27\n   \u2502\n80 \u2502     validator_candidates: Table<address, ValidatorWrapper>,\n   \u2502                           ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:376:30\n    \u2502\n376 \u2502     computation_reward: &mut Balance<SUI>,\n    \u2502                              ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:377:31\n    \u2502\n377 \u2502     storage_fund_reward: &mut Balance<SUI>,\n    \u2502                               ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:378:36\n    \u2502\n378 \u2502     validator_report_records: &mut VecMap<address, VecSet<address>>,\n    \u2502                                    ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:381:15\n    \u2502\n381 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:233:53\n    \u2502\n233 \u2502 fun can_join(self: &ValidatorSet, stake: u64, ctx: &TxContext): bool {\n    \u2502                                                     ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:976:36\n    \u2502\n976 \u2502     validator_report_records: &mut VecMap<address, VecSet<address>>,\n    \u2502                                    ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/validator_set.move:1125:44\n     \u2502\n1125 \u2502     individual_staking_reward_adjustments: VecMap<u64, u64>,\n     \u2502                                            ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/validator_set.move:1127:49\n     \u2502\n1127 \u2502     individual_storage_fund_reward_adjustments: VecMap<u64, u64>,\n     \u2502                                                 ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/validator_set.move:1014:5\n     \u2502\n1014 \u2502     VecMap<u64, u64>, // mapping of individual validator's staking reward adjustment from index -> amount\n     \u2502     ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/validator_set.move:1016:5\n     \u2502\n1016 \u2502     VecMap<u64, u64>, // mapping of individual validator's storage fund reward adjustment from index -> amount\n     \u2502     ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/validator_set.move:1066:35\n     \u2502\n1066 \u2502     mut validator_report_records: VecMap<address, VecSet<address>>,\n     \u2502                                   ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:329:15\n    \u2502\n329 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/validator_set.move:1188:27\n     \u2502\n1188 \u2502     staking_rewards: &mut Balance<SUI>,\n     \u2502                           ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/validator_set.move:1189:31\n     \u2502\n1189 \u2502     storage_fund_reward: &mut Balance<SUI>,\n     \u2502                               ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/validator_set.move:1190:15\n     \u2502\n1190 \u2502     ctx: &mut TxContext,\n     \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/validator_set.move:1237:22\n     \u2502\n1237 \u2502     report_records: &VecMap<address, VecSet<address>>,\n     \u2502                      ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:743:81\n    \u2502\n743 \u2502 fun find_validator(validators: &vector<Validator>, validator_address: address): Option<u64> {\n    \u2502                                                                                 ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:751:18\n    \u2502\n751 \u2502     validators: &TableVec<Validator>,\n    \u2502                  ^^^^^^^^ Unbound type 'TableVec' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:753:4\n    \u2502\n753 \u2502 ): Option<u64> {\n    \u2502    ^^^^^^ Unbound type 'Option' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:247:60\n    \u2502\n247 \u2502 fun get_voting_power_thresholds(self: &ValidatorSet, ctx: &TxContext): (u64, u64, u64) {\n    \u2502                                                            ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/validator_set.move:1317:81\n     \u2502\n1317 \u2502 public(package) fun inactive_validator_by_pool_id(self: &ValidatorSet, pool_id: ID): &Validator {\n     \u2502                                                                                 ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n     \u250c\u2500 ./sources/validator_set.move:1296:72\n     \u2502\n1296 \u2502 public fun is_inactive_validator(self: &ValidatorSet, staking_pool_id: ID): bool {\n     \u2502                                                                        ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:143:15\n    \u2502\n143 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:664:14\n    \u2502\n664 \u2502     pool_id: ID,\n    \u2502              ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:665:5\n    \u2502\n665 \u2502 ): &Table<u64, PoolTokenExchangeRate> {\n    \u2502     ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:921:36\n    \u2502\n921 \u2502     validator_report_records: &mut VecMap<address, VecSet<address>>,\n    \u2502                                    ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:922:15\n    \u2502\n922 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:945:36\n    \u2502\n945 \u2502     validator_report_records: &mut VecMap<address, VecSet<address>>,\n    \u2502                                    ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:947:15\n    \u2502\n947 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:348:11\n    \u2502\n348 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:349:4\n    \u2502\n349 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:292:12\n    \u2502\n292 \u2502     stake: Balance<SUI>,\n    \u2502            ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:293:15\n    \u2502\n293 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:221:74\n    \u2502\n221 \u2502 public(package) fun request_add_validator(self: &mut ValidatorSet, ctx: &TxContext) {\n    \u2502                                                                          ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:171:15\n    \u2502\n171 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:273:77\n    \u2502\n273 \u2502 public(package) fun request_remove_validator(self: &mut ValidatorSet, ctx: &TxContext) {\n    \u2502                                                                             ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:198:15\n    \u2502\n198 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:311:11\n    \u2502\n311 \u2502     ctx: &TxContext,\n    \u2502           ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:312:4\n    \u2502\n312 \u2502 ): Balance<SUI> {\n    \u2502    ^^^^^^^ Unbound type 'Balance' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:648:57\n    \u2502\n648 \u2502 public fun staking_pool_mappings(self: &ValidatorSet): &Table<ID, address> {\n    \u2502                                                         ^^^^^ Unbound type 'Table' in current scope\n\nerror: unbound module\n     \u250c\u2500 ./sources/validator_set.move:4:1\n     \u2502  \n   4 \u2502 \u256d module sui_system::validator_set;\n   5 \u2502 \u2502 \n   6 \u2502 \u2502 use sui::bag::{Self, Bag};\n   7 \u2502 \u2502 use sui::balance::Balance;\n     \u00b7 \u2502\n1369 \u2502 \u2502     abort\n1370 \u2502 \u2502 }\n     \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:497:36\n    \u2502\n497 \u2502     validator_report_records: &mut VecMap<address, VecSet<address>>,\n    \u2502                                    ^^^^^^ Unbound type 'VecMap' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:498:15\n    \u2502\n498 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:652:76\n    \u2502\n652 \u2502 public fun validator_address_by_pool_id(self: &mut ValidatorSet, pool_id: &ID): address {\n    \u2502                                                                            ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:678:76\n    \u2502\n678 \u2502 public(package) fun validator_by_pool_id(self: &mut ValidatorSet, pool_id: ID): &Validator {\n    \u2502                                                                            ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./sources/validator_set.move:644:88\n    \u2502\n644 \u2502 public fun validator_staking_pool_id(self: &ValidatorSet, validator_address: address): ID {\n    \u2502                                                                                        ^^ Unbound type 'ID' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/validator_set_tests.move:676:20\n    \u2502\n676 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:295:5\n    \u2502\n295 \u2502     assert_eq!(validator_set.total_stake(), 100 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:304:5\n    \u2502\n304 \u2502     assert_eq!(validator_set.validator_address_by_pool_id(&pool_id_2), @0x2);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:311:5\n    \u2502\n311 \u2502     assert_eq!(validator_set.validator_address_by_pool_id(&pool_id_2), @0x2);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:313:5\n    \u2502\n313 \u2502     destroy(validator_set);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:547:5\n    \u2502\n547 \u2502     destroy(stake);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:561:9\n    \u2502\n561 \u2502         destroy(stake);\n    \u2502         ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:571:5\n    \u2502\n571 \u2502     assert_eq!(effects.num_user_events(), num_validators); // epoch changes hould not emit ValidatorJoinEvent or ValidatorLeaveEvent\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:573:5\n    \u2502\n573 \u2502     destroy(validator_set);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:220:5\n    \u2502\n220 \u2502     destroy(validator_set);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:275:5\n    \u2502\n275 \u2502     assert_eq!(effects.num_user_events(), num_validators + 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:277:5\n    \u2502\n277 \u2502     destroy(validator_set);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/validator_set_tests.move:669:87\n    \u2502\n669 \u2502 fun advance_epoch_with_dummy_rewards(validator_set: &mut ValidatorSet, scenario: &mut Scenario) {\n    \u2502                                                                                       ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/validator_set_tests.move:650:20\n    \u2502\n650 \u2502     scenario: &mut Scenario,\n    \u2502                    ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/validator_set_tests.move:582:15\n    \u2502\n582 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/validator_set_tests.move:614:15\n    \u2502\n614 \u2502     ctx: &mut TxContext,\n    \u2502               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/validator_set_tests.move:225:33\n    \u2502\n225 \u2502 fun get_10_validators(ctx: &mut TxContext): vector<Validator> {\n    \u2502                                 ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:456:5\n    \u2502\n456 \u2502     assert_eq!(validator_set.find_for_testing(@0xB).voting_power(), 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:474:5\n    \u2502\n474 \u2502     assert_eq!(effects.num_user_events(), num_validators + 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:476:5\n    \u2502\n476 \u2502     destroy(validator_set);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:477:5\n    \u2502\n477 \u2502     destroy(bal);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:478:5\n    \u2502\n478 \u2502     destroy(stake);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:523:5\n    \u2502\n523 \u2502     destroy(validator_set);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:524:5\n    \u2502\n524 \u2502     destroy(stake1);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:525:5\n    \u2502\n525 \u2502     destroy(stake2);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:105:5\n    \u2502\n105 \u2502     assert_eq!(validator_set.derive_reference_gas_price(), 45);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:110:5\n    \u2502\n110 \u2502     assert_eq!(validator_set.derive_reference_gas_price(), 45);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:119:5\n    \u2502\n119 \u2502     assert_eq!(validator_set.derive_reference_gas_price(), 42);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:128:5\n    \u2502\n128 \u2502     assert_eq!(validator_set.derive_reference_gas_price(), 42);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:137:5\n    \u2502\n137 \u2502     assert_eq!(validator_set.derive_reference_gas_price(), 43);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:139:5\n    \u2502\n139 \u2502     destroy(validator_set);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:341:5\n    \u2502\n341 \u2502     destroy(validator_set);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:342:5\n    \u2502\n342 \u2502     destroy(bal);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/validator_set_tests.move:241:58\n    \u2502\n241 \u2502 fun skip_to_min_stake_v2_final_thresholds(scenario: &mut Scenario) {\n    \u2502                                                          ^^^^^^^^ Unbound type 'Scenario' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:151:5\n    \u2502\n151 \u2502     assert_eq!(validator_set.total_stake(), 100 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:164:5\n    \u2502\n164 \u2502     destroy(validator_set);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:176:5\n    \u2502\n176 \u2502     assert_eq!(validator_set.total_stake(), 100 * MIST_PER_SUI);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:192:5\n    \u2502\n192 \u2502     destroy(validator_set);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./tests/validator_set_tests.move:5:1\n    \u2502  \n  5 \u2502 \u256d module sui_system::validator_set_tests;\n  6 \u2502 \u2502 \n  7 \u2502 \u2502 use std::unit_test::{assert_eq, destroy};\n  8 \u2502 \u2502 use sui::address;\n    \u00b7 \u2502\n681 \u2502 \u2502     validator_set.request_add_validator(ctx);\n682 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_set_tests.move:31:5\n   \u2502\n31 \u2502     assert_eq!(validator_set.total_stake(), 100 * MIST_PER_SUI);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_set_tests.move:40:5\n   \u2502\n40 \u2502     assert_eq!(validator_set.total_stake(), 100 * MIST_PER_SUI);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_set_tests.move:61:9\n   \u2502\n61 \u2502         assert_eq!(validator_set.total_stake(), 100 * MIST_PER_SUI);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_set_tests.move:72:5\n   \u2502\n72 \u2502     assert_eq!(validator_set.total_stake(), 1500 * MIST_PER_SUI);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_set_tests.move:82:5\n   \u2502\n82 \u2502     assert_eq!(validator_set.total_stake(), 1500 * MIST_PER_SUI);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_set_tests.move:85:5\n   \u2502\n85 \u2502     assert_eq!(validator_set.total_stake(), 900 * MIST_PER_SUI);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_set_tests.move:87:5\n   \u2502\n87 \u2502     destroy(validator_set);\n   \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:416:5\n    \u2502\n416 \u2502     assert_eq!(effects.num_user_events(), num_validators + 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:418:5\n    \u2502\n418 \u2502     destroy(validator_set);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:419:5\n    \u2502\n419 \u2502     destroy(bal);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:420:5\n    \u2502\n420 \u2502     destroy(stake);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:376:5\n    \u2502\n376 \u2502     assert_eq!(effects.num_user_events(), num_validators + 1);\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:378:5\n    \u2502\n378 \u2502     destroy(validator_set);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_set_tests.move:379:5\n    \u2502\n379 \u2502     destroy(bal);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:102:5\n    \u2502\n102 \u2502     destroy(metadata);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:69:5\n   \u2502\n69 \u2502     assert_eq!(validator.total_stake(), initial_stake);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:70:5\n   \u2502\n70 \u2502     assert_eq!(validator.pending_stake_amount(), added_stake);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:78:9\n   \u2502\n78 \u2502         assert_eq!(withdrawn_balance, initial_stake);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:79:9\n   \u2502\n79 \u2502         assert_eq!(validator.total_stake(), initial_stake);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:80:9\n   \u2502\n80 \u2502         assert_eq!(validator.pending_stake_amount(), added_stake);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:81:9\n   \u2502\n81 \u2502         assert_eq!(validator.pending_stake_withdraw_amount(), initial_stake);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:87:9\n   \u2502\n87 \u2502         assert_eq!(validator.total_stake(), added_stake);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:88:9\n   \u2502\n88 \u2502         assert_eq!(validator.pending_stake_amount(), 0);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:89:9\n   \u2502\n89 \u2502         assert_eq!(validator.pending_stake_withdraw_amount(), 0);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./tests/validator_tests.move:5:1\n    \u2502  \n  5 \u2502 \u256d module sui_system::validator_tests;\n  6 \u2502 \u2502 \n  7 \u2502 \u2502 use std::unit_test::{assert_eq, destroy};\n  8 \u2502 \u2502 use sui::balance;\n    \u00b7 \u2502\n485 \u2502 \u2502     abort\n486 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:33:5\n   \u2502\n33 \u2502     assert_eq!(validator.total_stake(), initial_stake);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:34:5\n   \u2502\n34 \u2502     assert_eq!(validator.sui_address(), @2);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:38:9\n   \u2502\n38 \u2502         assert_eq!(stake.amount(), initial_stake);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:39:9\n   \u2502\n39 \u2502         assert_eq!(stake.pool_id(), pool_id);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/validator_tests.move:40:9\n   \u2502\n40 \u2502         assert_eq!(stake.stake_activation_epoch(), 0);\n   \u2502         ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:246:5\n    \u2502\n246 \u2502     assert_eq!(*validator.name(), b\"new_name\".to_string());\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:247:5\n    \u2502\n247 \u2502     assert_eq!(*validator.description(), b\"new_desc\".to_string());\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:248:5\n    \u2502\n248 \u2502     assert_eq!(*validator.image_url(), url::new_unsafe_from_bytes(b\"new_image_url\"));\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:249:5\n    \u2502\n249 \u2502     assert_eq!(*validator.project_url(), url::new_unsafe_from_bytes(b\"new_proj_url\"));\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:250:5\n    \u2502\n250 \u2502     assert_eq!(*validator.network_address(), validator_builder::valid_net_addr().to_string());\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:251:5\n    \u2502\n251 \u2502     assert_eq!(*validator.p2p_address(), validator_builder::valid_p2p_addr().to_string());\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:252:5\n    \u2502\n252 \u2502     assert_eq!(*validator.primary_address(), validator_builder::valid_consensus_addr().to_string());\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:253:5\n    \u2502\n253 \u2502     assert_eq!(*validator.worker_address(), validator_builder::valid_worker_addr().to_string());\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:254:5\n    \u2502\n254 \u2502     assert_eq!(*validator.protocol_pubkey_bytes(), validator_builder::valid_pubkey());\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:255:5\n    \u2502\n255 \u2502     assert_eq!(*validator.proof_of_possession(), validator_builder::valid_proof_of_possession());\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:256:5\n    \u2502\n256 \u2502     assert_eq!(*validator.network_pubkey_bytes(), validator_builder::valid_net_pubkey());\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:257:5\n    \u2502\n257 \u2502     assert_eq!(*validator.worker_pubkey_bytes(), validator_builder::valid_worker_pubkey());\n    \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n    \u250c\u2500 ./tests/validator_tests.move:293:5\n    \u2502\n293 \u2502     destroy(validator);\n    \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator_wrapper.move:12:12\n   \u2502\n12 \u2502     inner: Versioned,\n   \u2502            ^^^^^^^^^ Unbound type 'Versioned' in current scope\n\nerror: unbound type\n   \u250c\u2500 ./sources/validator_wrapper.move:16:63\n   \u2502\n16 \u2502 public(package) fun create_v1(validator: Validator, ctx: &mut TxContext): ValidatorWrapper {\n   \u2502                                                               ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound module\n   \u250c\u2500 ./sources/validator_wrapper.move:4:1\n   \u2502  \n 4 \u2502 \u256d module sui_system::validator_wrapper;\n 5 \u2502 \u2502 \n 6 \u2502 \u2502 use sui::versioned::{Self, Versioned};\n 7 \u2502 \u2502 use sui_system::validator::Validator;\n   \u00b7 \u2502\n49 \u2502 \u2502     self.inner.version()\n50 \u2502 \u2502 }\n   \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound module\n    \u250c\u2500 ./sources/voting_power.move:4:1\n    \u2502  \n  4 \u2502 \u256d module sui_system::voting_power;\n  5 \u2502 \u2502 \n  6 \u2502 \u2502 use sui_system::validator::Validator;\n  7 \u2502 \u2502 \n    \u00b7 \u2502\n165 \u2502 \u2502     QUORUM_THRESHOLD\n166 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: unbound type\n   \u250c\u2500 ./tests/voting_power_tests.move:15:69\n   \u2502\n15 \u2502 fun check(stakes: vector<u64>, voting_power: vector<u64>, ctx: &mut TxContext) {\n   \u2502                                                                     ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/voting_power_tests.move:26:5\n   \u2502\n26 \u2502     assert_eq!(voting_powers, voting_power);\n   \u2502     ^^^^^^^^^ Unbound function 'assert_eq' in current scope\n\nerror: unbound unscoped name\n   \u250c\u2500 ./tests/voting_power_tests.move:27:5\n   \u2502\n27 \u2502     destroy(validators);\n   \u2502     ^^^^^^^ Unbound function 'destroy' in current scope\n\nerror: unbound type\n    \u250c\u2500 ./tests/voting_power_tests.move:117:66\n    \u2502\n117 \u2502 fun create_validators_with_stakes(stakes: vector<u64>, ctx: &mut TxContext): vector<Validator> {\n    \u2502                                                                  ^^^^^^^^^ Unbound type 'TxContext' in current scope\n\nerror: unbound module\n    \u250c\u2500 ./tests/voting_power_tests.move:5:1\n    \u2502  \n  5 \u2502 \u256d module sui_system::voting_power_tests;\n  6 \u2502 \u2502 \n  7 \u2502 \u2502 use std::unit_test::{assert_eq, destroy};\n  8 \u2502 \u2502 use sui_system::validator::{Self, Validator};\n    \u00b7 \u2502\n123 \u2502 \u2502     })\n124 \u2502 \u2502 }\n    \u2502 \u2570\u2500^ Unbound module 'std::unit_test'\n\nerror: invalid method call\n    \u250c\u2500 ./tests/rewards_distribution_tests.move:630:9\n    \u2502  \n615 \u2502       let num_validators = 20;\n    \u2502           -------------- Unable to infer type for method call. Try annotating this type\n    \u00b7  \n630 \u2502 \u256d         num_validators.do!(|i| {\n631 \u2502 \u2502             let addr = address::from_u256(i as u256);\n632 \u2502 \u2502             assert_eq!(system.validator_stake_amount(addr), (962 + i * 4) * MIST_PER_SUI);\n633 \u2502 \u2502         });\n    \u2502 \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500^ Invalid method call\n\nerror: invalid method call\n     \u250c\u2500 ./sources/validator_set.move:1079:14\n     \u2502\n1070 \u2502         let (validator_address, reporters) = validator_report_records.pop();\n     \u2502                                 --------- Unable to infer type for method call. Try annotating this type\n     \u00b7\n1079 \u2502             &reporters.into_keys(),\n     \u2502              ^^^^^^^^^^^^^^^^^^^^^ Invalid method call\n\nerror: cannot infer type\n     \u250c\u2500 ./sources/validator_set.move:1070:33\n     \u2502\n1070 \u2502         let (validator_address, reporters) = validator_report_records.pop();\n     \u2502                                 ^^^^^^^^^ Could not infer this type. Try adding an annotation\n\nerror: cannot infer type\n     \u250c\u2500 ./sources/validator_set.move:1247:13\n     \u2502\n1247 \u2502             vector[]\n     \u2502             ^^^^^^^^ Could not infer this type. Try adding an annotation\n\nerror: invalid object declaration\n   \u250c\u2500 ./sources/staking_pool.move:90:5\n   \u2502\n89 \u2502 public struct FungibleStakedSui has key, store {\n   \u2502                                     --- The 'key' ability is used to declare objects in Sui\n90 \u2502     id: UID,\n   \u2502     ^^  --- But found type: '_'\n   \u2502     \u2502    \n   \u2502     Invalid object 'FungibleStakedSui'. Structs with the 'key' ability must have 'id: sui::object::UID' as their first field\n\nerror: invalid object declaration\n   \u250c\u2500 ./sources/staking_pool.move:99:5\n   \u2502\n98 \u2502 public struct FungibleStakedSuiData has key, store {\n   \u2502                                         --- The 'key' ability is used to declare objects in Sui\n99 \u2502     id: UID,\n   \u2502     ^^  --- But found type: '_'\n   \u2502     \u2502    \n   \u2502     Invalid object 'FungibleStakedSuiData'. Structs with the 'key' ability must have 'id: sui::object::UID' as their first field\n\nerror: invalid object declaration\n   \u250c\u2500 ./sources/staking_pool.move:76:5\n   \u2502\n75 \u2502 public struct StakedSui has key, store {\n   \u2502                             --- The 'key' ability is used to declare objects in Sui\n76 \u2502     id: UID,\n   \u2502     ^^  --- But found type: '_'\n   \u2502     \u2502    \n   \u2502     Invalid object 'StakedSui'. Structs with the 'key' ability must have 'id: sui::object::UID' as their first field\n\nerror: invalid object declaration\n   \u250c\u2500 ./sources/staking_pool.move:39:5\n   \u2502\n38 \u2502 public struct StakingPool has key, store {\n   \u2502                               --- The 'key' ability is used to declare objects in Sui\n39 \u2502     id: UID,\n   \u2502     ^^  --- But found type: '_'\n   \u2502     \u2502    \n   \u2502     Invalid object 'StakingPool'. Structs with the 'key' ability must have 'id: sui::object::UID' as their first field\n\nerror: invalid object declaration\n   \u250c\u2500 ./sources/sui_system.move:67:5\n   \u2502\n66 \u2502 public struct SuiSystemState has key {\n   \u2502                                  --- The 'key' ability is used to declare objects in Sui\n67 \u2502     id: UID,\n   \u2502     ^^  --- But found type: '_'\n   \u2502     \u2502    \n   \u2502     Invalid object 'SuiSystemState'. Structs with the 'key' ability must have 'id: sui::object::UID' as their first field\n\nerror: invalid object declaration\n   \u250c\u2500 ./sources/validator_cap.move:18:5\n   \u2502\n17 \u2502 public struct UnverifiedValidatorOperationCap has key, store {\n   \u2502                                                   --- The 'key' ability is used to declare objects in Sui\n18 \u2502     id: UID,\n   \u2502     ^^  --- But found type: '_'\n   \u2502     \u2502    \n   \u2502     Invalid object 'UnverifiedValidatorOperationCap'. Structs with the 'key' ability must have 'id: sui::object::UID' as their first field\n\n\n","type":"ProduceError"} -->
 ```
@@ -10396,44 +14115,510 @@ error: invalid object declaration
 
 ## Assistant
 
-The project can't be compiled as a standalone package (missing Sui framework dependencies), but that's fine — I have everything I need from the source directly. The function is trivially simple and the source is fully visible.
+The call graph query fails because the package doesn't compile standalone (it needs the sui-framework deps that the prover injects). That's fine — I have what I need. Let me read the target function source directly from the file.
 
-### Code `toolu_014AYkZp7vrb32uF7nm4Q3Yj`
+### Code `toolu_01XbapeByQfRiChrEypj6uBq`
 
 ```python
+matches = grep("fun pending_stake_withdraw_amount", include="*.move", path="crates/sui-framework/packages/sui-system/sources")
+foxy_inspect(matches)
+```
 
-spec_plan = {
-    "function": "staking_pool_specs::pending_stake_withdraw_amount_spec",
-    "complexity": "low",
-    "summary": "Pure accessor that returns the accumulated SUI withdrawal amount pending for the current epoch from the staking pool. The value includes both principal and rewards from all stake withdrawal requests made during this epoch, and is reset to zero at each epoch boundary.",
-    "role": "Read-only getter exposing StakingPool.pending_total_sui_withdraw; used by validator and off-chain tooling to observe how much SUI is queued to leave the pool this epoch before process_pending_stakes_and_withdraws resets it.",
-    "aborts": [],
-    "requires": [],
-    "ensures": [
-        {
-            "condition": "result == staking_pool.pending_total_sui_withdraw",
-            "reason": "Function body is a single field projection with no transformation."
-        }
-    ],
-    "observations": [
-        "pending_total_sui_withdraw accumulates intra-epoch via request_withdraw_stake and redeem_fungible_staked_sui; it is zeroed by process_pending_stake_withdraw at epoch boundaries.",
-        "The returned value reflects the total SUI (principal + rewards) that will be deducted from sui_balance at epoch boundary, not just principal.",
-        "For inactive or pre-active pools, withdrawals are processed immediately, so this field may read zero even after a withdrawal in the same transaction."
-    ]
+> 148659 in, 173 out, 106608 cache read, 459 cache create
+
+### Result `toolu_01XbapeByQfRiChrEypj6uBq`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_4gv7ij3x.txt","to_foxy_logs":"staking_pool.move:621:public fun pending_stake_withdraw_amount(staking_pool: &StakingPool): u64 {\nvalidator.move:574:public fun pending_stake_withdraw_amount(self: &Validator): u64 {"} -->
+```
+staking_pool.move:621:public fun pending_stake_withdraw_amount(staking_pool: &StakingPool): u64 {
+validator.move:574:public fun pending_stake_withdraw_amount(self: &Validator): u64 {
+```
+
+---
+
+## Assistant
+
+### Code `toolu_01EQw8x8cBV7pptoCedKy4HZ`
+
+```python
+src = read("crates/sui-framework/packages/sui-system/sources/staking_pool.move", 618, 624)
+foxy_inspect(src)
+```
+
+> 180 in, 96 out, 107067 cache read, 148832 cache create
+
+### Result `toolu_01EQw8x8cBV7pptoCedKy4HZ`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout__5jx6t3o.txt","to_foxy_logs":"}\n\n/// Returns the total withdrawal from the staking pool this epoch.\npublic fun pending_stake_withdraw_amount(staking_pool: &StakingPool): u64 {\n    staking_pool.pending_total_sui_withdraw\n}\n\n"} -->
+```
 }
 
-final_result(spec_plan)
+/// Returns the total withdrawal from the staking pool this epoch.
+public fun pending_stake_withdraw_amount(staking_pool: &StakingPool): u64 {
+    staking_pool.pending_total_sui_withdraw
+}
+
 
 ```
 
-> 110142 in, 456 out, 15801 cache read, 12735 cache create
+---
 
-### Result `toolu_014AYkZp7vrb32uF7nm4Q3Yj`
+## Assistant
 
-<!-- {"executed":true,"return_value":{"function":"staking_pool_specs::pending_stake_withdraw_amount_spec","complexity":"low","summary":"Pure accessor that returns the accumulated SUI withdrawal amount pending for the current epoch from the staking pool. The value includes both principal and rewards from all stake withdrawal requests made during this epoch, and is reset to zero at each epoch boundary.","role":"Read-only getter exposing StakingPool.pending_total_sui_withdraw; used by validator and off-chain tooling to observe how much SUI is queued to leave the pool this epoch before process_pending_stakes_and_withdraws resets it.","aborts":[],"requires":[],"ensures":[{"condition":"result == staking_pool.pending_total_sui_withdraw","reason":"Function body is a single field projection with no transformation."}],"observations":["pending_total_sui_withdraw accumulates intra-epoch via request_withdraw_stake and redeem_fungible_staked_sui; it is zeroed by process_pending_stake_withdraw at epoch boundaries.","The returned value reflects the total SUI (principal + rewards) that will be deducted from sui_balance at epoch boundary, not just principal.","For inactive or pre-active pools, withdrawals are processed immediately, so this field may read zero even after a withdrawal in the same transaction."]}} -->
+This is a trivial getter — returns a single struct field `pending_total_sui_withdraw` (a `u64`). No arithmetic, no division, no table access, no casts. It cannot abort.
+
+This means: I can safely remove `ignore_abort` with **zero asserts** (the function genuinely never aborts), and the abort-coverage proof (`_SpecNoAbortCheck`) will pass. Per Rule 1, I must verify this with the abort-check phase enabled (i.e., NOT skip it). Since this is a getter, I can also add a meaningful `ensures` for the return value if there's an accessor for the field.
+
+Let me check the struct and find the spec file location.
+
+### Code `toolu_01LxtT36F2326ScdZ8pGtHrb`
+
+```python
+spec_file = spec.path("source") if hasattr(spec, "path") else None
+fn_spec = fk.item("staking_pool_specs::pending_stake_withdraw_amount_spec")
+foxy_inspect(f"spec file: {fn_spec.file}")
+foxy_inspect(f"spec line_range: {fn_spec.line_range}")
+
+specs_pkg = [p for p in packages if p.endswith("/specs")][0]
+foxy_inspect(f"specs_pkg: {specs_pkg}")
 ```
-✓ ok
+
+> 189 in, 441 out, 255899 cache read, 276 cache create
+
+### Result `toolu_01LxtT36F2326ScdZ8pGtHrb`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_01sefdp0.txt","to_foxy_logs":"spec file: crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move\nspec line_range: [84, 88]\nspecs_pkg: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs"} -->
 ```
+spec file: crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move
+spec line_range: [84, 88]
+specs_pkg: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs
+```
+
+---
+
+## Assistant
+
+### Code `toolu_01AjCo6Y9pFBSSb1XsgsirKR`
+
+```python
+spec_file = "crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move"
+content = read(spec_file)
+foxy_inspect(content[:3000])
+```
+
+> 201 in, 112 out, 256175 cache read, 630 cache create
+
+### Result `toolu_01AjCo6Y9pFBSSb1XsgsirKR`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_zsltzphi.txt","to_foxy_logs":"module specs::staking_pool_specs;\n\nuse sui::tx_context::TxContext;\n\nuse sui_system::staking_pool::PoolTokenExchangeRate;\n\nuse sui_system::staking_pool::StakingPool;\n\nuse sui_system::staking_pool::StakedSui;\n\nuse sui_system::staking_pool;\nuse sui_system::staking_pool::FungibleStakedSui;\nuse sui::object::ID;\n\n#[spec_only]\nuse prover::prover::{asserts, ensures};\n#[spec_only]\nuse prover::ghost;\n#[spec_only]\nuse specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};\n\nconst MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;\n\n// @VERIFY(\ud83d\udee1\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id, no_opaque)]\nfun fungible_staked_sui_pool_id_spec(\n    fungible_staked_sui: &FungibleStakedSui,\n): ID {\n    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)\n}\n\n// @VERIFY(\ud83d\udee1\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::fungible_staked_sui_value, no_opaque)]\nfun fungible_staked_sui_value_spec(\n    fungible_staked_sui: &FungibleStakedSui,\n): u64 {\n    staking_pool::fungible_staked_sui_value(fungible_staked_sui)\n}\n\n// @VERIFY(\u2699\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::is_equal_staking_metadata)]\nfun is_equal_staking_metadata_spec(\n    self: &StakedSui,\n    other: &StakedSui,\n): bool {\n    let result = staking_pool::is_equal_staking_metadata(self, other);\n    ensures(result == (\n        (staking_pool::pool_id(self) == staking_pool::pool_id(other)) &&\n        (staking_pool::stake_activation_epoch(self) == staking_pool::stake_activation_epoch(other))\n    ));\n    result\n}\n\n// @VERIFY(\ud83d\udee1\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::join_staked_sui)]\nfun join_staked_sui_spec(\n    self: &mut StakedSui,\n    other: StakedSui,\n) {\n    asserts(staking_pool::is_equal_staking_metadata(self, &other));\n    asserts(\n        staking_pool::staked_sui_amount(self)\n            .to_int()\n            .add(staking_pool::staked_sui_amount(&other).to_int())\n            .lte(std::u64::max_value!().to_int()),\n    );\n    staking_pool::join_staked_sui(self, other)\n}\n\n// @VERIFY(\ud83d\udee1\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::is_inactive)]\nfun is_inactive_spec(\n    pool: &StakingPool,\n): bool {\n    staking_pool::is_inactive(pool)\n}\n\n// @VERIFY(\u2699\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::is_preactive)]\nfun is_preactive_spec(\n    pool: &StakingPool,\n): bool {\n    let result = staking_pool::is_preactive(pool);\n    ensures(result == staking_pool::activation_epoch(pool).is_none());\n    result\n}\n\n// @VERIFY(\ud83d\udee1\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::join_fungible_staked_sui)]\nfun join_fungible_staked_sui_spec(\n    self: &mut FungibleStakedSui,\n    other: FungibleStakedSui,\n) {\n    asserts(staking_pool::fungible_staked_sui_pool_id(self) == staking_pool::fungible_staked_sui_pool_id(&other));\n    asserts(\n        staking_pool::fungible_staked_sui_value(self).to_int()\n            .add(staking_pool::fungible_staked_sui_value(&other).to_int())\n            .lte(std::u64::max_value!().to_int()),\n    );\n    staking_pool::join_fungible_staked_sui(self, other)\n}\n\n\n\n// @VERIFY(\ud83d\udee1\ufe0f/\u2705)\n#[spec(prove, target=sta"} -->
+```
+module specs::staking_pool_specs;
+
+use sui::tx_context::TxContext;
+
+use sui_system::staking_pool::PoolTokenExchangeRate;
+
+use sui_system::staking_pool::StakingPool;
+
+use sui_system::staking_pool::StakedSui;
+
+use sui_system::staking_pool;
+use sui_system::staking_pool::FungibleStakedSui;
+use sui::object::ID;
+
+#[spec_only]
+use prover::prover::{asserts, ensures};
+#[spec_only]
+use prover::ghost;
+#[spec_only]
+use specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};
+
+const MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id, no_opaque)]
+fun fungible_staked_sui_pool_id_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): ID {
+    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_value, no_opaque)]
+fun fungible_staked_sui_value_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): u64 {
+    staking_pool::fungible_staked_sui_value(fungible_staked_sui)
+}
+
+// @VERIFY(⚙️/✅)
+#[spec(prove, target=staking_pool::is_equal_staking_metadata)]
+fun is_equal_staking_metadata_spec(
+    self: &StakedSui,
+    other: &StakedSui,
+): bool {
+    let result = staking_pool::is_equal_staking_metadata(self, other);
+    ensures(result == (
+        (staking_pool::pool_id(self) == staking_pool::pool_id(other)) &&
+        (staking_pool::stake_activation_epoch(self) == staking_pool::stake_activation_epoch(other))
+    ));
+    result
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::join_staked_sui)]
+fun join_staked_sui_spec(
+    self: &mut StakedSui,
+    other: StakedSui,
+) {
+    asserts(staking_pool::is_equal_staking_metadata(self, &other));
+    asserts(
+        staking_pool::staked_sui_amount(self)
+            .to_int()
+            .add(staking_pool::staked_sui_amount(&other).to_int())
+            .lte(std::u64::max_value!().to_int()),
+    );
+    staking_pool::join_staked_sui(self, other)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::is_inactive)]
+fun is_inactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_inactive(pool)
+}
+
+// @VERIFY(⚙️/✅)
+#[spec(prove, target=staking_pool::is_preactive)]
+fun is_preactive_spec(
+    pool: &StakingPool,
+): bool {
+    let result = staking_pool::is_preactive(pool);
+    ensures(result == staking_pool::activation_epoch(pool).is_none());
+    result
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::join_fungible_staked_sui)]
+fun join_fungible_staked_sui_spec(
+    self: &mut FungibleStakedSui,
+    other: FungibleStakedSui,
+) {
+    asserts(staking_pool::fungible_staked_sui_pool_id(self) == staking_pool::fungible_staked_sui_pool_id(&other));
+    asserts(
+        staking_pool::fungible_staked_sui_value(self).to_int()
+            .add(staking_pool::fungible_staked_sui_value(&other).to_int())
+            .lte(std::u64::max_value!().to_int()),
+    );
+    staking_pool::join_fungible_staked_sui(self, other)
+}
+
+
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=sta
+```
+
+---
+
+## Assistant
+
+Now let me see the current spec block exactly (lines 80-90) and check if there's a getter for `pending_total_sui_withdraw`.
+
+### Code `toolu_01NQwwMFfKuYXvt5iYEyUmyc`
+
+```python
+foxy_inspect(read(spec_file, 80, 90))
+foxy_inspect("=== getters in source for pending_total_sui_withdraw ===")
+foxy_inspect(grep("pending_total_sui_withdraw", include="*.move", path="crates/sui-framework/packages/sui-system/sources"))
+```
+
+> 1689 in, 199 out, 256805 cache read, 313 cache create
+
+### Result `toolu_01NQwwMFfKuYXvt5iYEyUmyc`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_0aaipmn4.txt","to_foxy_logs":"fun is_preactive_spec(\n    pool: &StakingPool,\n): bool {\n    let result = staking_pool::is_preactive(pool);\n    ensures(result == staking_pool::activation_epoch(pool).is_none());\n    result\n}\n\n// @VERIFY(\ud83d\udee1\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::join_fungible_staked_sui)]\nfun join_fungible_staked_sui_spec(\n\n=== getters in source for pending_total_sui_withdraw ===\nstaking_pool.move:61:    pending_total_sui_withdraw: u64,\nstaking_pool.move:126:        pending_total_sui_withdraw: 0,\nstaking_pool.move:183:    pool.pending_total_sui_withdraw = pool.pending_total_sui_withdraw + total_sui_withdraw_amount;\nstaking_pool.move:223:    pool.pending_total_sui_withdraw = pool.pending_total_sui_withdraw + sui_out.value();\nstaking_pool.move:375:    pool.sui_balance = if (pool.sui_balance >= pool.pending_total_sui_withdraw) {\nstaking_pool.move:376:        pool.sui_balance - pool.pending_total_sui_withdraw\nstaking_pool.move:378:        let diff = pool.pending_total_sui_withdraw - pool.sui_balance;\nstaking_pool.move:393:    pool.pending_total_sui_withdraw = 0;\nstaking_pool.move:622:    staking_pool.pending_total_sui_withdraw\nstaking_pool.move:763:public(package) fun increase_pending_total_sui_withdraw_for_testing(\nstaking_pool.move:767:    pool.pending_total_sui_withdraw = pool.pending_total_sui_withdraw + delta"} -->
+```
+fun is_preactive_spec(
+    pool: &StakingPool,
+): bool {
+    let result = staking_pool::is_preactive(pool);
+    ensures(result == staking_pool::activation_epoch(pool).is_none());
+    result
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::join_fungible_staked_sui)]
+fun join_fungible_staked_sui_spec(
+
+=== getters in source for pending_total_sui_withdraw ===
+staking_pool.move:61:    pending_total_sui_withdraw: u64,
+staking_pool.move:126:        pending_total_sui_withdraw: 0,
+staking_pool.move:183:    pool.pending_total_sui_withdraw = pool.pending_total_sui_withdraw + total_sui_withdraw_amount;
+staking_pool.move:223:    pool.pending_total_sui_withdraw = pool.pending_total_sui_withdraw + sui_out.value();
+staking_pool.move:375:    pool.sui_balance = if (pool.sui_balance >= pool.pending_total_sui_withdraw) {
+staking_pool.move:376:        pool.sui_balance - pool.pending_total_sui_withdraw
+staking_pool.move:378:        let diff = pool.pending_total_sui_withdraw - pool.sui_balance;
+staking_pool.move:393:    pool.pending_total_sui_withdraw = 0;
+staking_pool.move:622:    staking_pool.pending_total_sui_withdraw
+staking_pool.move:763:public(package) fun increase_pending_total_sui_withdraw_for_testing(
+staking_pool.move:767:    pool.pending_total_sui_withdraw = pool.pending_total_sui_withdraw + delta
+```
+
+---
+
+## Assistant
+
+The only public accessor for the field is `pending_stake_withdraw_amount` itself (the target). There's no separate getter to write a meaningful `ensures` against (it would be tautological: `result == pending_stake_withdraw_amount(pool)`). The grep matches the spec area too — let me find the current spec block precisely.
+
+### Code `toolu_01SYnjFHrgrpHp1qchYjkUrJ`
+
+```python
+foxy_inspect(grep("pending_stake_withdraw_amount", include="*.move", path="crates/sui-framework/packages/sui-system/specs"))
+```
+
+> 736 in, 206 out, 257118 cache read, 1888 cache create
+
+### Result `toolu_01SYnjFHrgrpHp1qchYjkUrJ`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_0dn2z23q.txt","to_foxy_logs":"sources/staking_pool_specs.move:113:#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, ignore_abort)]\nsources/staking_pool_specs.move:114:fun pending_stake_withdraw_amount_spec(\nsources/staking_pool_specs.move:117:    staking_pool::pending_stake_withdraw_amount(staking_pool)"} -->
+```
+sources/staking_pool_specs.move:113:#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, ignore_abort)]
+sources/staking_pool_specs.move:114:fun pending_stake_withdraw_amount_spec(
+sources/staking_pool_specs.move:117:    staking_pool::pending_stake_withdraw_amount(staking_pool)
+```
+
+---
+
+## Assistant
+
+### Code `toolu_01RcLT4F9aCRbjK5QWxnBZBS`
+
+```python
+foxy_inspect(read(spec_file, 110, 120))
+```
+
+> 232 in, 68 out, 259006 cache read, 942 cache create
+
+### Result `toolu_01RcLT4F9aCRbjK5QWxnBZBS`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_r48sftaq.txt","to_foxy_logs":"    staking_pool::pending_stake_amount(staking_pool)\n}\n\n#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, ignore_abort)]\nfun pending_stake_withdraw_amount_spec(\n    staking_pool: &StakingPool,\n): u64 {\n    staking_pool::pending_stake_withdraw_amount(staking_pool)\n}\n\n#[spec(prove, target=staking_pool::pool_id, ignore_abort, no_opaque)]\n"} -->
+```
+    staking_pool::pending_stake_amount(staking_pool)
+}
+
+#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, ignore_abort)]
+fun pending_stake_withdraw_amount_spec(
+    staking_pool: &StakingPool,
+): u64 {
+    staking_pool::pending_stake_withdraw_amount(staking_pool)
+}
+
+#[spec(prove, target=staking_pool::pool_id, ignore_abort, no_opaque)]
+
+```
+
+---
+
+## Assistant
+
+The function is a pure single-field getter that cannot abort, so removing `ignore_abort` requires zero asserts. I'll also note the pattern used by the sibling getters (`fungible_staked_sui_value_spec` etc.) uses `no_opaque`. Let me add `no_opaque` to match the convention for getters and add a `@VERIFY` annotation. I'll remove `ignore_abort`.
+
+### Code `toolu_01HNEyixdBUCRe8ZsNAdTdN5`
+
+```python
+old = """#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, ignore_abort)]
+fun pending_stake_withdraw_amount_spec(
+    staking_pool: &StakingPool,
+): u64 {
+    staking_pool::pending_stake_withdraw_amount(staking_pool)
+}"""
+
+new = """// @VERIFY(\U0001f6e1/\u2705)
+#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, no_opaque)]
+fun pending_stake_withdraw_amount_spec(
+    staking_pool: &StakingPool,
+): u64 {
+    staking_pool::pending_stake_withdraw_amount(staking_pool)
+}"""
+
+edit(spec_file, old, new)
+foxy_inspect(read(spec_file, 112, 121))
+```
+
+> 279 in, 467 out, 259948 cache read, 300 cache create
+
+### Result `toolu_01HNEyixdBUCRe8ZsNAdTdN5`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_qylcvatm.txt","to_foxy_logs":"\n// @VERIFY(\ud83d\udee1/\u2705)\n#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, no_opaque)]\nfun pending_stake_withdraw_amount_spec(\n    staking_pool: &StakingPool,\n): u64 {\n    staking_pool::pending_stake_withdraw_amount(staking_pool)\n}\n\n#[spec(prove, target=staking_pool::pool_id, ignore_abort, no_opaque)]\n"} -->
+```
+
+// @VERIFY(🛡/✅)
+#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, no_opaque)]
+fun pending_stake_withdraw_amount_spec(
+    staking_pool: &StakingPool,
+): u64 {
+    staking_pool::pending_stake_withdraw_amount(staking_pool)
+}
+
+#[spec(prove, target=staking_pool::pool_id, ignore_abort, no_opaque)]
+
+```
+
+---
+
+## Assistant
+
+Now I'll verify with the prover. Critically — per Rule 1 and the iteration-flag warning — I must run with the abort-check phase **enabled** (NOT `--skip-spec-no-abort`), since removing `ignore_abort` commits to proving abort-freedom. I'll use `--cloud`.
+
+### Code `toolu_01YXA5BENjkypXBZjLTuLqy7`
+
+```python
+from pathlib import Path
+cfg_dir = Path.home() / ".asymptotic"
+cfg_dir.mkdir(parents=True, exist_ok=True)
+cfg_path = cfg_dir / "sui_prover.toml"
+if not cfg_path.exists():
+    cfg_path.write_text(
+        'url = "https://hdhs3sbtlk22w5ceivvbuege4i0devap.lambda-url.us-west-2.on.aws/"\n'
+        'key = "test_password"\n'
+        'concurrency = 20\n'
+    )
+
+result = await run_sui_prover(
+    specs_pkg if (specs_pkg := specs_pkg) else specs_pkg,
+    args=["--timeout", "120", "--force-timeout", "--cloud",
+          "--functions", "pending_stake_withdraw_amount_spec"],
+    timeout=300,
+    label="prove-pending_stake_withdraw_amount",
+)
+foxy_inspect(result.get("response", "")[-3000:])
+```
+
+> 268 in, 489 out, 260248 cache read, 746 cache create
+
+### Result `toolu_01YXA5BENjkypXBZjLTuLqy7`
+
+<!-- {"error":"'NoneType' object has no attribute 'get'","type":"AttributeError"} -->
+```
+⚠ AttributeError: 'NoneType' object has no attribute 'get'
+```
+
+---
+
+## Assistant
+
+### Code `toolu_01LirnurQ6pttY4eJYZTmH6M`
+
+```python
+foxy_inspect(str(result)[:2000])
+```
+
+> 43 in, 64 out, 260994 cache read, 757 cache create
+
+### Result `toolu_01LirnurQ6pttY4eJYZTmH6M`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_qgcn943z.txt","to_foxy_logs":"None"} -->
+```
+None
+```
+
+---
+
+## Assistant
+
+The fork returned None (likely a fire-and-forget or notification-pending). Let me check the task registry.
+
+### Code `toolu_01UiQEW19AVXRDjyHHjXug5d`
+
+```python
+for t in list_tasks():
+    foxy_inspect(f"#{t['id']} {t['name']} [{t['status']}] {t.get('elapsed', 0)}s")
+    if t.get("response"):
+        foxy_inspect(t['response'][-1500:])
+```
+
+> 96 in, 169 out, 261751 cache read, 107 cache create
+
+### Result `toolu_01UiQEW19AVXRDjyHHjXug5d`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_kjcpsw5m.txt","to_foxy_logs":"#1 prove-from-scratch/improve/attempt-1 (1 items) [running] 1480s\n#46 prove-join-fungible [error] 532s\n#47 prove-join-fungible [done] 532s\n#48 sui-prover: specs [error] 529s\n#49 prove-join-fungible-2 [error] 465s\n#50 sui-prover: specs [error] 462s\n#51 sui-prover: specs [error] 460s\n#52 sui-prover: specs [error] 439s\n#53 sui-prover: specs [done] 430s\n#54 sui-prover: specs [done] 421s\n#55 sui-prover: specs [done] 418s\n#56 prove-join_staked_sui [error] 277s\n#57 prove-join_staked_sui [done] 277s\nAll three phases pass.\n#58 sui-prover: specs [error] 273s\n#59 sui-prover: specs [done] 262s\n#60 sui-prover: specs [done] 259s\n#61 prove-pending_stake_amount [error] 155s\n#62 prove-pending_stake_amount [done] 155s\n#63 sui-prover: specs [done] 152s\n#64 prove-pending_stake_withdraw_amount [error] 7s\n#65 prove-pending_stake_withdraw_amount [running] 7s\n#66 sui-prover: specs [running] 2s"} -->
+```
+#1 prove-from-scratch/improve/attempt-1 (1 items) [running] 1480s
+#46 prove-join-fungible [error] 532s
+#47 prove-join-fungible [done] 532s
+#48 sui-prover: specs [error] 529s
+#49 prove-join-fungible-2 [error] 465s
+#50 sui-prover: specs [error] 462s
+#51 sui-prover: specs [error] 460s
+#52 sui-prover: specs [error] 439s
+#53 sui-prover: specs [done] 430s
+#54 sui-prover: specs [done] 421s
+#55 sui-prover: specs [done] 418s
+#56 prove-join_staked_sui [error] 277s
+#57 prove-join_staked_sui [done] 277s
+All three phases pass.
+#58 sui-prover: specs [error] 273s
+#59 sui-prover: specs [done] 262s
+#60 sui-prover: specs [done] 259s
+#61 prove-pending_stake_amount [error] 155s
+#62 prove-pending_stake_amount [done] 155s
+#63 sui-prover: specs [done] 152s
+#64 prove-pending_stake_withdraw_amount [error] 7s
+#65 prove-pending_stake_withdraw_amount [running] 7s
+#66 sui-prover: specs [running] 2s
+```
+
+---
+
+## Assistant
+
+The prover fork (#65) is still running. There appear to be other concurrent prover runs in this session. Let me wait for #65 to complete and read its result.
+
+### Code `toolu_01LtqvtRsvSk56QbgnoMzd4g`
+
+```python
+import time
+for _ in range(40):
+    r = get_task_result(65)
+    if r and r.get("status") != "running":
+        break
+    time.sleep(5)
+foxy_inspect(str(r)[:2500] if r else "None")
+```
+
+> 568 in, 171 out, 261858 cache read, 265 cache create
+
+### Result `toolu_01LtqvtRsvSk56QbgnoMzd4g`
+
+<!-- {"executed":true,"stdout":"/var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_o5xeuuh9.txt","to_foxy_logs":"{'status': 'success', 'result': {'report': 'PASS pending_stake_withdraw_amount_spec (_Check, _Assume, _SpecNoAbortCheck all passed)\\n\\nTotal: 1 passed / 0 failed / 0 timeout', 'exit_code': 0, 'status': 'success'}, 'response': None, 'stop_reason': 'tool_use', 'turns': 2, 'tokens_used': 936, 'usage': {'input_tokens': 588, 'output_tokens': 348, 'cache_read_input_tokens': 390495, 'cache_creation_input_tokens': 116388}, 'total_usage': {'input_tokens': 588, 'output_tokens': 348, 'cache_read_input_tokens': 390495, 'cache_creation_input_tokens': 116388}, 'time_elapsed': 11.015012979507446, 'error': None, 'cost_usd': 0.5605875, 'harness': 'foxy', 'session_dir': '/Users/cos/asymptotic/agent/clients/mysten/sui/.foxy/sessions/d1_default_agent_prove-pending_stake_withdraw_amount_20260615_234328_5061'}"} -->
+```
+{'status': 'success', 'result': {'report': 'PASS pending_stake_withdraw_amount_spec (_Check, _Assume, _SpecNoAbortCheck all passed)\n\nTotal: 1 passed / 0 failed / 0 timeout', 'exit_code': 0, 'status': 'success'}, 'response': None, 'stop_reason': 'tool_use', 'turns': 2, 'tokens_used': 936, 'usage': {'input_tokens': 588, 'output_tokens': 348, 'cache_read_input_tokens': 390495, 'cache_creation_input_tokens': 116388}, 'total_usage': {'input_tokens': 588, 'output_tokens': 348, 'cache_read_input_tokens': 390495, 'cache_creation_input_tokens': 116388}, 'time_elapsed': 11.015012979507446, 'error': None, 'cost_usd': 0.5605875, 'harness': 'foxy', 'session_dir': '/Users/cos/asymptotic/agent/clients/mysten/sui/.foxy/sessions/d1_default_agent_prove-pending_stake_withdraw_amount_20260615_234328_5061'}
+```
+
+---
+
+## Assistant
+
+All three phases pass — including `_SpecNoAbortCheck`, which is the one that actually confirms abort-freedom after removing `ignore_abort`.
+
+```
+PASS pending_stake_withdraw_amount_spec (_Check, _Assume, _SpecNoAbortCheck all passed)
+Total: 1 passed / 0 failed / 0 timeout
+```
+
+**Done.** The spec `staking_pool_specs::pending_stake_withdraw_amount_spec` is upgraded from stub to abort-proven:
+
+- **Removed `ignore_abort`** and added `no_opaque` (matching the convention for the other getter specs in this file).
+- **Zero asserts needed** — the target is a pure single-field getter (`staking_pool.pending_total_sui_withdraw`, a `u64`) with no arithmetic, division, casts, or table access, so it provably never aborts. Verified with the abort-check phase enabled (no `--skip-spec-no-abort`), so the "pass" genuinely confirms abort-freedom rather than skipping the obligation.
+- Added `// @VERIFY(🛡️/✅)` (ASSERTS stage, Done) reflecting full abort coverage.
+
+Final state: `asserts` (abort conditions fully modeled / abort-free, passing all three prover phases). No `ensures` was added since the only accessor is the target function itself, which would make any postcondition tautological.
+
+Want me to add a postcondition by exposing the field via a `#[test_only, ext(pure)]` getter in `staking_pool.move`, or move on to the next stub spec in this module?
+
+> 506 in, 531 out, 262123 cache read, 739 cache create
 
 ---
 
@@ -10442,20 +14627,24 @@ final_result(spec_plan)
 | | |
 |---|---|
 | status | success |
-| stop_reason | tool_use |
-| model | claude-sonnet-4-6 |
-| prompt | abd128c6867c1fc43db900d87efbb174b8911dae751ed2c553158ca2b1d7c76e |
-| turns | 2 |
-| tool_calls | 2 |
-| time | 18.26s |
-| ended_at | 2026-06-15T23:42:04.890995 |
-| cost | $0.4343 |
-| tokens | 122746 in / 587 out |
-| cache | 31602 read / 12735 create |
+| stop_reason | end_turn |
+| model | claude-opus-4-8 |
+| prompt | 4f933335c0c6549cf241e48c116f3c11d3b9b1a274830eb71cf8370b71f8120f |
+| turns | 16 |
+| tool_calls | 15 |
+| time | 100.88s |
+| ended_at | 2026-06-15T23:43:52.475007 |
+| cost | $3.5390 |
+| tokens | 154272 in / 3780 out |
+| cache | 3383499 read / 157015 create |
+| sub-agent tokens | 588 in / 348 out |
+| total tokens | 154860 in / 4128 out |
+| sub-agent cache | 390495 read / 116388 create |
+| total cache | 3773994 read / 273403 create |
 
 
 ## Knowledge Output
 
-- field: spec/writeup/staking_pool_specs::pending_stake_withdraw_amount_spec
-- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/pending_stake_withdraw_amount_spec/spec.writeup.yaml
-- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/pending_stake_withdraw_amount_spec/writeup.meta.yaml
+- field: spec/improve/staking_pool_specs::pending_stake_withdraw_amount_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/pending_stake_withdraw_amount_spec/spec.improve.yaml
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/pending_stake_withdraw_amount_spec/improve.meta.yaml
