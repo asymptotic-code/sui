@@ -1,0 +1,359 @@
+[0m[1m[38;5;9merror[0m[1m: unbound module member[0m
+    [0m[34m┌─[0m ./sources/staking_pool_specs.move:142:12
+    [0m[34m│[0m
+[0m[34m142[0m [0m[34m│[0m         && [0m[31mstaking_pool::spec_exchange_rates_contains[0m(pool, activation_epoch)
+    [0m[34m│[0m            [0m[31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [0m[31mInvalid module access. Unbound function 'spec_exchange_rates_contains' in module 'sui_system::staking_pool'[0m
+
+[0m[1m[38;5;9merror[0m[1m: unbound module member[0m
+    [0m[34m┌─[0m ./sources/staking_pool_specs.move:152:12
+    [0m[34m│[0m
+[0m[34m152[0m [0m[34m│[0m         || [0m[31mstaking_pool::spec_exchange_rates_contains[0m(pool, *pool.activation_epoch().borrow()));
+    [0m[34m│[0m            [0m[31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [0m[31mInvalid module access. Unbound function 'spec_exchange_rates_contains' in module 'sui_system::staking_pool'[0m
+
+exiting with model building errors
+616:public fun spec_exchange_rates_contains(pool: &StakingPool, epoch: u64): bool {
+    initial_exchange_rate()
+}
+
+#[test_only, ext(pure)]
+public fun spec_exchange_rates_contains(pool: &StakingPool, epoch: u64): bool {
+    pool.exchange_rates.contains(epoch)
+}
+
+/// Returns the total value of the pending staking requests for this staking pool.
+public fun pending_stake_amount(staking_pool: &StakingPool): u64 {
+    staking_pool.pending_stake
+changed to spec_only
+[0m[1m[38;5;9merror[0m[1m: unbound module member[0m
+    [0m[34m┌─[0m ./sources/staking_pool_specs.move:142:12
+    [0m[34m│[0m
+[0m[34m142[0m [0m[34m│[0m         && [0m[31mstaking_pool::spec_exchange_rates_contains[0m(pool, activation_epoch)
+    [0m[34m│[0m            [0m[31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [0m[31mInvalid module access. Unbound function 'spec_exchange_rates_contains' in module 'sui_system::staking_pool'[0m
+
+[0m[1m[38;5;9merror[0m[1m: unbound module member[0m
+    [0m[34m┌─[0m ./sources/staking_pool_specs.move:152:12
+    [0m[34m│[0m
+[0m[34m152[0m [0m[34m│[0m         || [0m[31mstaking_pool::spec_exchange_rates_contains[0m(pool, *pool.activation_epoch().borrow()));
+    [0m[34m│[0m            [0m[31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [0m[31mInvalid module access. Unbound function 'spec_exchange_rates_contains' in module 'sui_system::staking_pool'[0m
+
+exiting with model building errors
+removed accessor from source
+old present: True
+spec updated
+nly, ext(pure)]
+fun spec_exchange_rates_contains(pool: &StakingPool, epoch: u64): bool {
+    pool.exchange_rates.contains(epoch)
+}
+
+#[spec_only(loop_inv(target = staking_pool::pool_token_exchange_rate_at_epoch)), ext(no_abort)]
+fun pool_token_exchange_rate_at_epoch_loop_inv(
+    pool: &StakingPool,
+    epoch: u64,
+    activation_epoch: u64,
+): bool {
+    epoch >= activation_epoch
+        && spec_exchange_rates_contains(pool, activation_epoch)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::pool_token_exchange_rate_at_epoch)]
+fun pool_token_exchange_rate_at_epoch_spec(
+    pool: &StakingPool,
+    epoch: u64
+[0m[1m[38;5;9merror[0m[1m: restricted visibility[0m
+    [0m[34m┌─[0m ./sources/staking_pool_specs.move:137:5
+    [0m[34m│[0m
+[0m[34m137[0m [0m[34m│[0m     [0m[31mpool.exchange_rates[0m.contains(epoch)
+    [0m[34m│[0m     [0m[31m^^^^^^^^^^^^^^^^^^^[0m [0m[31mInvalid access of field 'exchange_rates' on the struct 'sui_system::staking_pool::StakingPool'. The field 'exchange_rates' can only be accessed within the module 'sui_system::staking_pool' since it defines 'StakingPool'[0m
+
+exiting with model building errors
+occurrences of 'initial_exchange_rate()' near the function: 4
+found at idx: 24260
+och - 1;
+    };
+    // This line really should be unreachable. Do we want an assert false here?
+    initial_exchange_rate()
+}
+
+
+/// Returns the total value of the pending staking requests for this sta
+[package]
+name = "SuiSystemSpecs"
+edition = "2024.beta"
+
+[dependencies]
+
+[addresses]
+sui_system_specs = "0x0"
+anchor present: True
+added public accessor
+spec updated to use public accessor
+t_epoch)), ext(no_abort)]
+fun pool_token_exchange_rate_at_epoch_loop_inv(
+    pool: &StakingPool,
+    epoch: u64,
+    activation_epoch: u64,
+): bool {
+    epoch >= activation_epoch
+        && staking_pool::pool_has_exchange_rate_for_epoch(pool, activation_epoch)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::pool_token_exchange_rate_at_epoch)]
+fun pool_token_exchange_rate_at_epoch_spec(
+    pool: &StakingPool,
+    epoch: u64,
+): PoolTokenExchangeRate {
+    requires(pool.activation_epoch().is_none()
+        || staking_pool::pool_has_exchange_rate_for_epoch(pool, *pool.activation_epoch().borrow()));
+    staking_pool::pool_token_exchange_rate_at_epoch(pool, epoch)
+}
+
+#[spec(prove, target=staking_pool::split, ignore_
+[0m[1m[38;5;9merror[0m[1m: unbound module member[0m
+    [0m[34m┌─[0m ./sources/staking_pool_specs.move:142:12
+    [0m[34m│[0m
+[0m[34m142[0m [0m[34m│[0m         && [0m[31mstaking_pool::pool_has_exchange_rate_for_epoch[0m(pool, activation_epoch)
+    [0m[34m│[0m            [0m[31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [0m[31mInvalid module access. Unbound function 'pool_has_exchange_rate_for_epoch' in module 'sui_system::staking_pool'[0m
+
+[0m[1m[38;5;9merror[0m[1m: unbound module member[0m
+    [0m[34m┌─[0m ./sources/staking_pool_specs.move:152:12
+    [0m[34m│[0m
+[0m[34m152[0m [0m[34m│[0m         || [0m[31mstaking_pool::pool_has_exchange_rate_for_epoch[0m(pool, *pool.activation_epoch().borrow()));
+    [0m[34m│[0m            [0m[31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [0m[31mInvalid module access. Unbound function 'pool_has_exchange_rate_for_epoch' in module 'sui_system::staking_pool'[0m
+
+exiting with model building errors
+/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/Move.toml
+in source: 616:public fun pool_has_exchange_rate_for_epoch(pool: &StakingPool, epoch: u64): bool {
+
+toml/lock files: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/Move.toml
+/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/Move.lock
+/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/Move.toml
+/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/Move.lock
+# @generated by Move, please check-in and do not edit manually.
+
+[move]
+version = 3
+manifest_digest = "403FCB7340513FCA0BB52DF8F69857E5EE5661B33BEB94504CD7A8A74319E8F4"
+deps_digest = "397E6A9F7A624706DBDFEE056CE88391A15876868FD18A88504DA74EB458D697"
+dependencies = [
+  { id = "DeepBook", name = "DeepBook" },
+  { id = "MoveStdlib", name = "MoveStdlib" },
+  { id = "Sui", name = "Sui" },
+  { id = "SuiProver", name = "SuiProver" },
+  { id = "SuiSystem", name = "SuiSystem" },
+]
+
+[[move.package]]
+id = "DeepBook"
+source = { git = "https://github.com/asymptotic-code/sui.git", rev = "next", subdir = "crates/sui-framework/packages/deepbook" }
+
+dependencies = [
+  { id = "MoveStdlib", name = "MoveStdlib" },
+  { id = "Sui", name = "Sui" },
+]
+
+[[move.package]]
+id = "MoveStdlib"
+source = { git = "https://github.com/asymptotic-code/sui.git", rev = "next", subdir = "crates/sui-framework/packages/move-stdlib" }
+
+[[move.package]]
+id = "Prover"
+source = { git = "https://github.com/asymptotic-code/sui-prover.git", rev = "main", subdir = "packages/prover" }
+
+dependencies = [
+  { id = "MoveStdlib", name = "MoveStdlib" },
+  { id = "Sui", name = "Sui" },
+]
+
+[[move.package]]
+id = "Sui"
+source = { git = "https://github.com/asymptotic-code/sui.git", rev = "next", subdir = "crates/sui-framework/packages/sui-framework" }
+
+dependencies = [
+  { id = "MoveStdlib", name = "MoveStdlib" },
+]
+
+[[move.package]]
+id = "SuiProver"
+source = { git = "https://github.com/asymptotic-code/sui-prover.git", rev = "main", subdir = "packages/sui-prover" }
+
+dependencies = [
+  { id = "SuiSpecs", name = "SuiSpecs" },
+]
+
+[[move.package]]
+id = "SuiSpecs"
+source = { git = "https://github.com/asymptotic-code/sui-prover.git", rev = "main", subdir = "packages/sui-specs" }
+
+dependencies = [
+  { id = "Prover", name = "Prover" },
+  { id = "Sui", name = "Sui" },
+]
+
+[[move.package]]
+id = "SuiSystem"
+source = { git = "https://github.com/asymptotic-code/sui.git", rev = "next", subdir = "crates/sui-framework/packages/sui-system" }
+
+dependencies = [
+  { id = "MoveStdlib", name = "MoveStdlib" },
+  { id = "Sui", name = "Sui" },
+]
+5:use sui_system::staking_pool::PoolTokenExchangeRate;
+7:use sui_system::staking_pool::StakingPool;
+9:use sui_system::staking_pool::StakedSui;
+12:use sui_system::staking_pool::FungibleStakedSui;
+25:#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id, no_opaque)]
+29:    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)
+33:#[spec(prove, target=staking_pool::fungible_staked_sui_value, no_opaque)]
+37:    staking_pool::fungible_staked_sui_value(fungible_staked_sui)
+41:#[spec(prove, target=staking_pool::is_equal_staking_metadata)]
+46:    let result = staking_pool::is_equal_staking_metadata(self, other);
+48:        (staking_pool::pool_id(self) == staking_pool::pool_id(other)) &&
+49:        (staking_pool::stake_activation_epoch(self) == staking_pool::stake_activation_epoch(other))
+55:#[spec(prove, target=staking_pool::join_staked_sui)]
+60:    asserts(staking_pool::is_equal_staking_metadata(self, &other));
+62:        staking_pool::staked_sui_amount(self)
+64:            .add(staking_pool::staked_sui_amount(&other).to_int())
+67:    staking_pool::join_staked_sui(self, other)
+71:#[spec(prove, target=staking_pool::is_inactive)]
+75:    staking_pool::is_inactive(pool)
+79:#[spec(prove, target=staking_pool::is_preactive)]
+83:    let result = staking_pool::is_preactive(pool);
+84:    ensures(result == staking_pool::activation_epoch(pool).is_none());
+89:#[spec(prove, target=staking_pool::join_fungible_staked_sui)]
+94:    asserts(staking_pool::fungible_staked_sui_pool_id(self) == staking_pool::fungible_staked_sui_pool_id(&other));
+96:        staking_pool::fungible_staked_sui_value(self).to_int()
+97:            .add(staking_pool::fungible_staked_sui_value(&other).to_int())
+100:    staking_pool::join_fungible_staked_sui(self, other)
+106:#[spec(prove, target=staking_pool::pending_stake_amount)]
+110:    staking_pool::pending_stake_amount(staking_pool)
+114:#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, no_opaque)]
+118:    staking_pool::pending_stake_withdraw_amount(staking_pool)
+121:#[spec(prove, target=staking_pool::pool_id, no_opaque)]
+125:    staking_pool::pool_id(staked_sui)
+128:#[spec(prove, target=staking_pool::pool_token_amount, no_opaque)]
+132:    staking_pool::pool_token_amount(exchange_rate)
+135:#[spec_only(loop_inv(target = staking_pool::pool_token_exchange_rate_at_epoch)), ext(no_abort)]
+142:        && staking_pool::pool_has_exchange_rate_for_epoch(pool, activation_epoch)
+146:#[spec(prove, target=staking_pool::pool_token_exchange_rate_at_epoch)]
+152:        || staking_pool::pool_has_exchange_rate_for_epoch(pool, *pool.activation_epoch().borrow()));
+153:    staking_pool::pool_token_exchange_rate_at_epoch(pool, epoch)
+156:#[spec(prove, target=staking_pool::split, ignore_abort, no_opaque)]
+162:    staking_pool::split(self, split_amount, ctx)
+165:#[spec(prove, target=staking_pool::split_fungible_staked_sui, ignore_abort)]
+171:    staking_pool::split_fungible_staked_sui(fungible_staked_sui, split_amount, ctx)
+175:#[spec(prove, target=staking_pool::split_staked_sui, run_on = b"local")]
+183:    let original_amount = staking_pool::staked_sui_amount(stake);
+184:    let old_pool_id = staking_pool::pool_id(stake);
+185:    let old_epoch = staking_pool::stake_activation_epoch(stake);
+189:    staking_pool::split_staked_sui(stake, split_amount, ctx);
+190:    ensures(staking_pool::staked_sui_amount(stake).to_int() == original_amount.to_int().sub(split_amount.to_int()));
+191:    ensures(staking_pool::pool_id(stake) == old_pool_id);
+192:    ensures(staking_pool::stake_activation_epoch(stake) == old_epoch);
+195:#[spec(prove, target=staking_pool::stake_activation_epoch, ignore_abort, no_opaque)]
+199:    staking_pool::stake_activation_epoch(staked_sui)
+202:#[spec(prove, target=staking_pool::staked_sui_amount, ignore_abort, no_opaque)]
+206:    staking_pool::staked_sui_amount(staked_sui)
+209:#[spec(prove, target=staking_pool::sui_amount, ignore_abort)]
+213:    staking_pool::sui_amount(exchange_rate)
+216:#[spec(prove, target=staking_pool::sui_balance, ignore_abort)]
+220:    staking_pool::sui_balance(pool)
+/Users/cos/.move/https___github_com_asymptotic-code_sui_git_next/crates/sui-framework/packages/sui-system/sources/staking_pool.move
+56:    exchange_rates: Table<u64, PoolTokenExchangeRate>,
+124:        exchange_rates: table::new(ctx),
+358:        .exchange_rates
+443:    pool.exchange_rates.add(activation_epoch, initial_exchange_rate());
+601:        if (pool.exchange_rates.contains(epoch)) {
+602:            return pool.exchange_rates[epoch]
+620:public(package) fun exchange_rates(pool: &StakingPool): &Table<u64, PoolTokenExchangeRate> {
+621:    &pool.exchange_rates
+701:#[test_only]
+706:#[test_only]
+709:#[test_only]
+716:#[test_only]
+719:#[test_only]
+726:#[test_only]
+731:#[test_only]
+744:#[test_only]
+749:#[test_only]
+757:#[test_only]
+765:#[test_only]
+38:public struct StakingPool has key, store {
+69:public struct PoolTokenExchangeRate has copy, drop, store {
+75:public struct StakedSui has key, store {
+89:public struct FungibleStakedSui has key, store {
+98:public struct FungibleStakedSuiData has key, store {
+107:public struct FungibleStakedSuiDataKey has copy, drop, store {}
+111:public struct UnderflowSuiBalance has copy, drop, store {}
+116:public(package) fun new(ctx: &mut TxContext): StakingPool {
+135:public(package) fun request_add_stake(
+157:public(package) fun request_withdraw_stake(
+195:public(package) fun redeem_fungible_staked_sui(
+274:public(package) fun convert_to_fungible_staked_sui(
+322:public(package) fun withdraw_from_principal(
+348:public(package) fun deposit_rewards(pool: &mut StakingPool, rewards: Balance<SUI>) {
+353:public(package) fun process_pending_stakes_and_withdraws(pool: &mut StakingPool, ctx: &TxContext) {
+393:public(package) fun process_pending_stake(pool: &mut StakingPool) {
+441:public(package) fun activate_staking_pool(pool: &mut StakingPool, activation_epoch: u64) {
+456:public(package) fun deactivate_staking_pool(pool: &mut StakingPool, deactivation_epoch: u64) {
+464:public fun sui_balance(pool: &StakingPool): u64 { pool.sui_balance }
+466:public fun pool_id(staked_sui: &StakedSui): ID { staked_sui.pool_id }
+468:public use fun fungible_staked_sui_pool_id as FungibleStakedSui.pool_id;
+470:public fun fungible_staked_sui_pool_id(fungible_staked_sui: &FungibleStakedSui): ID {
+475:public use fun staked_sui_amount as StakedSui.amount;
+478:public fun staked_sui_amount(staked_sui: &StakedSui): u64 { staked_sui.principal.value() }
+480:public use fun stake_activation_epoch as StakedSui.activation_epoch;
+483:public fun stake_activation_epoch(staked_sui: &StakedSui): u64 {
+488:public fun is_preactive(pool: &StakingPool): bool {
+495:public(package) fun activation_epoch(pool: &StakingPool): Option<u64> {
+500:public fun is_inactive(pool: &StakingPool): bool {
+504:public use fun fungible_staked_sui_value as FungibleStakedSui.value;
+506:public fun fungible_staked_sui_value(fungible_staked_sui: &FungibleStakedSui): u64 {
+510:public use fun split_fungible_staked_sui as FungibleStakedSui.split;
+512:public fun split_fungible_staked_sui(
+528:public use fun join_fungible_staked_sui as FungibleStakedSui.join;
+530:public fun join_fungible_staked_sui(self: &mut FungibleStakedSui, other: FungibleStakedSui) {
+542:public fun split(self: &mut StakedSui, split_amount: u64, ctx: &mut TxContext): StakedSui {
+558:public use fun split_staked_sui as StakedSui.split_to_sender;
+563:public entry fun split_staked_sui(stake: &mut StakedSui, split_amount: u64, ctx: &mut TxContext) {
+568:public use fun join_staked_sui as StakedSui.join;
+573:public entry fun join_staked_sui(self: &mut StakedSui, other: StakedSui) {
+582:public fun is_equal_staking_metadata(self: &StakedSui, other: &StakedSui): bool {
+587:public fun pool_token_exchange_rate_at_epoch(
+611:public fun pending_stake_amount(staking_pool: &StakingPoo
+#[spec(prove, target=staking_pool::is_preactive)]
+fun is_preactive_spec(
+    pool: &StakingPool,
+): bool {
+    let result = staking_pool::is_preactive(pool);
+    ensures(result == staking_pool::activation_epoch(pool).is_none());
+    result
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::join_fungible_staked_sui)]
+fun join_fungible_staked_sui_spec(
+620:public(package) fun exchange_rates(pool: &StakingPool): &Table<u64, PoolTokenExchangeRate> {
+
+}
+
+public(package) fun exchange_rates(pool: &StakingPool): &Table<u64, PoolTokenExchangeRate> {
+    &pool.exchange_rates
+}
+
+public fun sui_amount(exchange_rate: &PoolTokenExchangeRate): u64 {
+    exchange_rate.sui_amount
+5:use sui_system::staking_pool::PoolTokenExchangeRate;
+7:use sui_system::staking_pool::StakingPool;
+9:use sui_system::staking_pool::StakedSui;
+11:use sui_system::staking_pool;
+12:use sui_system::staking_pool::FungibleStakedSui;
+updated to use exchange_rates() accessor
+🔄 staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_Check
+🔄 staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_Assume
+🔄 staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_SpecNoAbortCheck
+✅ staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_Assume
+✅ staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_Check
+✅ staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_SpecNoAbortCheck
+Verification successful

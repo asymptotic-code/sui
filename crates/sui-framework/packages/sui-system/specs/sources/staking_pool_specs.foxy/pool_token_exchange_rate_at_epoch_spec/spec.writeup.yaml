@@ -1,0 +1,42 @@
+function: staking_pool_specs::pool_token_exchange_rate_at_epoch_spec
+complexity: low
+summary: Looks up the exchange rate for a given epoch in a staking pool's history.
+  Returns the initial 1:1 rate if the pool was preactive at the requested epoch, otherwise
+  clamps the epoch to the pool's deactivation epoch (if any) and scans backwards from
+  that epoch to find the latest recorded rate on or before the requested epoch.
+role: Core read-only helper called by staking-pool internals — withdraw_from_principal,
+  withdraw_rewards, redeem_fungible_staked_sui, convert_to_fungible_staked_sui, calculate_rewards,
+  and check_balance_invariants — to convert between SUI and pool tokens at the historically-correct
+  rate. Accuracy is essential for correct reward accounting across the entire staking
+  lifecycle.
+aborts: []
+requires:
+- pool is active (activation_epoch is Some) when epoch >= pool.activation_epoch
+- pool.exchange_rates contains an entry for pool.activation_epoch (guaranteed by activate_staking_pool)
+- pool.activation_epoch.borrow() is safe — must hold Some when pool is not preactive
+  at epoch; enforced by the is_preactive_at_epoch early-return guard
+ensures:
+- 'result == PoolTokenExchangeRate { sui_amount: 0, pool_token_amount: 0 } (initial_exchange_rate)
+  when pool.is_preactive_at_epoch(epoch)'
+- 'result == PoolTokenExchangeRate { sui_amount: 0, pool_token_amount: 0 } when pool
+  is active but the loop exits without finding an entry (unreachable branch per source
+  comment)'
+- result == pool.exchange_rates[e] where e is the maximum e in [pool.activation_epoch,
+  min(pool.deactivation_epoch.get_with_default(epoch), epoch)] such that pool.exchange_rates.contains(e),
+  when the pool is active and such an entry exists
+- result.sui_amount and result.pool_token_amount are the fields of the stored PoolTokenExchangeRate
+  at the resolved epoch e
+- result does not reflect any pending stakes or rewards not yet committed to exchange_rates
+observations:
+- The fallback initial_exchange_rate() return at the end of the loop is annotated
+  in the source as 'really should be unreachable' — it can only trigger if exchange_rates
+  has no entry at or after activation_epoch, which activate_staking_pool prevents
+  by inserting the initial rate at activation_epoch.
+- The epoch clamping via pool.deactivation_epoch.get_with_default(epoch) means that
+  for deactivated pools any query with epoch > deactivation_epoch returns the rate
+  recorded at deactivation_epoch, preserving historical accuracy.
+- The backwards scan is necessary because exchange_rates entries are only added at
+  epoch boundaries by process_pending_stakes_and_withdraws; epochs with no activity
+  have no entry and the scan finds the last recorded rate.
+- No arithmetic is performed on the returned value; the function is purely a table
+  lookup so overflow/underflow cannot occur within its body.

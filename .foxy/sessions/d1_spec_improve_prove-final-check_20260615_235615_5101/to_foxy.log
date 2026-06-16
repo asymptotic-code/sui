@@ -1,0 +1,28 @@
+{'status': 'success', 'output': '🔄 staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_Check\n🔄 staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_Assume\n🔄 staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_SpecNoAbortCheck\n✅ staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_Assume\n✅ staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_Check\n✅ staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_SpecNoAbortCheck\nVerification successful', 'exit_code': 0}
+
+
+OUTPUT (last 3000 chars):
+🔄 staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_Check
+🔄 staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_Assume
+🔄 staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_SpecNoAbortCheck
+✅ staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_Assume
+✅ staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_Check
+✅ staking_pool_specs::pool_token_exchange_rate_at_epoch_spec_SpecNoAbortCheck
+Verification successful
+FINAL SPEC:
+#[spec_only(loop_inv(target = staking_pool::pool_token_exchange_rate_at_epoch)), ext(no_abort)]
+fun pool_token_exchange_rate_at_epoch_loop_inv(
+    pool: &StakingPool,
+    epoch: u64,
+    activation_epoch: u64,
+): bool {
+    epoch >= activation_epoch
+        && staking_pool::exchange_rates(pool).contains(activation_epoch)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::pool_token_exchange_rate_at_epoch)]
+fun pool_token_exchange_rate_at_epoch_spec(
+    pool: &StakingPool,
+    epoch: u64,
+): PoolTokenExchangeRate 

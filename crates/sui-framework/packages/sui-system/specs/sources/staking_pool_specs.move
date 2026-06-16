@@ -13,7 +13,7 @@ use sui_system::staking_pool::FungibleStakedSui;
 use sui::object::ID;
 
 #[spec_only]
-use prover::prover::{asserts, ensures};
+use prover::prover::{asserts, ensures, requires};
 #[spec_only]
 use prover::ghost;
 #[spec_only]
@@ -132,11 +132,24 @@ fun pool_token_amount_spec(
     staking_pool::pool_token_amount(exchange_rate)
 }
 
-#[spec(prove, target=staking_pool::pool_token_exchange_rate_at_epoch, ignore_abort)]
+#[spec_only(loop_inv(target = staking_pool::pool_token_exchange_rate_at_epoch)), ext(no_abort)]
+fun pool_token_exchange_rate_at_epoch_loop_inv(
+    pool: &StakingPool,
+    epoch: u64,
+    activation_epoch: u64,
+): bool {
+    epoch >= activation_epoch
+        && staking_pool::exchange_rates(pool).contains(activation_epoch)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::pool_token_exchange_rate_at_epoch)]
 fun pool_token_exchange_rate_at_epoch_spec(
     pool: &StakingPool,
     epoch: u64,
 ): PoolTokenExchangeRate {
+    requires(pool.is_preactive()
+        || staking_pool::exchange_rates(pool).contains(*staking_pool::activation_epoch(pool).borrow()));
     staking_pool::pool_token_exchange_rate_at_epoch(pool, epoch)
 }
 

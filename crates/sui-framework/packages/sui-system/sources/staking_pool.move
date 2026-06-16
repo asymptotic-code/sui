@@ -612,6 +612,11 @@ public fun pool_token_exchange_rate_at_epoch(
     initial_exchange_rate()
 }
 
+/// Returns true if the pool has an exchange rate recorded for the given epoch.
+public fun pool_has_exchange_rate_for_epoch(pool: &StakingPool, epoch: u64): bool {
+    pool.exchange_rates.contains(epoch)
+}
+
 /// Returns the total value of the pending staking requests for this staking pool.
 public fun pending_stake_amount(staking_pool: &StakingPool): u64 {
     staking_pool.pending_stake

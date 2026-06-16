@@ -1,0 +1,12 @@
+executed: true
+stdout: /var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_kmjoobtc.txt
+to_foxy_logs: 'result: {''starting_state'': ''stub'', ''final_state'': ''asserts_only'',
+  ''changes_made'': [''Added loop invariant establishing abort-freedom via epoch >=
+  activation_epoch guard'', ''Added requires() precondition: pool.is_preactive() OR
+  exchange_rates contains activation_epoch (structural invariant)'', ''Removed ignore_abort
+  attribute — abort-freedom now verified via loop invariant and precondition'', ''Created
+  public helper pool_has_exchange_rate_for_epoch() for prover access to table containment'',
+  ''All three prover phases (_Check, _Assume, _SpecNoAbortCheck) pass''], ''prover_runs'':
+  1, ''prover_final'': ''pass'', ''issues'': [], ''duration_seconds'': 125}
+
+  response: '
