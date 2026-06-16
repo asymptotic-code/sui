@@ -12,9 +12,9 @@ parent_session: null
 name: null
 description: null
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
-started_at: 2026-06-16T00:12:59.972343
+started_at: 2026-06-16T00:13:04.330006
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
-prompt_part_hashes: {"base": "5fdb6c5e65d5df8a", "core": "35fc153c53e2c232", "file_ops": "b76d200c47b2271e", "function_knowledge": "ec5c60d9b1e6f113", "project_env": "21a3de2d42771978", "spec_loop": "26d59a7f8c0f21db", "spec_postcondition": "c9935e5df9cbd57c", "spec_precondition": "74781a107ed639cf", "spec_review": "e31ecea77dacc494", "spec_scenario": "d1ce03efba7186ff", "sui_prover_guide": "9b7aaa77fb185386", "_global": "30a84f73cb061e0c2407ddbbe4e54a80e5b44d1ec12b5cd1d36c5764f702b7a0"}
+prompt_part_hashes: {"base": "5fdb6c5e65d5df8a", "core": "35fc153c53e2c232", "file_ops": "b76d200c47b2271e", "function_knowledge": "ec5c60d9b1e6f113", "project_env": "21a3de2d42771978", "spec_loop": "26d59a7f8c0f21db", "spec_postcondition": "c9935e5df9cbd57c", "spec_precondition": "74781a107ed639cf", "spec_review": "e31ecea77dacc494", "spec_scenario": "d1ce03efba7186ff", "sui_prover_guide": "9b7aaa77fb185386", "_global": "c53758fb7f201fac94804c401b79b87a9ab472580ffba681484722111310c46c"}
 ---
 
 ## System Prompt
@@ -3360,7 +3360,7 @@ These functions are already in the namespace — no imports needed. The namespac
 
 ## User
 
-Review the spec for `staking_pool_specs::split_staked_sui_spec`. Compare the actual spec against the writeup (the verification plan), using the function source, callees, and protocol context to assess coverage.
+Review the spec for `staking_pool_specs::stake_activation_epoch_spec`. Compare the actual spec against the writeup (the verification plan), using the function source, callees, and protocol context to assess coverage.
 
 Produce a detailed markdown review using `format_review_md()` and return it via `final_result()`. The review format and guidelines are in your system prompt.
 
@@ -3468,73 +3468,53 @@ the genesis type.
 
 ## Writeup (Verification Plan)
 
-This is what should be verified about `staking_pool_specs::split_staked_sui_spec`:
+This is what should be verified about `staking_pool_specs::stake_activation_epoch_spec`:
 
 ```yaml
-function: staking_pool_specs::split_staked_sui_spec
+function: staking_pool_specs::stake_activation_epoch_spec
 complexity: low
-summary: Entry point that splits a StakedSui into two parts — the original stake has
-  its principal reduced by split_amount, and a new StakedSui with that principal is
-  created and transferred to the transaction sender. Both resulting parts must meet
-  the 1 SUI minimum threshold.
-role: User-facing entry point allowing StakedSui holders to partition their staking
-  position into two independent receipts; called directly by stake owners to split
-  without going through validator_set or sui_system. The new object is transferred
-  to ctx.sender() while the original stake is mutated in place.
-aborts:
-- condition: split_amount > stake.principal.value()
-  reason: Split amount exceeds the available principal balance (EInsufficientSuiTokenBalance)
-- condition: stake.principal.value() - split_amount < MIN_STAKING_THRESHOLD
-  reason: Remaining principal after split would fall below the 1 SUI minimum (EStakedSuiBelowThreshold)
-- condition: split_amount < MIN_STAKING_THRESHOLD
-  reason: The split portion itself would be below the 1 SUI minimum (EStakedSuiBelowThreshold)
-requires:
-- split_amount >= MIN_STAKING_THRESHOLD (1_000_000_000 MIST)
-- stake.principal.value() - split_amount >= MIN_STAKING_THRESHOLD
+summary: Pure accessor returning the epoch at which a StakedSui receipt becomes active,
+  reading directly from the stake_activation_epoch field of the StakedSui struct.
+role: Read-only getter exposing the stake_activation_epoch field of StakedSui; consumed
+  by callers (e.g. request_withdraw_stake, convert_to_fungible_staked_sui, pool_token_exchange_rate_at_epoch
+  lookups) that need to know when a given stake began earning rewards. Spec function
+  mirrors the public staking_pool::stake_activation_epoch accessor.
+aborts: []
+requires: []
 ensures:
-- stake.principal.value() == old(stake.principal.value()) - split_amount
-- stake.pool_id == old(stake.pool_id)
-- stake.stake_activation_epoch == old(stake.stake_activation_epoch)
-- new StakedSui transferred to ctx.sender() has principal.value() == split_amount
-- new StakedSui has pool_id == old(stake.pool_id)
-- new StakedSui has stake_activation_epoch == old(stake.stake_activation_epoch)
+- condition: result == staked_sui.stake_activation_epoch
+  reason: Function is a pure field projection; return value must exactly equal the
+    stored field value.
+observations:
+- The function takes an immutable reference, so no state is mutated and no abort is
+  possible.
+- stake_activation_epoch is set once at request_add_stake time and never mutated thereafter;
+  the returned value is therefore stable across the lifetime of the StakedSui object.
+- The field is used as an epoch index into the pool's exchange_rates table; correctness
+  of downstream exchange-rate lookups depends on this value being accurately reported.
+- Splitting a StakedSui via staking_pool::split preserves stake_activation_epoch in
+  both halves, so the getter behaves identically on split fragments.
 ```
 
 ## Actual Spec
 
 ```move
-// @VERIFY(⚙️/✅) cloud out-of-resources; verified locally via run_on
-#[spec(prove, target=staking_pool::split_staked_sui, run_on = b"local")]
-fun split_staked_sui_spec(
-    stake: &mut StakedSui,
-    split_amount: u64,
-    ctx: &mut TxContext,
-) {
-    ghost::declare_global_mut<SpecTransferAddressExists, bool>();
-    ghost::declare_global_mut<SpecTransferAddress, address>();
-    let original_amount = staking_pool::staked_sui_amount(stake);
-    let old_pool_id = staking_pool::pool_id(stake);
-    let old_epoch = staking_pool::stake_activation_epoch(stake);
-    asserts(split_amount <= original_amount);
-    asserts(original_amount.to_int().sub(split_amount.to_int()).gte(MIN_STAKING_THRESHOLD.to_int()));
-    asserts(split_amount >= MIN_STAKING_THRESHOLD);
-    staking_pool::split_staked_sui(stake, split_amount, ctx);
-    ensures(staking_pool::staked_sui_amount(stake).to_int() == original_amount.to_int().sub(split_amount.to_int()));
-    ensures(staking_pool::pool_id(stake) == old_pool_id);
-    ensures(staking_pool::stake_activation_epoch(stake) == old_epoch);
+#[spec(prove, target=staking_pool::stake_activation_epoch, no_opaque)]
+fun stake_activation_epoch_spec(
+    staked_sui: &StakedSui,
+): u64 {
+    staking_pool::stake_activation_epoch(staked_sui)
 }
 ```
 
-Statement counts: 3 asserts, 0 requires, 3 ensures
+Statement counts: 0 asserts, 0 requires, 0 ensures | Flags: no_opaque
 
 ## Target Function
 
 ```move
-#[allow(lint(public_entry))]
-/// Split the given StakedSui to the two parts, one with principal `split_amount`,
-/// transfer the newly split part to the sender address.
-public entry fun split_staked_sui(stake: &mut StakedSui, split_amount: u64, ctx: &mut TxContext) {
-    transfer::transfer(stake.split(split_amount, ctx), ctx.sender());
+/// Returns the activation epoch of `StakedSui`.
+public fun stake_activation_epoch(staked_sui: &StakedSui): u64 {
+    staked_sui.stake_activation_epoch
 }
 ```
 
@@ -4389,9 +4369,9 @@ No direct callees.
 
 0 transitive dependencies (names unavailable).
 
-## Entry Points Reaching `staking_pool_specs::split_staked_sui_spec`
+## Entry Points Reaching `staking_pool_specs::stake_activation_epoch_spec`
 
-- **`staking_pool::split_staked_sui`**: `staking_pool::split_staked_sui`
+- **`staking_pool::stake_activation_epoch`**: `staking_pool::stake_activation_epoch`
 
 ## Relevant Structs
 
@@ -4399,55 +4379,5 @@ No relevant structs found.
 
 ---
 
-Review the spec for `staking_pool_specs::split_staked_sui_spec`. Produce a markdown review via `final_result(format_review_md(function, verdict, issues, analysis, strengths))`.
-
-## Assistant
-
-I'll review this spec by examining the function knowledge for accesses and comparing against the writeup.
-
-### Code `toolu_01Kwp1QwpePzqMon35keoLih`
-
-```python
-from foxy.skills.project_env.api import get_project_root
-from foxy.skills.function_knowledge.api import get_knowledge
-
-project = get_project_root()
-k = get_knowledge(project)
-
-target_keys = [key for key in k.keys() if "split_staked_sui" in key or "split" in key]
-foxy_inspect(target_keys[:30])
-
-```
-
-> 17781 in, 195 out, 64254 cache read
-
-### Result `toolu_01Kwp1QwpePzqMon35keoLih`
-
-<!-- {"error":"Duplicate function keys found across packages. Packages with conflicts: specs, sui-system\n  staking_pool_specs::fungible_staked_sui_pool_id_spec \u2192 sui-system, specs\n  staking_pool_specs::fungible_staked_sui_value_spec \u2192 sui-system, specs\n  staking_pool_specs::is_equal_staking_metadata_spec \u2192 sui-system, specs\n  staking_pool_specs::is_inactive_spec \u2192 sui-system, specs\n  staking_pool_specs::is_preactive_spec \u2192 sui-system, specs\n  staking_pool_specs::join_fungible_staked_sui_spec \u2192 sui-system, specs\n  staking_pool_specs::join_staked_sui_spec \u2192 sui-system, specs\n  staking_pool_specs::pending_stake_amount_spec \u2192 sui-system, specs\n  staking_pool_specs::pending_stake_withdraw_amount_spec \u2192 sui-system, specs\n  staking_pool_specs::pool_id_spec \u2192 sui-system, specs\n  staking_pool_specs::pool_token_amount_spec \u2192 sui-system, specs\n  staking_pool_specs::pool_token_exchange_rate_at_epoch_loop_inv \u2192 sui-system, specs\n  staking_pool_specs::pool_token_exchange_rate_at_epoch_spec \u2192 sui-system, specs\n  staking_pool_specs::split_fungible_staked_sui_spec \u2192 sui-system, specs\n  staking_pool_specs::split_spec \u2192 sui-system, specs\n  staking_pool_specs::split_staked_sui_spec \u2192 sui-system, specs\n  staking_pool_specs::stake_activation_epoch_spec \u2192 sui-system, specs\n  staking_pool_specs::staked_sui_amount_spec \u2192 sui-system, specs\n  staking_pool_specs::sui_amount_spec \u2192 sui-system, specs\n  staking_pool_specs::sui_balance_spec \u2192 sui-system, specs\nMove overlapping packages to [vendor] in .foxy/project.toml to resolve the ambiguity.","type":"CollectionError"} -->
-```
-⚠ CollectionError: Duplicate function keys found across packages. Packages with conflicts: specs, sui-system
-  staking_pool_specs::fungible_staked_sui_pool_id_spec → sui-system, specs
-  staking_pool_specs::fungible_staked_sui_value_spec → sui-system, specs
-  staking_pool_specs::is_equal_staking_metadata_spec → sui-system, specs
-  staking_pool_specs::is_inactive_spec → sui-system, specs
-  staking_pool_specs::is_preactive_spec → sui-system, specs
-  staking_pool_specs::join_fungible_staked_sui_spec → sui-system, specs
-  staking_pool_specs::join_staked_sui_spec → sui-system, specs
-  staking_pool_specs::pending_stake_amount_spec → sui-system, specs
-  staking_pool_specs::pending_stake_withdraw_amount_spec → sui-system, specs
-  staking_pool_specs::pool_id_spec → sui-system, specs
-  staking_pool_specs::pool_token_amount_spec → sui-system, specs
-  staking_pool_specs::pool_token_exchange_rate_at_epoch_loop_inv → sui-system, specs
-  staking_pool_specs::pool_token_exchange_rate_at_epoch_spec → sui-system, specs
-  staking_pool_specs::split_fungible_staked_sui_spec → sui-system, specs
-  staking_pool_specs::split_spec → sui-system, specs
-  staking_pool_specs::split_staked_sui_spec → sui-system, specs
-  staking_pool_specs::stake_activation_epoch_spec → sui-system, specs
-  staking_pool_specs::staked_sui_amount_spec → sui-system, specs
-  staking_pool_specs::sui_amount_spec → sui-system, specs
-  staking_pool_specs::sui_balance_spec → sui-system, specs
-Move overlapping packages to [vendor] in .foxy/project.toml to resolve the ambiguity.
-```
-
----
+Review the spec for `staking_pool_specs::stake_activation_epoch_spec`. Produce a markdown review via `final_result(format_review_md(function, verdict, issues, analysis, strengths))`.
 
