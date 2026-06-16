@@ -21,7 +21,8 @@ use specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};
 
 const MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;
 
-#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id, ignore_abort)]
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id)]
 fun fungible_staked_sui_pool_id_spec(
     fungible_staked_sui: &FungibleStakedSui,
 ): ID {

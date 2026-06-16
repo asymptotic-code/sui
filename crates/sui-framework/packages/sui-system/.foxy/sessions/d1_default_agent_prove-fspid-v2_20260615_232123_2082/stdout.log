@@ -1,0 +1,5 @@
+Running: sui-prover --functions fungible_staked_sui_pool_id_spec --timeout 60 --force-timeout --cloud
+Working directory: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs
+
+[FOXY_EVENT] {"type": "inspect", "text": "\u001b[0m\u001b[1m\u001b[38;5;9merror\u001b[0m\u001b[1m: unbound module member\u001b[0m\n   \u001b[0m\u001b[34m\u250c\u2500\u001b[0m ./sources/staking_pool_specs.move:30:23\n   \u001b[0m\u001b[34m\u2502\u001b[0m\n\u001b[0m\u001b[34m30\u001b[0m \u001b[0m\u001b[34m\u2502\u001b[0m     ensures(result == \u001b[0m\u001b[31mstaking_pool::get_fungible_staked_sui_pool_id\u001b[0m(fungible_staked_sui));\n   \u001b[0m\u001b[34m\u2502\u001b[0m                       \u001b[0m\u001b[31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\u001b[0m \u001b[0m\u001b[31mInvalid module access. Unbound function 'get_fungible_staked_sui_pool_id' in module 'sui_system::staking_pool'\u001b[0m\n\nexiting with model building errors"}
+[FOXY_EVENT] {"type": "inspect", "text": "exit_code=1 status=error"}

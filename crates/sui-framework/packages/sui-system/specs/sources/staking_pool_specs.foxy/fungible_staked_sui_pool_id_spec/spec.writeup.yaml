@@ -1,0 +1,20 @@
+function: staking_pool_specs::fungible_staked_sui_pool_id_spec
+complexity: low
+summary: Returns the pool_id field from a FungibleStakedSui object — a direct field
+  accessor with no computation, no state mutation, and no abort paths.
+role: Read-only getter called to identify which staking pool a FungibleStakedSui token
+  belongs to. Used by callers that need to verify pool membership (e.g., before redeeming
+  via redeem_fungible_staked_sui, which asserts pool_id == object::id(pool)). Accessible
+  as FungibleStakedSui.pool_id() via the public use fun alias.
+aborts: []
+requires: []
+ensures:
+- condition: result == fungible_staked_sui.pool_id
+  reason: The function returns the pool_id field exactly as stored; no transformation
+    is applied.
+observations:
+- The returned ID is set at FungibleStakedSui creation time (convert_to_fungible_staked_sui)
+  and never mutated thereafter, so the getter always reflects the pool the token was
+  minted for.
+- 'The sibling function pool_id(&StakedSui): ID has identical structure and semantics;
+  both specs can share the same verification pattern.'

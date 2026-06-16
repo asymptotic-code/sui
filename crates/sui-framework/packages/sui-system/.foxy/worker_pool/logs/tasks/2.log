@@ -1,0 +1,10 @@
+{
+  "status": "ok",
+  "kind": "running",
+  "job": "pipeline",
+  "detail": {
+    "pid": 22660
+  },
+  "step": "babysitter/tick",
+  "item": "foxy.skills.prove_from_scratch.api::pipeline"
+}
