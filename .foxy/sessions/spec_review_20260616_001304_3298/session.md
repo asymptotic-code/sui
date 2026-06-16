@@ -4381,3 +4381,25 @@ No relevant structs found.
 
 Review the spec for `staking_pool_specs::stake_activation_epoch_spec`. Produce a markdown review via `final_result(format_review_md(function, verdict, issues, analysis, strengths))`.
 
+## Assistant
+
+I'll review this spec. The key observation is immediately clear: the spec has zero `ensures`, but the writeup specifies one critical postcondition.
+
+### Code `toolu_01BTR7PTLPi8cxgRax4gXRJu`
+
+```python
+from foxy.skills.project_env.api import get_project_root
+from foxy.skills.function_knowledge.api import get_knowledge
+
+project = get_project_root()
+k = get_knowledge(project)
+try:
+    fn = k.item("staking_pool::stake_activation_epoch")
+    foxy_inspect(fn.all_accesses)
+except Exception as e:
+    foxy_inspect(f"err: {e}")
+
+```
+
+> 17169 in, 233 out, 64254 cache read
+
