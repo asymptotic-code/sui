@@ -1,0 +1,12 @@
+starting_state: stub
+final_state: semantics
+changes_made:
+- Removed ignore_abort — is_preactive is total (Option::is_none never aborts), so
+  no asserts are needed
+- Added ensures(result == activation_epoch(pool).is_none()) characterizing the return
+  value
+- Updated @VERIFY annotation to (⚙️/✅)
+prover_runs: 1
+prover_final: pass
+issues: []
+duration_seconds: 21

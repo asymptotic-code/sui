@@ -1,0 +1,178 @@
+spec source:
+#[spec(prove, target=staking_pool::is_preactive, ignore_abort)]
+fun is_preactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_preactive(pool)
+}
+target source:
+None
+spec file: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/is_preactive_spec/spec.writeup.yaml
+sources/staking_pool.move:493:public fun is_preactive(pool: &StakingPool): bool {
+sources/staking_pool.move:638:fun is_preactive_at_epoch(pool: &StakingPool, epoch: u64): bool {
+sources/validator.move:445:public fun is_preactive(self: &Validator): bool {
+specs/sources/staking_pool_specs.move:63:fun is_preactive_spec(
+}
+
+/// Returns true if the input staking pool is preactive.
+public fun is_preactive(pool: &StakingPool): bool {
+    pool.activation_epoch.is_none()
+}
+
+/// Returns the activation epoch of the `StakingPool`. For validator candidates,
+/// or pending validators, the value returned is `None`. For active validators,
+/// the value is the epoch before the validator was activated.
+public(package) fun activation_epoch(pool: &StakingPool): Option<u64> {
+
+#[spec(prove, target=staking_pool::is_inactive)]
+fun is_inactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_inactive(pool)
+}
+
+#[spec(prove, target=staking_pool::is_preactive, ignore_abort)]
+fun is_preactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_preactive(pool)
+}
+
+#[spec(prove, target=staking_pool::join_fungible_staked_sui, ignore_abort)]
+fun join_fungible_staked_sui_spec(
+    self: &mut FungibleStakedSui,
+    other: FungibleStakedSui,
+) {
+    staking_pool::join_fungible_staked_sui(self, other)
+}
+module specs::staking_pool_specs;
+
+use sui::tx_context::TxContext;
+
+use sui_system::staking_pool::PoolTokenExchangeRate;
+
+use sui_system::staking_pool::StakingPool;
+
+use sui_system::staking_pool::StakedSui;
+
+use sui_system::staking_pool;
+use sui_system::staking_pool::FungibleStakedSui;
+use sui::object::ID;
+
+#[spec_only]
+use prover::prover::{asserts, ensures};
+#[spec_only]
+use prover::ghost;
+#[spec_only]
+use specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};
+
+const MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id)]
+fun fungible_staked_sui_pool_id_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): ID {
+    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_value)]
+fun fungible_staked_sui_value_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): u64 {
+    staking_pool::fungible_staked_sui_value(fungible_staked_sui)
+}
+
+// @VERIFY(⚙️/✅)
+#[spec(prove, target=staking_pool::is_equal_staking_metadata)]
+fun is_equal_staking_metadata_spec(
+    self: &StakedSui,
+    other: &StakedSui,
+): bool {
+    let result = staking_pool::is_equal_staking_metadata(self, other);
+    ensures(result == (
+        (staking_pool::pool_id(self) == staking_pool::pool_id(other)) &&
+        (staking_pool::stake_activation_epoch(self) == staking_pool::stake_activation_epoch(other))
+    ));
+    result
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::is_inactive)]
+fun is_inactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_inactive(pool)
+}
+
+#[spec(prove, target=staking_pool::is_preactive, ignore_abort)]
+fun is_preactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_preactive(pool)
+}
+
+#[spec(prove, target=staking_pool::join_fungible_staked_sui, ignore_abort)]
+fun join_fungible_staked_sui_spec(
+    self: &mut FungibleStakedSui,
+    other: FungibleStakedSui,
+) {
+    staking_pool::join_fungible_staked_sui(self, other)
+}
+edited
+['/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system', '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs']
+['/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs']
+type: <class 'NoneType'>
+#1 prove-from-scratch/improve/attempt-1 (1 items) [running] 840s
+#12 sui-prover: specs [error] 608s
+#13 sui-prover: specs [error] 601s
+#14 prove-fungible_staked_sui_value [error] 491s
+#15 prove-fungible_staked_sui_value [done] 491s
+#16 sui-prover: specs [error] 487s
+#17 prove-fungible_staked_sui_value [error] 482s
+#18 prove-fungible_staked_sui_value [done] 482s
+#19 sui-prover: specs [error] 479s
+#20 sui-prover: specs [error] 478s
+#21 sui-prover: specs [error] 468s
+#22 sui-prover: specs [error] 457s
+#23 sui-prover: specs [error] 455s
+#24 sui-prover: specs [error] 454s
+#25 sui-prover: specs [error] 447s
+#26 function_local_accesses [done] 417s
+#27 prove-is_equal_staking_metadata [error] 331s
+#28 prove-is_equal_staking_metadata [done] 331s
+#29 sui-prover: specs [error] 327s
+#30 sui-prover: specs [error] 319s
+#31 sui-prover: specs [error] 312s
+#32 sui-prover: specs [error] 286s
+#33 sui-prover: specs [error] 276s
+#34 sui-prover: specs [done] 262s
+#35 sui-prover: specs [done] 250s
+#36 prove-is_inactive_spec [error] 103s
+#37 prove-is_inactive_spec [done] 103s
+#38 sui-prover: specs [done] 98s
+#39 sui-prover: specs [done] 92s
+#40 prove-is_preactive [error] 21s
+#41 prove-is_preactive [done] 21s
+#42 sui-prover: specs [done] 18s
+#43 prove-is_preactive [error] 12s
+#44 prove-is_preactive [done] 12s
+#45 sui-prover: specs [done] 8s
+41 type: <class 'dict'>
+44 type: <class 'dict'>
+41 keys: ['status', 'result', 'response', 'stop_reason', 'turns', 'tokens_used', 'usage', 'total_usage', 'time_elapsed', 'error', 'cost_usd', 'harness', 'session_dir']
+41 response tail:
+
+41 result: {'summary': 'PASS is_preactive_spec', 'details': ['PASS staking_pool_specs::is_preactive_spec (_Check)', 'PASS staking_pool_specs::is_preactive_spec (_Assume)', 'PASS staking_pool_specs::is_preactive_spec (_SpecNoAbortCheck)'], 'totals': {'passed': 1, 'failed': 0, 'timeout': 0}}
+
+// @VERIFY(⚙️/✅)
+#[spec(prove, target=staking_pool::is_preactive)]
+fun is_preactive_spec(
+    pool: &StakingPool,
+): bool {
+    let result = staking_pool::is_preactive(pool);
+    ensures(result == staking_pool::activation_epoch(pool).is_none());
+    result
+}
+

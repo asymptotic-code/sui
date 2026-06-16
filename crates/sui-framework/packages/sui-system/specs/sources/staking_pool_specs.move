@@ -59,11 +59,14 @@ fun is_inactive_spec(
     staking_pool::is_inactive(pool)
 }
 
-#[spec(prove, target=staking_pool::is_preactive, ignore_abort)]
+// @VERIFY(⚙️/✅)
+#[spec(prove, target=staking_pool::is_preactive)]
 fun is_preactive_spec(
     pool: &StakingPool,
 ): bool {
-    staking_pool::is_preactive(pool)
+    let result = staking_pool::is_preactive(pool);
+    ensures(result == staking_pool::activation_epoch(pool).is_none());
+    result
 }
 
 #[spec(prove, target=staking_pool::join_fungible_staked_sui, ignore_abort)]

@@ -1,0 +1,7 @@
+🔄 staking_pool_specs::is_preactive_spec_Check
+🔄 staking_pool_specs::is_preactive_spec_Assume
+🔄 staking_pool_specs::is_preactive_spec_SpecNoAbortCheck
+✅ staking_pool_specs::is_preactive_spec_Assume
+✅ staking_pool_specs::is_preactive_spec_Check
+✅ staking_pool_specs::is_preactive_spec_SpecNoAbortCheck
+Verification successful

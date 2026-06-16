@@ -1,0 +1,59 @@
+[FOXY_EVENT] {"type": "inspect", "text": "spec source:\n#[spec(prove, target=staking_pool::is_preactive, ignore_abort)]\nfun is_preactive_spec(\n    pool: &StakingPool,\n): bool {\n    staking_pool::is_preactive(pool)\n}"}
+[FOXY_EVENT] {"type": "inspect", "text": "target source:\nNone"}
+[FOXY_EVENT] {"type": "inspect", "text": "spec file: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/is_preactive_spec/spec.writeup.yaml"}
+[FOXY_EVENT] {"type": "file_op", "op": "grep", "label": "fun is_preactive in *.move"}
+[FOXY_EVENT] {"type": "inspect", "text": "sources/staking_pool.move:493:public fun is_preactive(pool: &StakingPool): bool {\nsources/staking_pool.move:638:fun is_preactive_at_epoch(pool: &StakingPool, epoch: u64): bool {\nsources/validator.move:445:public fun is_preactive(self: &Validator): bool {\nspecs/sources/staking_pool_specs.move:63:fun is_preactive_spec("}
+[FOXY_EVENT] {"type": "file_op", "op": "read", "label": "sources/staking_pool.move:490-500"}
+[FOXY_EVENT] {"type": "inspect", "text": "}\n\n/// Returns true if the input staking pool is preactive.\npublic fun is_preactive(pool: &StakingPool): bool {\n    pool.activation_epoch.is_none()\n}\n\n/// Returns the activation epoch of the `StakingPool`. For validator candidates,\n/// or pending validators, the value returned is `None`. For active validators,\n/// the value is the epoch before the validator was activated.\npublic(package) fun activation_epoch(pool: &StakingPool): Option<u64> {\n"}
+[FOXY_EVENT] {"type": "file_op", "op": "read", "label": "specs/sources/staking_pool_specs.move:55-75"}
+[FOXY_EVENT] {"type": "inspect", "text": "#[spec(prove, target=staking_pool::is_inactive)]\nfun is_inactive_spec(\n    pool: &StakingPool,\n): bool {\n    staking_pool::is_inactive(pool)\n}\n\n#[spec(prove, target=staking_pool::is_preactive, ignore_abort)]\nfun is_preactive_spec(\n    pool: &StakingPool,\n): bool {\n    staking_pool::is_preactive(pool)\n}\n\n#[spec(prove, target=staking_pool::join_fungible_staked_sui, ignore_abort)]\nfun join_fungible_staked_sui_spec(\n    self: &mut FungibleStakedSui,\n    other: FungibleStakedSui,\n) {\n    staking_pool::join_fungible_staked_sui(self, other)\n}\n"}
+[FOXY_EVENT] {"type": "file_op", "op": "read", "label": "specs/sources/staking_pool_specs.move:1-75"}
+[FOXY_EVENT] {"type": "inspect", "text": "module specs::staking_pool_specs;\n\nuse sui::tx_context::TxContext;\n\nuse sui_system::staking_pool::PoolTokenExchangeRate;\n\nuse sui_system::staking_pool::StakingPool;\n\nuse sui_system::staking_pool::StakedSui;\n\nuse sui_system::staking_pool;\nuse sui_system::staking_pool::FungibleStakedSui;\nuse sui::object::ID;\n\n#[spec_only]\nuse prover::prover::{asserts, ensures};\n#[spec_only]\nuse prover::ghost;\n#[spec_only]\nuse specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};\n\nconst MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;\n\n// @VERIFY(\ud83d\udee1\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id)]\nfun fungible_staked_sui_pool_id_spec(\n    fungible_staked_sui: &FungibleStakedSui,\n): ID {\n    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)\n}\n\n// @VERIFY(\ud83d\udee1\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::fungible_staked_sui_value)]\nfun fungible_staked_sui_value_spec(\n    fungible_staked_sui: &FungibleStakedSui,\n): u64 {\n    staking_pool::fungible_staked_sui_value(fungible_staked_sui)\n}\n\n// @VERIFY(\u2699\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::is_equal_staking_metadata)]\nfun is_equal_staking_metadata_spec(\n    self: &StakedSui,\n    other: &StakedSui,\n): bool {\n    let result = staking_pool::is_equal_staking_metadata(self, other);\n    ensures(result == (\n        (staking_pool::pool_id(self) == staking_pool::pool_id(other)) &&\n        (staking_pool::stake_activation_epoch(self) == staking_pool::stake_activation_epoch(other))\n    ));\n    result\n}\n\n// @VERIFY(\ud83d\udee1\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::is_inactive)]\nfun is_inactive_spec(\n    pool: &StakingPool,\n): bool {\n    staking_pool::is_inactive(pool)\n}\n\n#[spec(prove, target=staking_pool::is_preactive, ignore_abort)]\nfun is_preactive_spec(\n    pool: &StakingPool,\n): bool {\n    staking_pool::is_preactive(pool)\n}\n\n#[spec(prove, target=staking_pool::join_fungible_staked_sui, ignore_abort)]\nfun join_fungible_staked_sui_spec(\n    self: &mut FungibleStakedSui,\n    other: FungibleStakedSui,\n) {\n    staking_pool::join_fungible_staked_sui(self, other)\n}\n"}
+[FOXY_EVENT] {"type": "file_op", "op": "edit", "label": "specs/sources/staking_pool_specs.move"}
+[FOXY_EVENT] {"type": "diff", "lines": [["-", 62, "#[spec(prove, target=staking_pool::is_preactive, ignore_abort)]"], ["+", null, "// @VERIFY(\u2699\ufe0f/\u2705)"], ["+", null, "#[spec(prove, target=staking_pool::is_preactive)]"], ["-", 66, "    staking_pool::is_preactive(pool)"], ["+", null, "    let result = staking_pool::is_preactive(pool);"], ["+", null, "    ensures(result == staking_pool::activation_epoch(pool).is_none());"], ["+", null, "    result"]]}
+[FOXY_EVENT] {"type": "inspect", "text": "edited"}
+[FOXY_EVENT] {"type": "inspect", "text": "['/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system', '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs']"}
+[FOXY_EVENT] {"type": "inspect", "text": "['/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs']"}
+[FOXY_EVENT] {"type": "inspect", "text": "type: <class 'NoneType'>"}
+[FOXY_EVENT] {"type": "inspect", "text": "#1 prove-from-scratch/improve/attempt-1 (1 items) [running] 840s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#12 sui-prover: specs [error] 608s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#13 sui-prover: specs [error] 601s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#14 prove-fungible_staked_sui_value [error] 491s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#15 prove-fungible_staked_sui_value [done] 491s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#16 sui-prover: specs [error] 487s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#17 prove-fungible_staked_sui_value [error] 482s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#18 prove-fungible_staked_sui_value [done] 482s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#19 sui-prover: specs [error] 479s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#20 sui-prover: specs [error] 478s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#21 sui-prover: specs [error] 468s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#22 sui-prover: specs [error] 457s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#23 sui-prover: specs [error] 455s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#24 sui-prover: specs [error] 454s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#25 sui-prover: specs [error] 447s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#26 function_local_accesses [done] 417s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#27 prove-is_equal_staking_metadata [error] 331s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#28 prove-is_equal_staking_metadata [done] 331s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#29 sui-prover: specs [error] 327s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#30 sui-prover: specs [error] 319s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#31 sui-prover: specs [error] 312s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#32 sui-prover: specs [error] 286s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#33 sui-prover: specs [error] 276s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#34 sui-prover: specs [done] 262s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#35 sui-prover: specs [done] 250s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#36 prove-is_inactive_spec [error] 103s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#37 prove-is_inactive_spec [done] 103s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#38 sui-prover: specs [done] 98s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#39 sui-prover: specs [done] 92s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#40 prove-is_preactive [error] 21s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#41 prove-is_preactive [done] 21s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#42 sui-prover: specs [done] 18s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#43 prove-is_preactive [error] 12s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#44 prove-is_preactive [done] 12s"}
+[FOXY_EVENT] {"type": "inspect", "text": "#45 sui-prover: specs [done] 8s"}
+[FOXY_EVENT] {"type": "inspect", "text": "41 type: <class 'dict'>"}
+[FOXY_EVENT] {"type": "inspect", "text": "44 type: <class 'dict'>"}
+[FOXY_EVENT] {"type": "inspect", "text": "41 keys: ['status', 'result', 'response', 'stop_reason', 'turns', 'tokens_used', 'usage', 'total_usage', 'time_elapsed', 'error', 'cost_usd', 'harness', 'session_dir']"}
+[FOXY_EVENT] {"type": "inspect", "text": "41 response tail:\n"}
+[FOXY_EVENT] {"type": "inspect", "text": "41 result: {'summary': 'PASS is_preactive_spec', 'details': ['PASS staking_pool_specs::is_preactive_spec (_Check)', 'PASS staking_pool_specs::is_preactive_spec (_Assume)', 'PASS staking_pool_specs::is_preactive_spec (_SpecNoAbortCheck)'], 'totals': {'passed': 1, 'failed': 0, 'timeout': 0}}"}
+[FOXY_EVENT] {"type": "file_op", "op": "read", "label": "specs/sources/staking_pool_specs.move:61-71"}
+[FOXY_EVENT] {"type": "inspect", "text": "\n// @VERIFY(\u2699\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::is_preactive)]\nfun is_preactive_spec(\n    pool: &StakingPool,\n): bool {\n    let result = staking_pool::is_preactive(pool);\n    ensures(result == staking_pool::activation_epoch(pool).is_none());\n    result\n}\n\n"}

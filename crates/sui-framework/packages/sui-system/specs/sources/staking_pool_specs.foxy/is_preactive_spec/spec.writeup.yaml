@@ -1,0 +1,31 @@
+function: staking_pool_specs::is_preactive_spec
+complexity: low
+summary: Returns true if and only if the staking pool has never been activated — i.e.,
+  pool.activation_epoch is Option::None, indicating the pool is in the pre-active
+  (validator-candidate) state.
+role: Read-only predicate over StakingPool lifecycle state. Called internally by request_withdraw_stake
+  (to decide between immediate vs queued withdrawal paths), by activate_staking_pool
+  (as a precondition guard against double-activation via EPoolAlreadyActive), by convert_to_fungible_staked_sui
+  (EPoolPreactiveOrInactive guard), and by is_preactive_at_epoch. In the broader protocol
+  it gates whether a pool can accept normal staking operations or must fall back to
+  special pre-active handling.
+aborts: []
+requires: []
+ensures:
+- condition: result == pool.activation_epoch.is_none()
+  reason: The return value is exactly the Option::is_none check on activation_epoch
+    — true when the pool has never been activated, false when activation_epoch has
+    been filled.
+- condition: result == true implies pool.activation_epoch == option::none()
+  reason: Positive result means no activation epoch has been recorded.
+- condition: result == false implies pool.activation_epoch.is_some()
+  reason: Negative result means the pool has been activated (active or inactive —
+    both have Some activation_epoch).
+observations:
+- The predicate does not distinguish between active and inactive pools — both have
+  activation_epoch set to Some, so is_preactive returns false for both. The deactivation_epoch
+  field is not consulted.
+- A pool created by staking_pool::new() always starts preactive (activation_epoch
+  initialized to option::none()); this predicate validates that initial condition.
+- The function does not abort under any circumstances — it is a pure boolean projection
+  of a single Option field.
