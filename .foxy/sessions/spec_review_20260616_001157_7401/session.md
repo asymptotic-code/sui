@@ -4377,3 +4377,22 @@ No relevant structs found.
 
 Review the spec for `staking_pool_specs::fungible_staked_sui_value_spec`. Produce a markdown review via `final_result(format_review_md(function, verdict, issues, analysis, strengths))`.
 
+## Assistant
+
+I'll review this spec. Let me first verify the function's accesses via function_knowledge, then assess the spec against the writeup.
+
+### Code `toolu_01MQ9mZprvBpGVd92tJyQ3SJ`
+
+```python
+from foxy.skills.project_env.api import get_project_root
+from foxy.skills.function_knowledge.api import get_knowledge
+
+project = get_project_root()
+k = get_knowledge(project)
+fn = k.item("staking_pool::fungible_staked_sui_value")
+foxy_inspect(fn.all_accesses)
+
+```
+
+> 17079 in, 197 out, 64254 cache read
+
