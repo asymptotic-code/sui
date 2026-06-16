@@ -22,7 +22,7 @@ use specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};
 const MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;
 
 // @VERIFY(🛡️/✅)
-#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id)]
+#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id, no_opaque)]
 fun fungible_staked_sui_pool_id_spec(
     fungible_staked_sui: &FungibleStakedSui,
 ): ID {
@@ -30,7 +30,7 @@ fun fungible_staked_sui_pool_id_spec(
 }
 
 // @VERIFY(🛡️/✅)
-#[spec(prove, target=staking_pool::fungible_staked_sui_value)]
+#[spec(prove, target=staking_pool::fungible_staked_sui_value, no_opaque)]
 fun fungible_staked_sui_value_spec(
     fungible_staked_sui: &FungibleStakedSui,
 ): u64 {
@@ -69,11 +69,18 @@ fun is_preactive_spec(
     result
 }
 
-#[spec(prove, target=staking_pool::join_fungible_staked_sui, ignore_abort)]
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::join_fungible_staked_sui)]
 fun join_fungible_staked_sui_spec(
     self: &mut FungibleStakedSui,
     other: FungibleStakedSui,
 ) {
+    asserts(staking_pool::fungible_staked_sui_pool_id(self) == staking_pool::fungible_staked_sui_pool_id(&other));
+    asserts(
+        staking_pool::fungible_staked_sui_value(self).to_int()
+            .add(staking_pool::fungible_staked_sui_value(&other).to_int())
+            .lte(std::u64::max_value!().to_int()),
+    );
     staking_pool::join_fungible_staked_sui(self, other)
 }
 

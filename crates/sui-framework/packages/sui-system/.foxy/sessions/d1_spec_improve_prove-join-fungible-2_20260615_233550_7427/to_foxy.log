@@ -1,0 +1,21 @@
+Status: error
+Exit code: 1
+[0m[1m[38;5;9merror[0m[1m: unbound module member[0m
+   [0m[34m┌─[0m ./sources/staking_pool_specs.move:78:13
+   [0m[34m│[0m
+[0m[34m78[0m [0m[34m│[0m     asserts([0m[31mstaking_pool::spec_fungible_staked_sui_pool_id[0m(self) == staking_pool::spec_fungible_staked_sui_pool_id(&other));
+   [0m[34m│[0m             [0m[31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [0m[31mInvalid module access. Unbound function 'spec_fungible_staked_sui_pool_id' in module 'sui_system::staking_pool'[0m
+
+[0m[1m[38;5;9merror[0m[1m: unbound module member[0m
+   [0m[34m┌─[0m ./sources/staking_pool_specs.move:78:69
+   [0m[34m│[0m
+[0m[34m78[0m [0m[34m│[0m     asserts(staking_pool::spec_fungible_staked_sui_pool_id(self) == [0m[31mstaking_pool::spec_fungible_staked_sui_pool_id[0m(&other));
+   [0m[34m│[0m                                                                     [0m[31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [0m[31mInvalid module access. Unbound function 'spec_fungible_staked_sui_pool_id' in module 'sui_system::staking_pool'[0m
+
+[0m[1m[38;5;9merror[0m[1m: unbound module member[0m
+   [0m[34m┌─[0m ./sources/staking_pool_specs.move:80:9
+   [0m[34m│[0m
+[0m[34m80[0m [0m[34m│[0m         [0m[31mstaking_pool::spec_fungible_staked_sui_value[0m(self).to_int()
+   [0m[34m│[0m         [0m[31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [0m[31mInvalid module access. Unbound function 'spec_fungible_staked_sui_value' in module 'sui_system::staking_pool'[0m
+
+exiting with model building errors

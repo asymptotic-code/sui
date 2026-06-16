@@ -1,0 +1,25 @@
+executed: true
+stdout: /var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_quilkxwc.txt
+to_foxy_logs: "// @VERIFY(\U0001F6E1️/✅)\n#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id,\
+  \ no_opaque)]\nfun fungible_staked_sui_pool_id_spec(\n    fungible_staked_sui: &FungibleStakedSui,\n\
+  ): ID {\n    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)\n}\n\
+  \n// @VERIFY(\U0001F6E1️/✅)\n#[spec(prove, target=staking_pool::fungible_staked_sui_value,\
+  \ no_opaque)]\nfun fungible_staked_sui_value_spec(\n    fungible_staked_sui: &FungibleStakedSui,\n\
+  ): u64 {\n    staking_pool::fungible_staked_sui_value(fungible_staked_sui)\n}\n\n\
+  // @VERIFY(⚙️/✅)\n#[spec(prove, target=staking_pool::is_equal_staking_metadata)]\n\
+  fun is_equal_staking_metadata_spec(\n    self: &StakedSui,\n    other: &StakedSui,\n\
+  ): bool {\n    let result = staking_pool::is_equal_staking_metadata(self, other);\n\
+  \    ensures(result == (\n        (staking_pool::pool_id(self) == staking_pool::pool_id(other))\
+  \ &&\n        (staking_pool::stake_activation_epoch(self) == staking_pool::stake_activation_epoch(other))\n\
+  \    ));\n    result\n}\n\n// @VERIFY(\U0001F6E1️/✅)\n#[spec(prove, target=staking_pool::is_inactive)]\n\
+  fun is_inactive_spec(\n    pool: &StakingPool,\n): bool {\n    staking_pool::is_inactive(pool)\n\
+  }\n\n// @VERIFY(⚙️/✅)\n#[spec(prove, target=staking_pool::is_preactive)]\nfun is_preactive_spec(\n\
+  \    pool: &StakingPool,\n): bool {\n    let result = staking_pool::is_preactive(pool);\n\
+  \    ensures(result == staking_pool::activation_epoch(pool).is_none());\n    result\n\
+  }\n\n// @VERIFY(\U0001F6E1️/✅)\n#[spec(prove, target=staking_pool::join_fungible_staked_sui)]\n\
+  fun join_fungible_staked_sui_spec(\n    self: &mut FungibleStakedSui,\n    other:\
+  \ FungibleStakedSui,\n) {\n    asserts(staking_pool::fungible_staked_sui_pool_id(self)\
+  \ == staking_pool::fungible_staked_sui_pool_id(&other));\n    asserts(\n       \
+  \ staking_pool::fungible_staked_sui_value(self).to_int()\n            .add(staking_pool::fungible_staked_sui_value(&other).to_int())\n\
+  \            .lte(std::u64::max_value!().to_int()),\n    );\n    staking_pool::join_fungible_staked_sui(self,\
+  \ other)\n}"

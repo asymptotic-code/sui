@@ -1,0 +1,372 @@
+🔄 staking_pool_specs::join_fungible_staked_sui_spec_Check
+🔄 staking_pool_specs::join_fungible_staked_sui_spec_Assume
+🔄 staking_pool_specs::join_fungible_staked_sui_spec_SpecNoAbortCheck
+❌ staking_pool_specs::join_fungible_staked_sui_spec_Check (1.5s)
+✅ staking_pool_specs::join_fungible_staked_sui_spec_SpecNoAbortCheck
+❌ staking_pool_specs::join_fungible_staked_sui_spec_Assume (1.8s)
+error: code should not abort
+    ┌─ /Users/cos/.move/https___github_com_asymptotic-code_sui_git_next/crates/sui-framework/packages/sui-system/sources/staking_pool.move:532:5
+    │
+532 │     assert!(self.pool_id == pool_id, EWrongPool);
+    │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    │             │
+    │             abort happened here with code 0x1
+    │
+    =     at ./sources/staking_pool_specs.move:74: join_fungible_staked_sui_spec
+    =         self =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x0},
+    =             value = 0u64}
+    =         other =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x1},
+    =             value = 0u64}
+    =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+    =         fungible_staked_sui =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x0},
+    =             value = 0u64}
+    =     at ./sources/staking_pool_specs.move:29: fungible_staked_sui_pool_id_spec
+    =         result = object.ID{bytes = 0x0}
+    =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+    =         fungible_staked_sui =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x1},
+    =             value = 0u64}
+    =     at ./sources/staking_pool_specs.move:29: fungible_staked_sui_pool_id_spec
+    =         result = object.ID{bytes = 0x0}
+    =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+    =         fungible_staked_sui =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x0},
+    =             value = 0u64}
+    =     at ./sources/staking_pool_specs.move:37: fungible_staked_sui_value_spec
+    =         result = 0u64
+    =     at ./sources/staking_pool_specs.move:80: join_fungible_staked_sui_spec
+    =         fungible_staked_sui =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x1},
+    =             value = 0u64}
+    =     at ./sources/staking_pool_specs.move:37: fungible_staked_sui_value_spec
+    =         result = 0u64
+    =     at ./sources/staking_pool_specs.move:81: join_fungible_staked_sui_spec
+    =         self =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x0},
+    =             value = 0u64}
+    =         other =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x1},
+    =             value = 0u64}
+    =     at sui-framework/packages/sui-system/sources/staking_pool.move:531: join_fungible_staked_sui
+    =         value#1#0 = 0u64
+    =         pool_id#1#0 = object.ID{bytes = 0x1}
+    =         id#1#0 = object.UID{id = object.ID{bytes = 0x0}}
+    =     at sui-framework/packages/sui-system/sources/staking_pool.move:532: join_fungible_staked_sui
+    =         ABORTED
+
+error: code should not abort
+    ┌─ /Users/cos/.move/https___github_com_asymptotic-code_sui_git_next/crates/sui-framework/packages/sui-system/sources/staking_pool.move:536:29
+    │
+536 │     self.value = self.value + value;
+    │                             ^
+    │
+    =     at ./sources/staking_pool_specs.move:74: join_fungible_staked_sui_spec
+    =         self =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x1},
+    =             value = 18446744073709551615u64}
+    =         other =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x1},
+    =             value = 1u64}
+    =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+    =         fungible_staked_sui =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x1},
+    =             value = 18446744073709551615u64}
+    =     at ./sources/staking_pool_specs.move:29: fungible_staked_sui_pool_id_spec
+    =         result = object.ID{bytes = 0x1}
+    =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+    =         fungible_staked_sui =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x1},
+    =             value = 1u64}
+    =     at ./sources/staking_pool_specs.move:29: fungible_staked_sui_pool_id_spec
+    =         result = object.ID{bytes = 0x1}
+    =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+    =         fungible_staked_sui =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x1},
+    =             value = 18446744073709551615u64}
+    =     at ./sources/staking_pool_specs.move:37: fungible_staked_sui_value_spec
+    =         result = 0u64
+    =     at ./sources/staking_pool_specs.move:80: join_fungible_staked_sui_spec
+    =         fungible_staked_sui =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x1},
+    =             value = 1u64}
+    =     at ./sources/staking_pool_specs.move:37: fungible_staked_sui_value_spec
+    =         result = 0u64
+    =     at ./sources/staking_pool_specs.move:81: join_fungible_staked_sui_spec
+    =         self =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x1},
+    =             value = 18446744073709551615u64}
+    =         other =
+    =           staking_pool.FungibleStakedSui{
+    =             id = object.UID{id = object.ID{bytes = 0x0}},
+    =             pool_id = object.ID{bytes = 0x1},
+    =             value = 1u64}
+    =     at sui-framework/packages/sui-system/sources/staking_pool.move:531: join_fungible_staked_sui
+    =         value#1#0 = 1u64
+    =         pool_id#1#0 = object.ID{bytes = 0x1}
+    =         id#1#0 = object.UID{id = object.ID{bytes = 0x0}}
+    =     at sui-framework/packages/sui-system/sources/staking_pool.move:532: join_fungible_staked_sui
+    =         id = object.UID{id = object.ID{bytes = 0x0}}
+    =     at sui-framework/packages/sui-framework/sources/object.move:245: delete
+    =         id = 0x0
+    =     at sui-specs/sources/sui-framework/object.move:7: delete_impl_spec
+
+error: prover::ensures does not hold
+   ┌─ ./sources/staking_pool_specs.move:78:5
+   │
+78 │     asserts(staking_pool::fungible_staked_sui_pool_id(self) == staking_pool::fungible_staked_sui_pool_id(&other));
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   │
+   =     at ./sources/staking_pool_specs.move:74: join_fungible_staked_sui_spec
+   =         self =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x0}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =         other =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x1}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x0}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =     at ./sources/staking_pool_specs.move:29: fungible_staked_sui_pool_id_spec
+   =         result = object.ID{bytes = 0x1}
+   =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x1}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =     at ./sources/staking_pool_specs.move:29: fungible_staked_sui_pool_id_spec
+   =         result = object.ID{bytes = 0x0}
+   =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x0}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =     at ./sources/staking_pool_specs.move:37: fungible_staked_sui_value_spec
+   =         result = 1u64
+   =     at ./sources/staking_pool_specs.move:80: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x1}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =     at ./sources/staking_pool_specs.move:37: fungible_staked_sui_value_spec
+   =         result = 18446744073709551615u64
+   =     at ./sources/staking_pool_specs.move:81: join_fungible_staked_sui_spec
+   =         self =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x0}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =         other =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x1}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =     at sui-framework/packages/sui-system/sources/staking_pool.move:531: join_fungible_staked_sui
+   =         value#1#0 = 0u64
+   =         pool_id#1#0 = object.ID{bytes = 0x0}
+   =         id#1#0 = object.UID{id = object.ID{bytes = 0x1}}
+   =     at sui-framework/packages/sui-system/sources/staking_pool.move:532: join_fungible_staked_sui
+   =         id = object.UID{id = object.ID{bytes = 0x1}}
+   =     at sui-framework/packages/sui-framework/sources/object.move:245: delete
+   =         id = 0x1
+   =     at sui-specs/sources/sui-framework/object.move:7: delete_impl_spec
+   =         self =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x0}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =         self =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x0}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =     at ./sources/staking_pool_specs.move:84: join_fungible_staked_sui_spec
+   =         self =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x0}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x0}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =     at ./sources/staking_pool_specs.move:29: fungible_staked_sui_pool_id_spec
+   =         result = object.ID{bytes = 0x1}
+   =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x1}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 0u64}
+   =     at ./sources/staking_pool_specs.move:29: fungible_staked_sui_pool_id_spec
+   =         result = object.ID{bytes = 0x0}
+   =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+
+error: prover::ensures does not hold
+   ┌─ ./sources/staking_pool_specs.move:79:5
+   │  
+79 │ ╭     asserts(
+80 │ │         staking_pool::fungible_staked_sui_value(self).to_int()
+81 │ │             .add(staking_pool::fungible_staked_sui_value(&other).to_int())
+82 │ │             .lte(std::u64::max_value!().to_int()),
+83 │ │     );
+   │ ╰─────^
+   │  
+   =     at ./sources/staking_pool_specs.move:74: join_fungible_staked_sui_spec
+   =         self =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x7fffffffffffffff}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 9223372036854775807u64}
+   =         other =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x1}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 9223372036854775807u64}
+   =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x7fffffffffffffff}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 9223372036854775807u64}
+   =     at ./sources/staking_pool_specs.move:29: fungible_staked_sui_pool_id_spec
+   =         result = object.ID{bytes = 0x7fffffffffffffff}
+   =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x1}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 9223372036854775807u64}
+   =     at ./sources/staking_pool_specs.move:29: fungible_staked_sui_pool_id_spec
+   =         result = object.ID{bytes = 0x7fffffffffffffff}
+   =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x7fffffffffffffff}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 9223372036854775807u64}
+   =     at ./sources/staking_pool_specs.move:37: fungible_staked_sui_value_spec
+   =         result = 9223372036854775807u64
+   =     at ./sources/staking_pool_specs.move:80: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x1}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 9223372036854775807u64}
+   =     at ./sources/staking_pool_specs.move:37: fungible_staked_sui_value_spec
+   =         result = 9223372036854775809u64
+   =     at ./sources/staking_pool_specs.move:81: join_fungible_staked_sui_spec
+   =         self =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x7fffffffffffffff}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 9223372036854775807u64}
+   =         other =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x1}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 9223372036854775807u64}
+   =     at sui-framework/packages/sui-system/sources/staking_pool.move:531: join_fungible_staked_sui
+   =         value#1#0 = 9223372036854775807u64
+   =         pool_id#1#0 = object.ID{bytes = 0x0}
+   =         id#1#0 = object.UID{id = object.ID{bytes = 0x1}}
+   =     at sui-framework/packages/sui-system/sources/staking_pool.move:532: join_fungible_staked_sui
+   =         id = object.UID{id = object.ID{bytes = 0x1}}
+   =     at sui-framework/packages/sui-framework/sources/object.move:245: delete
+   =         id = 0x1
+   =     at sui-specs/sources/sui-framework/object.move:7: delete_impl_spec
+   =         self =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x7fffffffffffffff}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 18446744073709551614u64}
+   =         self =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x7fffffffffffffff}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 18446744073709551614u64}
+   =     at ./sources/staking_pool_specs.move:84: join_fungible_staked_sui_spec
+   =         self =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x7fffffffffffffff}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 18446744073709551614u64}
+   =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x7fffffffffffffff}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 9223372036854775807u64}
+   =     at ./sources/staking_pool_specs.move:29: fungible_staked_sui_pool_id_spec
+   =         result = object.ID{bytes = 0x7fffffffffffffff}
+   =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x1}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 9223372036854775807u64}
+   =     at ./sources/staking_pool_specs.move:29: fungible_staked_sui_pool_id_spec
+   =         result = object.ID{bytes = 0x7fffffffffffffff}
+   =     at ./sources/staking_pool_specs.move:78: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x7fffffffffffffff}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 9223372036854775807u64}
+   =     at ./sources/staking_pool_specs.move:37: fungible_staked_sui_value_spec
+   =         result = 9223372036854775807u64
+   =     at ./sources/staking_pool_specs.move:80: join_fungible_staked_sui_spec
+   =         fungible_staked_sui =
+   =           staking_pool.FungibleStakedSui{
+   =             id = object.UID{id = object.ID{bytes = 0x1}},
+   =             pool_id = object.ID{bytes = 0x0},
+   =             value = 9223372036854775807u64}
+   =     at ./sources/staking_pool_specs.move:37: fungible_staked_sui_value_spec
+   =         result = 9223372036854775809u64
+   =     at ./sources/staking_pool_specs.move:81: join_fungible_staked_sui_spec
+
+exiting with verification errors
