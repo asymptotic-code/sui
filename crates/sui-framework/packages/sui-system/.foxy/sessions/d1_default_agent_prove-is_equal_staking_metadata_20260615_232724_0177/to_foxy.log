@@ -1,0 +1,13 @@
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Check
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Assume
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck
+❌ staking_pool_specs::is_equal_staking_metadata_spec_Check (0.1s)
+✅ staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck
+✅ staking_pool_specs::is_equal_staking_metadata_spec_Assume
+error: cloud verification out of resources/timeout
+  ┌─ <unknown>:1:1
+  │
+1 │ <unknown>
+  │ ^
+
+exiting with verification errors

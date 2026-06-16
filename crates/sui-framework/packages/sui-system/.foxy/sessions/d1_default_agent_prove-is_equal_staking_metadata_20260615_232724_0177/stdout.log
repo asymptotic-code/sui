@@ -1,0 +1,4 @@
+Running: sui-prover --functions is_equal_staking_metadata_spec --timeout 60 --force-timeout --cloud
+Working directory: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs
+
+[FOXY_EVENT] {"type": "inspect", "text": "\ud83d\udd04 staking_pool_specs::is_equal_staking_metadata_spec_Check\n\ud83d\udd04 staking_pool_specs::is_equal_staking_metadata_spec_Assume\n\ud83d\udd04 staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck\n\u274c staking_pool_specs::is_equal_staking_metadata_spec_Check (0.1s)\n\u2705 staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck\n\u2705 staking_pool_specs::is_equal_staking_metadata_spec_Assume\nerror: cloud verification out of resources/timeout\n  \u250c\u2500 <unknown>:1:1\n  \u2502\n1 \u2502 <unknown>\n  \u2502 ^\n\nexiting with verification errors"}

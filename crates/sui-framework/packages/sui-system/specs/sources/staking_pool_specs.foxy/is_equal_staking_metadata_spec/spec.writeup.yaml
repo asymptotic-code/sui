@@ -1,0 +1,27 @@
+function: staking_pool_specs::is_equal_staking_metadata_spec
+complexity: low
+summary: Returns true if and only if two StakedSui objects share the same pool_id
+  and stake_activation_epoch; the principal balance is intentionally excluded from
+  the comparison.
+role: Compatibility predicate used as the guard in join_staked_sui to enforce that
+  only StakedSui objects from the same validator pool and activation epoch can be
+  merged. Called directly from staking_pool::join_staked_sui.
+aborts: []
+requires: []
+ensures:
+- condition: result == true iff (self.pool_id == other.pool_id && self.stake_activation_epoch
+    == other.stake_activation_epoch)
+  reason: The function is a pure boolean conjunction of two field equalities; the
+    result must be equivalent to the logical AND of both conditions.
+- condition: result == false if self.pool_id != other.pool_id
+  reason: Different pool IDs must yield false regardless of activation epoch.
+- condition: result == false if self.stake_activation_epoch != other.stake_activation_epoch
+  reason: Different activation epochs must yield false regardless of pool ID.
+- condition: self and other are not modified (no state change)
+  reason: Both parameters are immutable references; the function is pure.
+observations:
+- 'The principal balance is deliberately excluded: two StakedSui objects with different
+  principal amounts but identical pool_id and stake_activation_epoch are considered
+  equal for the purpose of merging.'
+- This function is the sole prerequisite for join_staked_sui; an incorrect implementation
+  would allow merging of incompatible stake receipts, breaking pool-token accounting.

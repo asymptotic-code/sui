@@ -37,12 +37,18 @@ fun fungible_staked_sui_value_spec(
     staking_pool::fungible_staked_sui_value(fungible_staked_sui)
 }
 
-#[spec(prove, target=staking_pool::is_equal_staking_metadata, ignore_abort)]
+// @VERIFY(⚙️/✅)
+#[spec(prove, target=staking_pool::is_equal_staking_metadata)]
 fun is_equal_staking_metadata_spec(
     self: &StakedSui,
     other: &StakedSui,
 ): bool {
-    staking_pool::is_equal_staking_metadata(self, other)
+    let result = staking_pool::is_equal_staking_metadata(self, other);
+    ensures(result == (
+        (staking_pool::pool_id(self) == staking_pool::pool_id(other)) &&
+        (staking_pool::stake_activation_epoch(self) == staking_pool::stake_activation_epoch(other))
+    ));
+    result
 }
 
 #[spec(prove, target=staking_pool::is_inactive, ignore_abort)]

@@ -1,0 +1,259 @@
+Project: /Users/cos/asymptotic/agent/clients/mysten/sui
+Packages: ['/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system', '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs']
+=== SPEC SOURCE ===
+#[spec(prove, target=staking_pool::is_equal_staking_metadata, ignore_abort)]
+fun is_equal_staking_metadata_spec(
+    self: &StakedSui,
+    other: &StakedSui,
+): bool {
+    staking_pool::is_equal_staking_metadata(self, other)
+}
+=== TARGET SOURCE ===
+{'qualified_name': 'staking_pool::is_equal_staking_metadata', 'module': 'staking_pool', 'function_name': 'is_equal_staking_metadata', 'file_path': '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/sources/staking_pool.move', 'line_start': 587, 'line_end': 590, 'visibility': 'public', 'is_entry': False, 'function_type': 'source', 'attributes': [], 'source': '/// Returns true if all the staking parameters of the staked sui except the principal are identical\npublic fun is_equal_staking_metadata(self: &StakedSui, other: &StakedSui): bool {\n    (self.pool_id == other.pool_id) &&\n    (self.stake_activation_epoch == other.stake_activation_epoch)\n}'}
+=== SPEC FILE PATH ===
+/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/is_equal_staking_metadata_spec/spec.improve.yaml
+spec file: specs/sources/staking_pool_specs.move
+specs/sources/staking_pool_specs.move:41:fun is_equal_staking_metadata_spec(
+aked_sui_value(fungible_staked_sui)
+}
+
+#[spec(prove, target=staking_pool::is_equal_staking_metadata, ignore_abort)]
+fun is_equal_staking_metadata_spec(
+    self: &StakedSui,
+    other: &StakedSui,
+): bool {
+    staking_pool::is_equal_staking_metadata(self, other)
+}
+
+#[spec(prove, target=staking_pool::is_inactive, ignore_abort)]
+fun is_inactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_inactive(pool)
+}
+
+#[spec(prove, target=staking_pool::is_preactive, ignore_abort)]
+fun is_preactive_spec(
+    pool
+module specs::staking_pool_specs;
+
+use sui::tx_context::TxContext;
+
+use sui_system::staking_pool::PoolTokenExchangeRate;
+
+use sui_system::staking_pool::StakingPool;
+
+use sui_system::staking_pool::StakedSui;
+
+use sui_system::staking_pool;
+use sui_system::staking_pool::FungibleStakedSui;
+use sui::object::ID;
+
+#[spec_only]
+use prover::prover::{asserts, ensures};
+#[spec_only]
+use prover::ghost;
+#[spec_only]
+use specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};
+
+const MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id)]
+fun fungible_staked_sui_pool_id_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): ID {
+    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_value)]
+fun fungible_staked_sui_value_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): u64 {
+    staking_pool::fungible_staked_sui_value(fungible_staked_sui)
+}
+
+#[spec(prove, target=staking_pool::is_equal_staking_metadata, ignore_abort)]
+fun is_equal_staking_metadata_spec(
+    self: &StakedSui,
+    other: &StakedSui,
+): bool {
+    staking_pool
+POOL_ID:
+
+STAKE_ACTIVATION_EPOCH:
+public fun pool_id(staked_sui: &StakedSui): ID { staked_sui.pool_id }
+public fun staked_sui_amount(staked_sui: &StakedSui): u64 { staked_sui.principal.value() }
+public fun stake_activation_epoch(staked_sui: &StakedSui): u64 {
+--- struct StakedSui ---
+public struct StakedSui has key, store {
+    id: UID,
+    /// ID of the staking pool we are staking with.
+    pool_id: ID,
+    /// The epoch at which the stake becomes active.
+    stake_activation_epoch: u64,
+    /// The staked SUI tokens.
+    principal: Balance<SUI>,
+}
+
+/// An alternative to `StakedSui` that holds the pool token amount instead of 
+edited
+type: <class 'NoneType'>, value: None
+#1 prove-from-scratch/improve/attempt-1 (1 items) [running] 515s
+#2 prove-fungible_staked_sui_pool_id [error] 448s
+#3 prove-fungible_staked_sui_pool_id [done] 448s
+#4 sui-prover: specs [error] 443s
+#5 prove-fspid-v2 [error] 368s
+#6 prove-fspid-v2 [done] 368s
+#7 sui-prover: specs [error] 361s
+#8 sui-prover: specs [error] 357s
+#9 sui-prover: specs [error] 320s
+#10 sui-prover: specs [error] 297s
+#11 sui-prover: specs [error] 290s
+#12 sui-prover: specs [error] 283s
+#13 sui-prover: specs [error] 276s
+#14 prove-fungible_staked_sui_value [error] 166s
+#15 prove-fungible_staked_sui_value [done] 166s
+#16 sui-prover: specs [error] 163s
+#17 prove-fungible_staked_sui_value [error] 158s
+#18 prove-fungible_staked_sui_value [done] 158s
+#19 sui-prover: specs [error] 155s
+#20 sui-prover: specs [error] 154s
+#21 sui-prover: specs [error] 143s
+#22 sui-prover: specs [error] 132s
+#23 sui-prover: specs [error] 131s
+#24 sui-prover: specs [error] 129s
+#25 sui-prover: specs [error] 122s
+#26 function_local_accesses [done] 92s
+#27 prove-is_equal_staking_metadata [error] 7s
+#28 prove-is_equal_staking_metadata [running] 7s
+#29 sui-prover: specs [error] 2s
+status: error, exit_code: 1
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Check
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Assume
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck
+❌ staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck (0.1s)
+✅ staking_pool_specs::is_equal_staking_metadata_spec_Check
+✅ staking_pool_specs::is_equal_staking_metadata_spec_Assume
+error: cloud verification out of resources/timeout
+  ┌─ <unknown>:1:1
+  │
+1 │ <unknown>
+  │ ^
+
+exiting with verification errors
+status: error, exit_code: 1
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Check
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Assume
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck
+❌ staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck (0.1s)
+✅ staking_pool_specs::is_equal_staking_metadata_spec_Check
+✅ staking_pool_specs::is_equal_staking_metadata_spec_Assume
+error: cloud verification out of resources/timeout
+  ┌─ <unknown>:1:1
+  │
+1 │ <unknown>
+  │ ^
+
+exiting with verification errors
+pool_id getter spec present: True
+stake_activation_epoch getter spec present: True
+pool_id spec in specs/sources/staking_pool_specs.move
+stake_activation_epoch spec in specs/sources/staking_pool_specs.move
+taking_pool)
+}
+
+#[spec(prove, target=staking_pool::pool_id, ignore_abort, no_opaque)]
+fun pool_id_spec(
+    staked_sui: &StakedSui,
+): ID {
+    staking_pool::pool_id(staked_sui)
+}
+
+#[spec(prove, target=staking_pool::pool_token_amount, ignore_abort)]
+fun pool_token_amount_spec(
+    exchange_rate: &PoolTokenExchangeRate,
+): u64 {
+    staking_pool::po
+---
+ old_epoch);
+}
+
+#[spec(prove, target=staking_pool::stake_activation_epoch, ignore_abort, no_opaque)]
+fun stake_activation_epoch_spec(
+    staked_sui: &StakedSui,
+): u64 {
+    staking_pool::stake_activation_epoch(staked_sui)
+}
+
+#[spec(prove, target=staking_pool::staked_sui_amount, ignore_abort, no_opaque)]
+fun staked_sui_amount_spec(
+    staked_sui:
+---
+status: error, exit_code: 1
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Check
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Assume
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck
+❌ staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck (0.1s)
+✅ staking_pool_specs::is_equal_staking_metadata_spec_Assume
+✅ staking_pool_specs::is_equal_staking_metadata_spec_Check
+error: cloud verification out of resources/timeout
+  ┌─ <unknown>:1:1
+  │
+1 │ <unknown>
+  │ ^
+
+exiting with verification errors
+status: error, exit_code: 1
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Check
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Assume
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck
+❌ staking_pool_specs::is_equal_staking_metadata_spec_Check (0.1s)
+✅ staking_pool_specs::is_equal_staking_metadata_spec_Assume
+✅ staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck
+error: cloud verification out of resources/timeout
+  ┌─ <unknown>:1:1
+  │
+1 │ <unknown>
+  │ ^
+
+exiting with verification errors
+config exists: True
+url = "https://example.com"
+key = "dummy-key"
+concurrency = 10
+status: success, exit_code: 0
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Check
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Assume
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck
+✅ staking_pool_specs::is_equal_staking_metadata_spec_Assume
+✅ staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck (2s)
+✅ staking_pool_specs::is_equal_staking_metadata_spec_Check (2s)
+Verification successful
+status: success, exit_code: 0
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Check
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_Assume
+🔄 staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck
+✅ staking_pool_specs::is_equal_staking_metadata_spec_SpecNoAbortCheck
+✅ staking_pool_specs::is_equal_staking_metadata_spec_Assume
+✅ staking_pool_specs::is_equal_staking_metadata_spec_Check
+Verification successful
+i)
+}
+
+// @VERIFY(⚙️/✅)
+#[spec(prove, target=staking_pool::is_equal_staking_metadata)]
+fun is_equal_staking_metadata_spec(
+    self: &StakedSui,
+    other: &StakedSui,
+): bool {
+    let result = staking_pool::is_equal_staking_metadata(self, other);
+    ensures(result == (
+        (staking_pool::pool_id(self) == staking_pool::pool_id(other)) &&
+        (staking_pool::stake_activation_epoch(self) == staking_pool::stake_activation_epoch(other))
+    ));
+    result
+}
+
+#[spec(prove, target=staking_pool::is_inact
