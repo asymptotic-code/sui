@@ -12798,3 +12798,10 @@ final_result(md)
 | cost | $1.0732 |
 | tokens | 167563 in / 2296 out |
 | cache | 128508 read / 18201 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::split_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/split_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/split_spec/review.meta.yaml
