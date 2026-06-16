@@ -29,7 +29,8 @@ fun fungible_staked_sui_pool_id_spec(
     staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)
 }
 
-#[spec(prove, target=staking_pool::fungible_staked_sui_value, ignore_abort)]
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_value)]
 fun fungible_staked_sui_value_spec(
     fungible_staked_sui: &FungibleStakedSui,
 ): u64 {

@@ -1,0 +1,19 @@
+function: staking_pool_specs::fungible_staked_sui_value_spec
+complexity: low
+summary: Returns the pool token amount held by a FungibleStakedSui object by reading
+  its `value` field directly. Pure accessor with no state mutation and no callees.
+role: Read-only getter for the pool token balance of a FungibleStakedSui position.
+  Used as the observable quantity for split/join/redemption operations on FungibleStakedSui
+  — callers rely on this value to reason about token balances before and after split_fungible_staked_sui,
+  join_fungible_staked_sui, and redeem_fungible_staked_sui.
+aborts: []
+requires: []
+ensures:
+- condition: result == fungible_staked_sui.value
+  reason: The function returns the `value` field of the input struct exactly, without
+    transformation.
+observations:
+- The `value` field represents pool tokens, not SUI. The corresponding SUI amount
+  depends on the current pool exchange rate and can only be computed by redeem_fungible_staked_sui.
+- The function takes an immutable reference, so the `value` field is guaranteed unchanged
+  after the call.

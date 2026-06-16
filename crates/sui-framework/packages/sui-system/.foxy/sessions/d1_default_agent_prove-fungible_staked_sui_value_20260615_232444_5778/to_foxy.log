@@ -1,0 +1,14 @@
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_Check
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_Assume
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_SpecNoAbortCheck
+❌ staking_pool_specs::fungible_staked_sui_value_spec_Check (0.1s)
+✅ staking_pool_specs::fungible_staked_sui_value_spec_Assume
+✅ staking_pool_specs::fungible_staked_sui_value_spec_SpecNoAbortCheck
+error: cloud verification out of resources/timeout
+  ┌─ <unknown>:1:1
+  │
+1 │ <unknown>
+  │ ^
+
+exiting with verification errors
+exit_code: 1, status: error

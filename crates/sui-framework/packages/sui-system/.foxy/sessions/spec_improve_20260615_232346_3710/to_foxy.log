@@ -1,0 +1,176 @@
+project=/Users/cos/asymptotic/agent/clients/mysten/sui
+spec source:
+#[spec(prove, target=staking_pool::fungible_staked_sui_value, ignore_abort)]
+fun fungible_staked_sui_value_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): u64 {
+    staking_pool::fungible_staked_sui_value(fungible_staked_sui)
+}
+target:
+{'qualified_name': 'staking_pool::fungible_staked_sui_value', 'module': 'staking_pool', 'function_name': 'fungible_staked_sui_value', 'file_path': '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/sources/staking_pool.move', 'line_start': 511, 'line_end': 513, 'visibility': 'public', 'is_entry': False, 'function_type': 'source', 'attributes': [], 'source': 'public fun fungible_staked_sui_value(fungible_staked_sui: &FungibleStakedSui): u64 {\n    fungible_staked_sui.value\n}'}
+callees: []
+file path: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/fungible_staked_sui_value_spec/spec.source.move
+specs/sources/staking_pool_specs.move:33:fun fungible_staked_sui_value_spec(
+['specs/sources/staking_pool_specs.move']
+#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id)]
+fun fungible_staked_sui_pool_id_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): ID {
+    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)
+}
+
+#[spec(prove, target=staking_pool::fungible_staked_sui_value, ignore_abort)]
+fun fungible_staked_sui_value_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): u64 {
+    staking_pool::fungible_staked_sui_value(fungible_staked_sui)
+}
+
+#[spec(prove, target=staking_pool::is_equal_staking_metadata, ignore_abort)]
+fun is_equal_staking_metadata_spec(
+    self: &StakedSui,
+    other: &StakedSui,
+): bool {
+    staking_pool::is_equal_staking_metadata(self, other)
+}
+module specs::staking_pool_specs;
+
+use sui::tx_context::TxContext;
+
+use sui_system::staking_pool::PoolTokenExchangeRate;
+
+use sui_system::staking_pool::StakingPool;
+
+use sui_system::staking_pool::StakedSui;
+
+use sui_system::staking_pool;
+use sui_system::staking_pool::FungibleStakedSui;
+use sui::object::ID;
+
+#[spec_only]
+use prover::prover::{asserts, ensures};
+#[spec_only]
+use prover::ghost;
+#[spec_only]
+use specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};
+
+const MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id)]
+fun fungible_staked_sui_pool_id_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): ID {
+    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)
+}
+
+#[spec(prove, target=staking_pool::fungible_staked_sui_value, ignore_abort)]
+fun fungible_staked_sui_value_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): u64 {
+    staking_pool::fungible_staked_sui_value(fungible_staked_sui)
+}
+
+#[spec(prove, target=staking_pool::is_equal_staking_metadata, ignore_abort)]
+fun is_equal_staking_metadata_spec(
+    self: &StakedSui,
+    other: &StakedSui,
+): bool {
+    staking_pool::is_equal_staking_metadata(self, other)
+}
+
+#[spec(prove, target=staking_pool::is_inactive, ignore_abort)]
+fun is_inactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_inactive(pool)
+}
+
+#[spec(prove, target=staking_pool::is_preactive, ignore_abort)]
+fun is_preactive_spec(
+    pool: &Sta
+edited: removed ignore_abort, added @VERIFY annotation
+['/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system', '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs']
+<class 'NoneType'>
+None
+status=error exit_code=1
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_Check
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_Assume
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_SpecNoAbortCheck
+❌ staking_pool_specs::fungible_staked_sui_value_spec_Assume (0.1s)
+✅ staking_pool_specs::fungible_staked_sui_value_spec_SpecNoAbortCheck
+✅ staking_pool_specs::fungible_staked_sui_value_spec_Check
+error: cloud verification out of resources/timeout
+  ┌─ <unknown>:1:1
+  │
+1 │ <unknown>
+  │ ^
+
+exiting with verification errors
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_Check
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_Assume
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_SpecNoAbortCheck
+❌ staking_pool_specs::fungible_staked_sui_value_spec_Assume (0.1s)
+✅ staking_pool_specs::fungible_staked_sui_value_spec_SpecNoAbortCheck
+✅ staking_pool_specs::fungible_staked_sui_value_spec_Check
+error: cloud verification out of resources/timeout
+  ┌─ <unknown>:1:1
+  │
+1 │ <unknown>
+  │ ^
+
+exiting with verification errors
+status=error exit_code=1
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_Check
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_Assume
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_SpecNoAbortCheck
+❌ staking_pool_specs::fungible_staked_sui_value_spec_Check (0.1s)
+✅ staking_pool_specs::fungible_staked_sui_value_spec_SpecNoAbortCheck
+✅ staking_pool_specs::fungible_staked_sui_value_spec_Assume
+error: cloud verification out of resources/timeout
+  ┌─ <unknown>:1:1
+  │
+1 │ <unknown>
+  │ ^
+
+exiting with verification errors
+attempt 0: exit=1 failed=True cloud_err=True
+attempt 1: exit=1 failed=True cloud_err=True
+attempt 2: exit=1 failed=True cloud_err=True
+clean passes: 0
+status=error exit_code=1
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_Check
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_Assume
+🔄 staking_pool_specs::fungible_staked_sui_value_spec_SpecNoAbortCheck
+❌ staking_pool_specs::fungible_staked_sui_value_spec_Assume (0.1s)
+✅ staking_pool_specs::fungible_staked_sui_value_spec_Check
+✅ staking_pool_specs::fungible_staked_sui_value_spec_SpecNoAbortCheck
+error: cloud verification out of resources/timeout
+  ┌─ <unknown>:1:1
+  │
+1 │ <unknown>
+  │ ^
+
+exiting with verification errors
+cloud config exists: True
+url = "https://example.com"
+key = "dummy-key"
+concurrency = 10
+
+const MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id)]
+fun fungible_staked_sui_pool_id_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): ID {
+    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_value)]
+fun fungible_staked_sui_value_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): u64 {
+    staking_pool::fungible_staked_sui_value(fungible_staked_sui)
+}
