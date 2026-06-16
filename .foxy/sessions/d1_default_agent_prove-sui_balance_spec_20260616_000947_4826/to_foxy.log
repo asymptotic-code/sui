@@ -1,0 +1,14 @@
+[0m[1m[38;5;9merror[0m[1m: Underlying func is calling few times[0m
+    [0m[34m┌─[0m ./sources/staking_pool_specs.move:226:1
+    [0m[34m│[0m  
+[0m[34m226[0m [0m[34m│[0m [0m[31m╭[0m [0m[31mfun sui_balance_spec([0m
+[0m[34m227[0m [0m[34m│[0m [0m[31m│[0m [0m[31m    pool: &StakingPool,[0m
+[0m[34m228[0m [0m[34m│[0m [0m[31m│[0m [0m[31m): u64 {[0m
+[0m[34m229[0m [0m[34m│[0m [0m[31m│[0m [0m[31m    let result = staking_pool::sui_balance(pool);[0m
+[0m[34m230[0m [0m[34m│[0m [0m[31m│[0m [0m[31m    ensures(result == staking_pool::sui_balance(pool));[0m
+[0m[34m231[0m [0m[34m│[0m [0m[31m│[0m [0m[31m    result[0m
+[0m[34m232[0m [0m[34m│[0m [0m[31m│[0m [0m[31m}[0m
+    [0m[34m│[0m [0m[31m╰[0m[0m[31m─^[0m
+
+exiting with bytecode transformation errors
+exit_code=1, status=error

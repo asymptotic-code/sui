@@ -1,0 +1,22 @@
+function: staking_pool_specs::sui_balance_spec
+complexity: low
+summary: Pure getter returning the sui_balance field of a StakingPool; no mutation,
+  no arithmetic, no aborts
+role: Read-only accessor used to observe the total SUI held by a staking pool (principal
+  + rewards, updated at epoch boundaries). Called transitively through staking_pool::sui_balance
+  wherever pool accounting must be inspected externally.
+aborts: []
+requires: []
+ensures:
+- condition: result == pool.sui_balance
+  reason: Function body is a direct field projection; the return value equals the
+    sui_balance field of the input pool
+observations:
+- sui_balance accounts for both staked principal and accrued rewards deposited via
+  deposit_rewards; it is NOT the same as the rewards_pool balance alone.
+- The value is updated at epoch boundaries by process_pending_stake_withdraw (decrements
+  by pending_total_sui_withdraw) and deposit_rewards (increments by reward amount),
+  so callers observing this value mid-epoch see the epoch-start snapshot plus any
+  intra-epoch reward deposits.
+- No mutation occurs; the pool reference is immutable (&StakingPool), so this spec
+  is a pure frame-condition-free postcondition.

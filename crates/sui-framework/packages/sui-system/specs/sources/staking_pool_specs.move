@@ -221,7 +221,8 @@ fun sui_amount_spec(
     staking_pool::sui_amount(exchange_rate)
 }
 
-#[spec(prove, target=staking_pool::sui_balance, ignore_abort)]
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::sui_balance, no_opaque)]
 fun sui_balance_spec(
     pool: &StakingPool,
 ): u64 {
