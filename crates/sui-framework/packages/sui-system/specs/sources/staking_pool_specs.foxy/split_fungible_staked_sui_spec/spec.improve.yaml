@@ -1,0 +1,18 @@
+starting_state: stub
+final_state: asserts_only
+changes_made:
+- Added asserts(split_amount <= staking_pool::fungible_staked_sui_value(fungible_staked_sui))
+  covering the sole abort path (EInsufficientPoolTokenBalance assert!)
+- Removed ignore_abort from the spec attribute
+- Updated @VERIFY annotation to 🛡️/✅
+prover_runs: 1
+prover_final: pass
+issues:
+- 'final_state is asserts_only by design: the function returns a freshly-minted FungibleStakedSui
+  whose id comes from object::new(ctx). Asserting the new value (split_amount) and
+  decremented old value would require fresh-UID ghost tracking; abort coverage was
+  the requested scope. The only abort is the single split_amount <= value check, now
+  fully covered.'
+prover_phases: _Check, _Assume, _SpecNoAbortCheck all pass with --skip-spec-no-abort
+  absent (abort-freedom genuinely verified)
+duration_seconds: 30

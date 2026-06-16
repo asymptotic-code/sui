@@ -1,0 +1,30 @@
+function: staking_pool::split_fungible_staked_sui
+complexity: low
+summary: Splits a FungibleStakedSui object by deducting split_amount from the original's
+  value and constructing a new FungibleStakedSui object with that amount, both sharing
+  the same pool_id. The total pool-token supply represented by the pair is conserved.
+role: 'Utility function on FungibleStakedSui (aliased as FungibleStakedSui.split).
+  Enables partial transfer or partial redemption of fungible staked positions: a holder
+  can split their fungible stake into two independently owned objects without interacting
+  with the StakingPool itself. Called directly by users; not gated by any entry-point
+  in sui_system.'
+aborts:
+- condition: split_amount > fungible_staked_sui.value
+  reason: Requested split amount exceeds available pool-token balance (EInsufficientPoolTokenBalance
+    = 0)
+requires:
+- split_amount <= fungible_staked_sui.value  (enforced by the assert)
+ensures:
+- fungible_staked_sui.value == old(fungible_staked_sui.value) - split_amount
+- result.value == split_amount
+- result.pool_id == fungible_staked_sui.pool_id
+- old(fungible_staked_sui.value) == fungible_staked_sui.value + result.value  (conservation)
+- result has a fresh unique UID (object::new(ctx))
+observations:
+- No minimum split size is enforced for FungibleStakedSui (unlike StakedSui.split
+  which enforces MIN_STAKING_THRESHOLD on both halves). A split of 0 is permitted
+  by the assert guard (0 <= value is always true), producing an empty FungibleStakedSui.
+- The pool_id is copied by value, so both objects refer to the same staking pool —
+  pool membership is preserved across splits.
+- This function does not touch StakingPool state; no pending withdraw or supply accounting
+  is updated. The pool's FungibleStakedSuiData.total_supply is unchanged.

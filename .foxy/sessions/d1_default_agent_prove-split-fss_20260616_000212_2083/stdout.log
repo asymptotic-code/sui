@@ -1,0 +1,4 @@
+Running: sui-prover --functions split_fungible_staked_sui_spec --timeout 120 --force-timeout --cloud
+Working directory: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs
+
+[FOXY_EVENT] {"type": "inspect", "text": "\ud83d\udd04 staking_pool_specs::split_fungible_staked_sui_spec_Check\n\ud83d\udd04 staking_pool_specs::split_fungible_staked_sui_spec_Assume\n\ud83d\udd04 staking_pool_specs::split_fungible_staked_sui_spec_SpecNoAbortCheck\n\u2705 staking_pool_specs::split_fungible_staked_sui_spec_SpecNoAbortCheck\n\u2705 staking_pool_specs::split_fungible_staked_sui_spec_Assume\n\u2705 staking_pool_specs::split_fungible_staked_sui_spec_Check\nVerification successful"}

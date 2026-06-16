@@ -1,0 +1,7 @@
+🔄 staking_pool_specs::split_fungible_staked_sui_spec_Check
+🔄 staking_pool_specs::split_fungible_staked_sui_spec_Assume
+🔄 staking_pool_specs::split_fungible_staked_sui_spec_SpecNoAbortCheck
+✅ staking_pool_specs::split_fungible_staked_sui_spec_SpecNoAbortCheck
+✅ staking_pool_specs::split_fungible_staked_sui_spec_Assume
+✅ staking_pool_specs::split_fungible_staked_sui_spec_Check
+Verification successful

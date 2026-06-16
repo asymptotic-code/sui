@@ -167,12 +167,14 @@ fun split_spec(
     staking_pool::split(self, split_amount, ctx)
 }
 
-#[spec(prove, target=staking_pool::split_fungible_staked_sui, ignore_abort)]
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::split_fungible_staked_sui)]
 fun split_fungible_staked_sui_spec(
     fungible_staked_sui: &mut FungibleStakedSui,
     split_amount: u64,
     ctx: &mut TxContext,
 ): FungibleStakedSui {
+    asserts(split_amount <= staking_pool::fungible_staked_sui_value(fungible_staked_sui));
     staking_pool::split_fungible_staked_sui(fungible_staked_sui, split_amount, ctx)
 }
 

@@ -1,0 +1,207 @@
+project: /Users/cos/asymptotic/agent/clients/mysten/sui
+SPEC SOURCE:
+#[spec(prove, target=staking_pool::split_fungible_staked_sui, ignore_abort)]
+fun split_fungible_staked_sui_spec(
+    fungible_staked_sui: &mut FungibleStakedSui,
+    split_amount: u64,
+    ctx: &mut TxContext,
+): FungibleStakedSui {
+    staking_pool::split_fungible_staked_sui(fungible_staked_sui, split_amount, ctx)
+}
+TARGET:
+None
+SPEC FILE PATH: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy
+TARGET SOURCE:
+public fun split_fungible_staked_sui(
+    fungible_staked_sui: &mut FungibleStakedSui,
+    split_amount: u64,
+    ctx: &mut TxContext,
+): FungibleStakedSui {
+    assert!(split_amount <= fungible_staked_sui.value, EInsufficientPoolTokenBalance);
+
+    fungible_staked_sui.value = fungible_staked_sui.value - split_amount;
+
+    FungibleStakedSui {
+        id: object::new(ctx),
+        pool_id: fungible_staked_sui.pool_id,
+        value: split_amount,
+    }
+}
+TARGET FILE: crates/sui-framework/packages/sui-system/sources/staking_pool.move
+STRUCT:
+/// An alternative to `StakedSui` that holds the pool token amount instead of the SUI balance.
+/// StakedSui objects can be converted to FungibleStakedSuis after the initial warmup period.
+/// The advantage of this is that you can now merge multiple StakedSui objects from different
+/// activation epochs into a single FungibleStakedSui object.
+public struct FungibleStakedSui has key, store {
+    id: UID,
+    /// ID of the staking pool we are staking with.
+    pool_id: ID,
+    /// The pool token amount.
+    value: u64,
+}
+public fun fungible_staked_sui_value(
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:233:    fungible_staked_sui_value: u64,
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:250:    // 3. proportionally withdraw from both wrt the fungible_staked_sui_value.
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:252:        fungible_staked_sui_value,
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:258:        fungible_staked_sui_value,
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:264:    let expected_sui_amount = latest_exchange_rate.get_sui_amount(fungible_staked_sui_value);
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:509:public use fun fungible_staked_sui_value as FungibleStakedSui.value;
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:511:public fun fungible_staked_sui_value(fungible_staked_sui: &FungibleStakedSui): u64 {
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:789:    mut fungible_staked_sui_value_bps: u16,
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:797:    fungible_staked_sui_value_bps = fungible_staked_sui_value_bps % 10_000;
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:811:    let fungible_staked_sui_value = mul_div!(
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:813:        fungible_staked_sui_value_bps as u64,
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:826:        fungible_staked_sui_value,
+crates/sui-framework/packages/sui-system/sources/staking_pool.move:831:    let expected_out = exchange_rate.get_sui_amount(fungible_staked_sui_value);
+crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move:33:#[spec(prove, target=staking_pool::fungible_staked_sui_value, no_opaque)]
+crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move:34:fun fungible_staked_sui_value_spec(
+crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move:37:    staking_pool::fungible_staked_sui_value(fungible_staked_sui)
+crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move:96:        staking_pool::fungible_staked_sui_value(self).to_int()
+crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move:97:            .add(staking_pool::fungible_staked_sui_value(&other).to_int())
+module specs::staking_pool_specs;
+
+use sui::tx_context::TxContext;
+
+use sui_system::staking_pool::PoolTokenExchangeRate;
+
+use sui_system::staking_pool::StakingPool;
+
+use sui_system::staking_pool::StakedSui;
+
+use sui_system::staking_pool;
+use sui_system::staking_pool::FungibleStakedSui;
+use sui::object::ID;
+
+#[spec_only]
+use prover::prover::{asserts, ensures, requires};
+#[spec_only]
+use prover::ghost;
+#[spec_only]
+use specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};
+
+const MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id, no_opaque)]
+fun fungible_staked_sui_pool_id_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): ID {
+    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_value, no_opaque)]
+fun fungible_staked_sui_value_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): u64 {
+    staking_pool::fungible_staked_sui_value(fungible_staked_sui)
+}
+
+// @VERIFY(⚙️/✅)
+#[spec(prove, target=staking_pool::is_equal_staking_metadata)]
+fun is_equal_staking_metadata_spec(
+    self: &StakedSui,
+    other: &StakedSui,
+): bool {
+    let result = staking_pool::is_equal_staking_metadata(self, other);
+    ensures(result == (
+        (staking_pool::pool_id(self) == staking_pool::pool_id(other)) &&
+        (staking_pool::stake_activation_epoch(self) == staking_pool::stake_activation_epoch(other))
+    ));
+    result
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::join_staked_sui)]
+fun join_staked_sui_spec(
+    self: &mut StakedSui,
+    other: StakedSui,
+) {
+    asserts(staking_pool::is_equal_staking_metadata(self, &other));
+    asserts(
+        staking_pool::staked_sui_amount(self)
+            .to_int()
+            .add(staking_pool::staked_sui_amount(&other).to_int())
+            .lte(std::u64::max_value!().to_int()),
+    );
+    staking_pool::join_staked_sui(self, other)
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::is_inactive)]
+fun is_inactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_inactive(pool)
+}
+
+// @VERIFY(⚙️/✅)
+#[spec(prove, target=staking_pool::is_preactive)]
+fun is_preactive_spec(
+    pool: &StakingPool,
+): bool {
+    let result = staking_pool::is_preactive(pool);
+    ensures(result == staking_pool::activation_epoch(pool).is_none());
+    result
+}
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::join_fungible_staked_sui)]
+fun join_fungible_s
+nal_amount);
+    asserts(original_amount.to_int().sub(split_amount.to_int()).gte(MIN_STAKING_THRESHOLD.to_int()));
+    asserts(split_amount >= MIN_STAKING_THRESHOLD);
+    staking_pool::split(self, split_amount, ctx)
+}
+
+#[spec(prove, target=staking_pool::split_fungible_staked_sui, ignore_abort)]
+fun split_fungible_staked_sui_spec(
+    fungible_staked_sui: &mut FungibleStakedSui,
+    split_amount: u64,
+    ctx: &mut TxContext,
+): FungibleStakedSui {
+    staking_pool::split_fungible_staked_sui(fungible_staked_sui, split_amount, ctx)
+}
+
+// @VERIFY(⚙️/✅) cloud out-of-resources; verified locally via run_on
+#[spec(prove, target=staking_pool::split_staked_sui, run_on = b"local")]
+fun split_staked_su
+edited
+specs pkg: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs
+packages:
+/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system
+/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs
+None
+tasks:
+#1 prove-from-scratch/improve/attempt-1 (1 items) [running]
+#78 sui-prover: specs [error]
+#79 sui-prover: specs [error]
+#80 sui-prover: specs [error]
+#81 sui-prover: specs [done]
+#82 prove-final-check [done]
+#83 sui-prover: specs [done]
+#84 function_local_accesses [done]
+#85 prove-split_spec [error]
+#86 prove-split_spec [done]
+#87 sui-prover: specs [done]
+#88 prove-split-fss [error]
+#89 prove-split-fss [running]
+first user msg starts with FORK CONTEXT? checking prompt indirectly
+task 88 result: {'status': 'error', 'error': 'fork setup timed out'}
+status: success exit_code: 0
+🔄 staking_pool_specs::split_fungible_staked_sui_spec_Check
+🔄 staking_pool_specs::split_fungible_staked_sui_spec_Assume
+🔄 staking_pool_specs::split_fungible_staked_sui_spec_SpecNoAbortCheck
+✅ staking_pool_specs::split_fungible_staked_sui_spec_SpecNoAbortCheck
+✅ staking_pool_specs::split_fungible_staked_sui_spec_Check
+✅ staking_pool_specs::split_fungible_staked_sui_spec_Assume
+Verification successful
+::split(self, split_amount, ctx)
+}
+
+// @VERIFY(🛡️/🌀)
+#[spec(prove, target=staking_pool::split_fungible_staked_sui)]
+fun split_fungible_staked_sui_spec(
+    fungible_stake
+annotation updated to Done
