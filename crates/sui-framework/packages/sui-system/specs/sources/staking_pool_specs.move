@@ -52,6 +52,22 @@ fun is_equal_staking_metadata_spec(
 }
 
 // @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::join_staked_sui)]
+fun join_staked_sui_spec(
+    self: &mut StakedSui,
+    other: StakedSui,
+) {
+    asserts(staking_pool::is_equal_staking_metadata(self, &other));
+    asserts(
+        staking_pool::staked_sui_amount(self)
+            .to_int()
+            .add(staking_pool::staked_sui_amount(&other).to_int())
+            .lte(std::u64::max_value!().to_int()),
+    );
+    staking_pool::join_staked_sui(self, other)
+}
+
+// @VERIFY(🛡️/✅)
 #[spec(prove, target=staking_pool::is_inactive)]
 fun is_inactive_spec(
     pool: &StakingPool,
@@ -84,13 +100,7 @@ fun join_fungible_staked_sui_spec(
     staking_pool::join_fungible_staked_sui(self, other)
 }
 
-#[spec(prove, target=staking_pool::join_staked_sui, ignore_abort)]
-fun join_staked_sui_spec(
-    self: &mut StakedSui,
-    other: StakedSui,
-) {
-    staking_pool::join_staked_sui(self, other)
-}
+
 
 #[spec(prove, target=staking_pool::pending_stake_amount, ignore_abort)]
 fun pending_stake_amount_spec(

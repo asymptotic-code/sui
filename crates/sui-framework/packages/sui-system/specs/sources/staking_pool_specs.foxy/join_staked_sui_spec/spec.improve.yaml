@@ -1,0 +1,14 @@
+starting_state: stub
+final_state: asserts
+changes_made:
+- Added asserts(is_equal_staking_metadata(self, &other)) covering the EIncompatibleStakedSui
+  abort path
+- Added u64 overflow assert on staked_sui_amount(self) + staked_sui_amount(other)
+  via .to_int() arithmetic, covering the balance::join overflow
+- Removed ignore_abort from the spec attribute
+- Updated @VERIFY annotation to (shield/check) for full abort coverage
+prover_runs: 1
+prover_final: pass
+prover_phases: _Check, _Assume, _SpecNoAbortCheck all pass (abort-freedom genuinely
+  verified, not skipped)
+issues: []

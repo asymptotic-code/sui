@@ -1,0 +1,39 @@
+function: staking_pool_specs::join_staked_sui_spec
+complexity: low
+summary: Merges two StakedSui objects by consuming `other` and adding its principal
+  balance to `self`. The `other` object's UID is deleted and its principal Balance<SUI>
+  is joined into `self.principal`. Aborts if the two objects have mismatched staking
+  metadata (different pool_id or stake_activation_epoch).
+role: User-facing entry point (exposed as `StakedSui.join()`) that allows a holder
+  to consolidate two staking receipts from the same pool and same activation epoch
+  into one. Directly reachable only through `staking_pool::join_staked_sui`; no protocol
+  state is modified — only the caller's own object is mutated.
+aborts:
+- condition: '!is_equal_staking_metadata(self, &other)'
+  reason: The two StakedSui objects differ in pool_id or stake_activation_epoch (EIncompatibleStakedSui
+    = 12). is_equal_staking_metadata checks both fields for equality.
+requires:
+- self.pool_id == other.pool_id
+- self.stake_activation_epoch == other.stake_activation_epoch
+- self.principal.value() > 0 (implicitly guaranteed by MIN_STAKING_THRESHOLD invariant
+  at creation)
+- other.principal.value() > 0 (implicitly guaranteed by MIN_STAKING_THRESHOLD invariant
+  at creation)
+ensures:
+- self.pool_id == old(self.pool_id)  (unchanged)
+- self.stake_activation_epoch == old(self.stake_activation_epoch)  (unchanged)
+- self.principal.value() == old(self.principal.value()) + old(other.principal.value())
+- other is destroyed (its UID is deleted, no live object remains)
+- 'self.principal.value() >= MIN_STAKING_THRESHOLD  (conservation: both addends are
+  >= threshold, sum is strictly larger)'
+observations:
+- Balance::join is total (no abort) for u64 addition; an overflow of principal would
+  require the combined principal to exceed u64::MAX (~1.8e19 MIST ≈ 1.8e10 SUI), which
+  is beyond the total SUI supply, so this path is practically unreachable. The prover
+  may need an assume or a bound to close this automatically.
+- 'The minimum-stake invariant is preserved post-join: since both inputs satisfy principal
+  >= MIN_STAKING_THRESHOLD, the result satisfies it trivially. No split-like check
+  is needed here, unlike in staking_pool::split.'
+- No StakingPool state is touched; pending_stake, pool_token_balance, and exchange_rates
+  are all unaffected. The join is purely a client-side object merge with no accounting
+  impact until a future withdraw is requested.
