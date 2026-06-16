@@ -1,0 +1,43 @@
+function: staking_pool_specs::split_spec
+complexity: low
+summary: 'Splits a StakedSui object into two parts: a new StakedSui with principal
+  equal to split_amount, and the original object retaining the remaining principal.
+  All metadata (pool_id, stake_activation_epoch) is copied to the new object unchanged.
+  Both resulting parts must satisfy the minimum staking threshold of 1 SUI (1_000_000_000
+  MIST).'
+role: User-facing utility on StakedSui objects, callable directly via staking_pool::split
+  or through split_staked_sui (public entry). Enables holders to partition a staked
+  position without affecting pool accounting — no interaction with the StakingPool
+  state itself, purely a self-custody object operation.
+aborts:
+- condition: split_amount > self.principal.value()
+  reason: Cannot split more than the available principal (EInsufficientSuiTokenBalance
+    = 3)
+- condition: self.principal.value() - split_amount < MIN_STAKING_THRESHOLD
+  reason: Remaining principal would drop below 1 SUI threshold (EStakedSuiBelowThreshold
+    = 18)
+- condition: split_amount < MIN_STAKING_THRESHOLD
+  reason: Split-off amount would be below 1 SUI threshold (EStakedSuiBelowThreshold
+    = 18)
+requires:
+- split_amount >= MIN_STAKING_THRESHOLD (1_000_000_000)
+- self.principal.value() - split_amount >= MIN_STAKING_THRESHOLD (1_000_000_000)
+- split_amount <= self.principal.value()
+ensures:
+- result.principal.value() == split_amount
+- self.principal.value() == old(self.principal.value()) - split_amount
+- result.pool_id == old(self.pool_id)
+- result.stake_activation_epoch == old(self.stake_activation_epoch)
+- self.pool_id == old(self.pool_id)
+- self.stake_activation_epoch == old(self.stake_activation_epoch)
+- self.principal.value() + result.principal.value() == old(self.principal.value())
+observations:
+- No StakingPool state is touched; this is a pure object-split with no accounting
+  side-effects.
+- Both the minimum threshold checks use the same error code (EStakedSuiBelowThreshold),
+  so distinguishing which of the two postcondition violations triggered requires inspecting
+  the amounts.
+- The subtraction remaining_amount = original_amount - split_amount is safe (no underflow)
+  because the first assert guarantees split_amount <= original_amount before the subtraction.
+- 'Principal conservation holds: old principal == new self.principal + result.principal,
+  which is the key invariant to verify.'

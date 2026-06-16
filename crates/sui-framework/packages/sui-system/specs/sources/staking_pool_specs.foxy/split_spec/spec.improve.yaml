@@ -1,0 +1,10 @@
+executed: true
+stdout: /var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_4pkdrl9o.txt
+to_foxy_logs: "// @VERIFY(\U0001F6E1️/✅)\n#[spec(prove, target=staking_pool::split,\
+  \ no_opaque)]\nfun split_spec(\n    self: &mut StakedSui,\n    split_amount: u64,\n\
+  \    ctx: &mut TxContext,\n): StakedSui {\n    let original_amount = staking_pool::staked_sui_amount(self);\n\
+  \    asserts(split_amount <= original_amount);\n    asserts(original_amount.to_int().sub(split_amount.to_int()).gte(MIN_STAKING_THRESHOLD.to_int()));\n\
+  \    asserts(split_amount >= MIN_STAKING_THRESHOLD);\n    staking_pool::split(self,\
+  \ split_amount, ctx)\n}\n\n#[spec(prove, target=staking_pool::split_fungible_staked_sui,\
+  \ ignore_abort)]\nfun split_fungible_staked_sui_spec(\n    fungible_staked_sui:\
+  \ &mut FungibleStakedSui,\n"

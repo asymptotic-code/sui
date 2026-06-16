@@ -153,12 +153,17 @@ fun pool_token_exchange_rate_at_epoch_spec(
     staking_pool::pool_token_exchange_rate_at_epoch(pool, epoch)
 }
 
-#[spec(prove, target=staking_pool::split, ignore_abort, no_opaque)]
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::split, no_opaque)]
 fun split_spec(
     self: &mut StakedSui,
     split_amount: u64,
     ctx: &mut TxContext,
 ): StakedSui {
+    let original_amount = staking_pool::staked_sui_amount(self);
+    asserts(split_amount <= original_amount);
+    asserts(original_amount.to_int().sub(split_amount.to_int()).gte(MIN_STAKING_THRESHOLD.to_int()));
+    asserts(split_amount >= MIN_STAKING_THRESHOLD);
     staking_pool::split(self, split_amount, ctx)
 }
 

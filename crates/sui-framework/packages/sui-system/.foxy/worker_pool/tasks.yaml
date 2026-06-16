@@ -1,5 +1,5 @@
 meta:
-  generated_at: '2026-06-16T06:55:54.250828+00:00'
+  generated_at: '2026-06-16T06:58:55.276840+00:00'
   schema_version: 1
   default_branch: specs
   project_root: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system
@@ -135,6 +135,16 @@ tasks:
   heartbeat_at: '2026-06-16T06:55:54.155294+00:00'
   result_kind: running
 - id: 14
+  step: babysitter/tick
+  item: foxy.skills.prove_from_scratch.api::pipeline
+  priority: 100.0
+  status: done
+  attempts: 0
+  started_at: '2026-06-16T06:58:54.912151+00:00'
+  finished_at: '2026-06-16T06:58:55.269042+00:00'
+  heartbeat_at: '2026-06-16T06:58:55.199990+00:00'
+  result_kind: running
+- id: 15
   step: babysitter/tick
   item: foxy.skills.prove_from_scratch.api::pipeline
   priority: 100.0
