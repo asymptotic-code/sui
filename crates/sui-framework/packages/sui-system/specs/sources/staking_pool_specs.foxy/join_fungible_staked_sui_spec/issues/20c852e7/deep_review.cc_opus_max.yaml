@@ -1,0 +1,24 @@
+true_issue: true
+issue_in: spec
+severity: medium
+confidence: high
+reasoning: 'This is a SPEC gap (a), not a code defect (b). The implementation provably
+  preserves pool_id: `join_fungible_staked_sui` destructures `other`, runs `assert!(self.pool_id
+  == pool_id, EWrongPool)` (a READ of self.pool_id), deletes other''s UID, and performs
+  the single write `self.value = self.value + value`. self.pool_id and self.id are
+  never assigned, so no implementation behavior can change pool_id — there is no system
+  bug to expose, which is what rules out (b). The issue is nonetheless real: the spec
+  has ZERO ensures, only the two abort asserts (pool-id mismatch and the u64 overflow
+  guard). Because the spec is opaque (no `no_opaque`), every caller of join_fungible_staked_sui
+  currently gets NO guarantee about the post-state — not the pool_id frame condition
+  flagged here, and not even the primary value-conservation postcondition `self.value
+  == old(self.value) + old(other.value)`. The flagged pool_id frame ensures is one
+  piece of that broader behavioral gap. Evidence it is cleanly fixable as a spec change:
+  the sibling `split_staked_sui_spec` in the same file already demonstrates the exact
+  pattern (captures `old_pool_id`, then `ensures(pool_id(stake) == old_pool_id)`),
+  and the getter `fungible_staked_sui_pool_id` has a `no_opaque` spec so its $pure
+  is inline and the frame condition is directly expressible. Severity is medium rather
+  than low because the opaque spec is behaviorally empty (the missing value-conservation
+  ensures is the more important sibling gap), so the fix stage should add both the
+  value ensures and the pool_id frame ensures; confidence is high on both the (a)
+  classification and the code''s correctness.'

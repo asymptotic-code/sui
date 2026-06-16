@@ -1,0 +1,27 @@
+true_issue: true
+issue_in: spec
+severity: low
+confidence: high
+reasoning: 'This is unambiguously a (a) SPEC gap, not a (b) code defect. The target
+  `public fun sui_balance(pool: &StakingPool): u64 { pool.sui_balance }` (staking_pool.move:469)
+  is a one-line projection of the plain `sui_balance: u64` field (struct field, line
+  48): no arithmetic, no branching, no mutation, no abort path. There is no plausible
+  implementation defect in returning a field unchanged, so erring toward (b) is not
+  warranted here. The spec source confirms the review: `sui_balance_spec` carries
+  `prove`+`no_opaque` but has no `ensures` and no `asserts`, so it only proves abort-freedom
+  — vacuously true for a field read — while asserting nothing about the return value.
+  The writeup explicitly names `result == pool.sui_balance` as the sole substantive
+  postcondition, and it is absent; hence the issue is real (true_issue) and lives
+  in the spec. If the spec is tightened the prover discharges it trivially and the
+  system remains exactly as-is — nothing about the fix could expose a code bug, which
+  is the test that pins issue_in to ''spec''. Severity downgraded from the review''s
+  ''medium'' to ''low'': because the spec is `no_opaque`, every caller of `sui_balance`
+  inlines the real body (`pool.sui_balance`) rather than relying on this spec''s postcondition,
+  so the missing `ensures` propagates no weakness downstream and lets no real bug
+  slip through anywhere. The only harm is that this one spec is marked ✅ yet verifies
+  nothing of substance — a completeness gap worth closing, but near-zero risk. Confidence
+  is high: the absent ensures, the writeup''s stated postcondition, and the trivial
+  field-projection target are all directly visible and mutually consistent. (Fix-stage
+  note, not triage: to add genuine value the ensures should compare against an independent
+  `#[test_only, ext(pure)]` field accessor; `ensures(result == staking_pool::sui_balance(pool))`
+  would be tautological since `result` is that call.)'

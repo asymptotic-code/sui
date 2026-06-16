@@ -1,0 +1,27 @@
+true_issue: true
+issue_in: spec
+severity: low
+confidence: high
+reasoning: 'This is (a) a SPEC gap, not (b) a code defect — verified directly against
+  source. The preactive branch (staking_pool.move:596-598) returns initial_exchange_rate(),
+  which is the literal constant PoolTokenExchangeRate { sui_amount: 0, pool_token_amount:
+  0 } (lines 668-670). So the suggested postcondition (sui_amount(&result)==0 && pool_token_amount(&result)==0)
+  is correct and would verify immediately. The current spec has NO ensures at all
+  — only a requires and the target call — so it genuinely captures none of the writeup''s
+  documented postconditions; the preactive one is truly missing. This makes it a real
+  issue. It is definitively (a): tightening the spec with this ensures exposes no
+  system bug because the branch is a constant return with no arithmetic, no table
+  lookup, and no edge case — there is no defect surface, so (b) is ruled out. Severity
+  is low rather than the original medium: the flagged branch is the trivial constant-return
+  path, and a preactive pool has no stakes (per get_sui_amount/get_token_amount, lines
+  648-666, a 0/0 rate means ''no stakes''), so its accounting impact is nil and it
+  cannot plausibly regress. The consequential, still-missing postcondition is the
+  backward-scan result (writeup ensures #3: result == pool.exchange_rates[e] at the
+  resolved epoch e), where reward-accounting correctness actually lives — but this
+  issue does not address that. Fix-stage note (not a reason to reject): is_preactive_at_epoch
+  is a private `fun` (line 643), so the literal `pool.is_preactive_at_epoch(epoch)`
+  in the suggested snippet won''t compile from the separate staking_pool_specs module;
+  the guard must be re-expressed via the public is_preactive() and public(package)
+  activation_epoch() as `pool.is_preactive() || (*staking_pool::activation_epoch(pool).borrow()
+  > epoch)` (short-circuit keeps the borrow safe, matching the pattern already used
+  in the existing requires).'

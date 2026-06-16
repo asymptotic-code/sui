@@ -1,0 +1,30 @@
+true_issue: true
+issue_in: spec
+severity: high
+confidence: high
+reasoning: 'This is (a), a SPEC gap, not (b) a code defect. Evidence for the gap:
+  the full spec body of join_staked_sui_spec contains exactly two asserts and the
+  target call and ZERO ensures (verified by string count). It therefore proves only
+  abort behavior (metadata-mismatch abort via is_equal_staking_metadata, plus the
+  overflow assert) and verifies nothing about the merge result. The accessor staked_sui_amount(s)
+  is literally `s.principal.value()` (impl line 483), so the missing ensures `staked_sui_amount(self).to_int()
+  == old(self_amount).add(old(other_amount))` is precisely the principal-conservation
+  property — the central correctness contract of the function. The overflow assert
+  already materializes this exact Integer sum, so the fix is to capture the two old
+  amounts before the call and add one equality ensures; the original review is accurate.
+  Why this is NOT (b): the implementation (impl lines 578-585) is a textbook merge
+  — assert metadata equal, destructure `other` pulling out `principal` (`..` discards
+  the metadata fields), delete the UID, then `self.principal.join(principal)`. Balance::join
+  is total u64 addition whose only abort (overflow) is already guarded by the existing
+  assert; self.pool_id and self.stake_activation_epoch are never written so they are
+  trivially preserved. There is no path that drops, doubles, or mis-sums the principal,
+  so tightening the spec will not expose a code bug — the prover will pass once the
+  ensures is added. Corroborating the gap: the inverse operation split_staked_sui_spec
+  in the same file captures original_amount/old_pool_id/old_epoch and ensures all
+  three; join_staked_sui_spec should mirror that but omits every postcondition (including
+  the pool_id and stake_activation_epoch frame ensures, not just the principal sum).
+  Severity is high because the @VERIFY annotation marks this spec ✅/done while it
+  verifies none of the function''s actual behavior, giving false assurance on its
+  load-bearing property; confidence is high because the accessor mapping, the empty-ensures
+  fact, the sibling pattern, and the implementation correctness are all directly confirmed
+  from source.'

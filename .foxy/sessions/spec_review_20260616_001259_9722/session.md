@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-split-spec-review
+description: Review specification for split_staked_sui_spec function against verification plan and implementation.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:12:59.972343
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -4451,3 +4451,133 @@ Move overlapping packages to [vendor] in .foxy/project.toml to resolve the ambig
 
 ---
 
+## Assistant
+
+I have all the information I need from the prompt itself. The duplicate-key error is incidental; I can analyze the spec directly against the writeup, function source, and the full module provided. Let me complete the review.
+
+### Code `toolu_015Z7U1JBYNBpCzf9JcJv9CH`
+
+````python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::split_staked_sui_spec"
+
+analysis = """
+## Target
+
+`split_staked_sui(stake, split_amount, ctx)` is a thin entry wrapper:
+```move
+transfer::transfer(stake.split(split_amount, ctx), ctx.sender());
+```
+It calls `split` (which mutates `stake.principal` down by `split_amount` and produces a new `StakedSui` carrying `split_amount`, same `pool_id` and `stake_activation_epoch`), then transfers that new object to `ctx.sender()`.
+
+## Abort coverage
+
+The spec's three `asserts` exactly mirror the three `assert!` checks inside `split` (inverted):
+- `assert!(split_amount <= original_amount, EInsufficientSuiTokenBalance)` -> `asserts(split_amount <= original_amount)` ✓
+- `assert!(remaining_amount >= MIN_STAKING_THRESHOLD, EStakedSuiBelowThreshold)` -> `asserts(original_amount - split_amount >= MIN_STAKING_THRESHOLD)` ✓ (uses `.to_int().sub(...).gte(...)`, the correct underflow-safe form)
+- `assert!(split_amount >= MIN_STAKING_THRESHOLD, EStakedSuiBelowThreshold)` -> `asserts(split_amount >= MIN_STAKING_THRESHOLD)` ✓
+
+`object::new(ctx)` and the `transfer::transfer` do not introduce additional reachable abort conditions, so abort modeling is complete. The `_Assume` direction (these three asserts are *exactly* the non-abort condition) is sound because there are no other abort sites.
+
+## Ensures coverage — the original `stake` (mutated in place)
+
+All three writeup postconditions on the surviving `stake` are present and use exact equality:
+- `ensures(staked_sui_amount(stake) == original_amount - split_amount)` ✓ — principal correctly reduced
+- `ensures(pool_id(stake) == old_pool_id)` ✓ — pool unchanged
+- `ensures(stake_activation_epoch(stake) == old_epoch)` ✓ — activation epoch unchanged
+
+These fully verify that the in-place mutation only touches the principal and preserves the staking metadata.
+
+## Gap — the newly created / transferred StakedSui is entirely unverified
+
+This is the core weakness. The writeup explicitly lists three postconditions about the *new* `StakedSui` that is transferred to `ctx.sender()`:
+- new principal value == `split_amount`
+- new `pool_id` == old `stake.pool_id`
+- new `stake_activation_epoch` == old `stake.stake_activation_epoch`
+
+The spec verifies **none** of these. The spec declares two transfer-tracking ghosts:
+```move
+ghost::declare_global_mut<SpecTransferAddressExists, bool>();
+ghost::declare_global_mut<SpecTransferAddress, address>();
+```
+but then never reads them — there is no `ensures(*ghost::global<SpecTransferAddressExists, bool>())` and no `ensures(*ghost::global<SpecTransferAddress, address>() == ctx.sender())`. So even the destination of the transfer is not asserted.
+
+Because the new object is the entire *output* of this function (the whole point of the split-to-sender entry), leaving it unconstrained means a faulty implementation could:
+- transfer a new `StakedSui` with the wrong principal (e.g. `original_amount` instead of `split_amount`),
+- attach the wrong `pool_id` or `stake_activation_epoch`,
+- transfer it to the wrong address,
+
+and this spec would still pass. The conservation property (the two halves' principals sum to the original) is not captured at all — only the surviving half is checked.
+
+Verifying the new object requires capturing it before the `transfer::transfer` consumes it. Since `split_staked_sui` itself does the transfer, the standard approach is to verify the inner `split` (which returns the new object directly — and indeed `split_spec` exists separately) and use the transfer-address ghost machinery here. Given the ghosts are already declared, the minimal fix is to add the `ensures` reading them (existence + recipient == `ctx.sender()`); the new object's field values are most naturally pinned via the `split` callee spec being `include`d, or via ghost tags on the construction.
+
+## Note on run_on/local
+
+The `run_on = b"local"` attribute and the `@VERIFY` comment ("cloud out-of-resources") are configuration, not correctness concerns.
+""".strip()
+
+issues = [
+    {
+        "description": "The new StakedSui transferred to ctx.sender() is completely unverified. None of its three properties are ensured: principal.value() == split_amount, pool_id == original stake.pool_id, stake_activation_epoch == original stake.stake_activation_epoch. This is the function's entire output — a buggy split could give the new receipt the wrong principal, wrong pool, or wrong activation epoch and the spec would still pass. The conservation property (the two halves' principals sum to the original) is therefore also unverified.",
+        "severity": "high",
+        "confidence": "high",
+    },
+    {
+        "description": "The transfer destination is not verified. The spec declares SpecTransferAddressExists and SpecTransferAddress ghosts but never reads them in any ensures. There is no check that a transfer actually occurred or that the recipient equals ctx.sender(). The newly split StakedSui could be sent to the wrong address without detection. Add ensures(*ghost::global<SpecTransferAddressExists, bool>()) and ensures(*ghost::global<SpecTransferAddress, address>() == ctx.sender()).",
+        "severity": "high",
+        "confidence": "high",
+    },
+]
+
+strengths = [
+    "All three abort conditions of the inner split (EInsufficientSuiTokenBalance and both EStakedSuiBelowThreshold checks) are precisely mirrored as asserts, giving complete and sound abort modeling.",
+    "The underflow-prone remaining-principal check uses original_amount.to_int().sub(split_amount.to_int()).gte(...) — correct arbitrary-precision form rather than a subtraction that could underflow.",
+    "The surviving stake is verified with exact equality on all three relevant fields (reduced principal, unchanged pool_id, unchanged activation epoch), correctly bounding the in-place mutation.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict="has_gaps",
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+foxy_inspect("review built")
+
+````
+
+> 1627 in, 2386 out, 64254 cache read, 17976 cache create
+
+### Result `toolu_015Z7U1JBYNBpCzf9JcJv9CH`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::split_staked_sui_spec`\n\n**Verdict:** \u25b3 Has Gaps\n\n## Issues\n\n- \u25cf **high/high**: The new StakedSui transferred to ctx.sender() is completely unverified. None of its three properties are ensured: principal.value() == split_amount, pool_id == original stake.pool_id, stake_activation_epoch == original stake.stake_activation_epoch. This is the function's entire output \u2014 a buggy split could give the new receipt the wrong principal, wrong pool, or wrong activation epoch and the spec would still pass. The conservation property (the two halves' principals sum to the original) is therefore also unverified.\n- \u25cf **high/high**: The transfer destination is not verified. The spec declares SpecTransferAddressExists and SpecTransferAddress ghosts but never reads them in any ensures. There is no check that a transfer actually occurred or that the recipient equals ctx.sender(). The newly split StakedSui could be sent to the wrong address without detection. Add ensures(*ghost::global<SpecTransferAddressExists, bool>()) and ensures(*ghost::global<SpecTransferAddress, address>() == ctx.sender()).\n\n## Analysis\n\n## Target\n\n`split_staked_sui(stake, split_amount, ctx)` is a thin entry wrapper:\n```move\ntransfer::transfer(stake.split(split_amount, ctx), ctx.sender());\n```\nIt calls `split` (which mutates `stake.principal` down by `split_amount` and produces a new `StakedSui` carrying `split_amount`, same `pool_id` and `stake_activation_epoch`), then transfers that new object to `ctx.sender()`.\n\n## Abort coverage\n\nThe spec's three `asserts` exactly mirror the three `assert!` checks inside `split` (inverted):\n- `assert!(split_amount <= original_amount, EInsufficientSuiTokenBalance)` -> `asserts(split_amount <= original_amount)` \u2713\n- `assert!(remaining_amount >= MIN_STAKING_THRESHOLD, EStakedSuiBelowThreshold)` -> `asserts(original_amount - split_amount >= MIN_STAKING_THRESHOLD)` \u2713 (uses `.to_int().sub(...).gte(...)`, the correct underflow-safe form)\n- `assert!(split_amount >= MIN_STAKING_THRESHOLD, EStakedSuiBelowThreshold)` -> `asserts(split_amount >= MIN_STAKING_THRESHOLD)` \u2713\n\n`object::new(ctx)` and the `transfer::transfer` do not introduce additional reachable abort conditions, so abort modeling is complete. The `_Assume` direction (these three asserts are *exactly* the non-abort condition) is sound because there are no other abort sites.\n\n## Ensures coverage \u2014 the original `stake` (mutated in place)\n\nAll three writeup postconditions on the surviving `stake` are present and use exact equality:\n- `ensures(staked_sui_amount(stake) == original_amount - split_amount)` \u2713 \u2014 principal correctly reduced\n- `ensures(pool_id(stake) == old_pool_id)` \u2713 \u2014 pool unchanged\n- `ensures(stake_activation_epoch(stake) == old_epoch)` \u2713 \u2014 activation epoch unchanged\n\nThese fully verify that the in-place mutation only touches the principal and preserves the staking metadata.\n\n## Gap \u2014 the newly created / transferred StakedSui is entirely unverified\n\nThis is the core weakness. The writeup explicitly lists three postconditions about the *new* `StakedSui` that is transferred to `ctx.sender()`:\n- new principal value == `split_amount`\n- new `pool_id` == old `stake.pool_id`\n- new `stake_activation_epoch` == old `stake.stake_activation_epoch`\n\nThe spec verifies **none** of these. The spec declares two transfer-tracking ghosts:\n```move\nghost::declare_global_mut<SpecTransferAddressExists, bool>();\nghost::declare_global_mut<SpecTransferAddress, address>();\n```\nbut then never reads them \u2014 there is no `ensures(*ghost::global<SpecTransferAddressExists, bool>())` and no `ensures(*ghost::global<SpecTransferAddress, address>() == ctx.sender())`. So even the destination of the transfer is not asserted.\n\nBecause the new object is the entire *output* of this function (the whole point of the split-to-sender entry), leaving it unconstrained means a faulty implementation could:\n- transfer a new `StakedSui` with the wrong principal (e.g. `original_amount` instead of `split_amount`),\n- attach the wrong `pool_id` or `stake_activation_epoch`,\n- transfer it to the wrong address,\n\nand this spec would still pass. The conservation property (the two halves' principals sum to the original) is not captured at all \u2014 only the surviving half is checked.\n\nVerifying the new object requires capturing it before the `transfer::transfer` consumes it. Since `split_staked_sui` itself does the transfer, the standard approach is to verify the inner `split` (which returns the new object directly \u2014 and indeed `split_spec` exists separately) and use the transfer-address ghost machinery here. Given the ghosts are already declared, the minimal fix is to add the `ensures` reading them (existence + recipient == `ctx.sender()`); the new object's field values are most naturally pinned via the `split` callee spec being `include`d, or via ghost tags on the construction.\n\n## Note on run_on/local\n\nThe `run_on = b\"local\"` attribute and the `@VERIFY` comment (\"cloud out-of-resources\") are configuration, not correctness concerns.\n\n## Strengths\n\n- All three abort conditions of the inner split (EInsufficientSuiTokenBalance and both EStakedSuiBelowThreshold checks) are precisely mirrored as asserts, giving complete and sound abort modeling.\n- The underflow-prone remaining-principal check uses original_amount.to_int().sub(split_amount.to_int()).gte(...) \u2014 correct arbitrary-precision form rather than a subtraction that could underflow.\n- The surviving stake is verified with exact equality on all three relevant fields (reduced principal, unchanged pool_id, unchanged activation epoch), correctly bounding the in-place mutation.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | 30a84f73cb061e0c2407ddbbe4e54a80e5b44d1ec12b5cd1d36c5764f702b7a0 |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 34.50s |
+| ended_at | 2026-06-16T00:13:34.471949 |
+| cost | $0.3382 |
+| tokens | 19408 in / 2581 out |
+| cache | 128508 read / 17976 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::split_staked_sui_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/split_staked_sui_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/split_staked_sui_spec/review.meta.yaml

@@ -1,0 +1,32 @@
+true_issue: true
+issue_in: spec
+severity: high
+confidence: high
+reasoning: 'True positive, and it lives in the SPEC (case a). Confirmed on disk that
+  pool_token_exchange_rate_at_epoch_spec contains zero `ensures` -- its body is just
+  a `requires(is_preactive() || exchange_rates.contains(activation_epoch))` followed
+  by the bare target call. The file''s 5 `ensures(` all belong to other specs (e.g.
+  split_spec). What the spec *does* prove is only abort-freedom: there is a companion
+  loop invariant `pool_token_exchange_rate_at_epoch_loop_inv` (epoch >= activation_epoch
+  && contains(activation_epoch)) that, with the matching requires, discharges the
+  epoch-1 underflow, the guarded table index, and the Option::borrow. The @VERIFY(🛡️/✅)
+  marker is the abort-modeling stage, not the semantics stage. So the function''s
+  defining property -- that it returns the historically-correct PoolTokenExchangeRate
+  -- is entirely unchecked, exactly as the review states: an implementation returning
+  1:1 unconditionally, scanning forward, or dropping the deactivation clamp would
+  still pass. I considered and rejected case (b): I read the helpers from source.
+  initial_exchange_rate() = {0,0} (matches writeup); is_preactive_at_epoch short-circuits
+  so the borrow is safe and after the early-return guard activation_epoch is Some
+  and <= epoch; the deactivation clamp (deactivation.get_with_default(epoch) then
+  min with epoch) correctly freezes the rate at deactivation for deactivated pools;
+  the backwards scan returns rates[e] for the maximal recorded e in [activation, min(deact_or_epoch,
+  epoch)]; and the trailing initial_exchange_rate() is unreachable given requires(contains(activation_epoch))
+  plus the protocol invariant deactivation>=activation. The implementation matches
+  the writeup semantics precisely -- no anomaly in any struct field, branch, or scan
+  direction. Therefore tightening the spec with the three-branch postcondition (preactive
+  -> initial rate; active+found -> rates[e]; active+not-found -> initial rate) closes
+  the hole and is NOT expected to surface a code defect; if the prover then failed
+  it would point at a future regression, not today''s code. Severity stays high: this
+  read-only helper feeds withdraw/redeem/reward accounting across the whole staking
+  lifecycle, so its return value is the entire point of verifying it, and that value
+  is the one thing left unverified.'

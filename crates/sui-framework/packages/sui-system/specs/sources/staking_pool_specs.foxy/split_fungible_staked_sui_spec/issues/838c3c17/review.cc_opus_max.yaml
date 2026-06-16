@@ -1,0 +1,27 @@
+verdict: fixed
+confidence: high
+reasoning: 'The original gap was the total absence of ensures on split_fungible_staked_sui_spec
+  — the primary state change fungible_staked_sui.value == old(value) - split_amount
+  was unverified, leaving only the single abort guard modeled. The current spec resolves
+  this directly: lines 237-240 add ensures(fungible_staked_sui_value(fungible_staked_sui).to_int()
+  == original_value.to_int().sub(split_amount.to_int())), which is exactly the missing
+  decrement postcondition. The fix also adds the new-object value (result_value ==
+  split_amount), the conservation invariant (new + result == original), and pool_id
+  preservation on both the original and result objects. This is genuine coverage of
+  the gap, not nearby text churn: the abort guard asserts(split_amount <= original_value)
+  is preserved, all ensures are strict equalities (the strongest form, no weakening
+  to inequalities), and nothing was removed. No regression is present — the accessors
+  fungible_staked_sui_value/_pool_id are trivial field getters with no_opaque specs
+  and there is no include directive, so they inline correctly into the proof.'
+evidence: 'Ran `sui-prover --trace --functions split_fungible_staked_sui_spec` from
+  the specs package: all three checks passed (split_fungible_staked_sui_spec_Check
+  ✅, _Assume ✅, _SpecNoAbortCheck ✅), returncode 0, ''Verification successful''. The
+  _Check trace splits on the ensures at lines 236, 237 (the decrement), 241, 247,
+  248 and discharges all of them. Source confirms split_fungible_staked_sui mutates
+  only .value (value = value - split_amount, guarded by assert split_amount <= value)
+  and copies pool_id by value into the new object, matching every ensures exactly.
+  git diff shows the pre-fix body was only the asserts guard plus the target call;
+  the post-fix body adds the five ensures (uncommitted working-tree change). Accessor
+  specs fungible_staked_sui_value_spec and fungible_staked_sui_pool_id_spec both carry
+  no_opaque, and grep found no `include =` in the file, confirming the getters inline
+  transparently.'

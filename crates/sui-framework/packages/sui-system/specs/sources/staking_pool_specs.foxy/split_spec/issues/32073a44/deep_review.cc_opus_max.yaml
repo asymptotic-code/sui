@@ -1,0 +1,29 @@
+true_issue: true
+issue_in: spec
+severity: medium
+confidence: high
+reasoning: 'This is case (a): the SPEC is incomplete, and the underlying CODE is correct.
+  split_spec contains only three asserts (the abort conditions) plus the call to staking_pool::split
+  and returns the result; it has ZERO ensures clauses, so it verifies abort-freedom
+  but nothing about behavior. The four flagged metadata properties (result.pool_id
+  == old(self.pool_id), result.stake_activation_epoch == old(self.stake_activation_epoch),
+  self.pool_id == old(self.pool_id), self.stake_activation_epoch == old(self.stake_activation_epoch))
+  are genuinely unverified — as is principal conservation, which the writeup itself
+  calls the key invariant. So the issue is real, not a false positive. I rule out
+  (b) by direct inspection of the implementation (sources/staking_pool.move:547-560):
+  the StakedSui struct (lines 75-83) has fields pool_id: ID and stake_activation_epoch:
+  u64; the only mutation split performs on self is self.principal.split(split_amount),
+  which touches only the principal Balance. self.pool_id and self.stake_activation_epoch
+  are read-only and copied verbatim into the new object, exactly as the doc comment
+  promises (''All the other parameters ... remain the same''). No code path swaps
+  or corrupts those fields. Because the spec is marked no_opaque the prover inlines
+  this body, so adding the four ensures would prove trivially against the correct
+  code — i.e., tightening the spec is expected to PASS and would NOT expose a system
+  bug, which is the defining signature of a spec gap rather than a code defect. Severity
+  medium: this is a low-complexity, side-effect-free self-custody object split with
+  no StakingPool accounting impact, and the current code is demonstrably correct,
+  so there is no live vulnerability — but the absence of any ensures means a future
+  regression (e.g. copying the wrong source field into pool_id, or mutating self''s
+  metadata) would pass verification undetected, which defeats the purpose of the spec.
+  Confidence high: the spec source plainly has no ensures, and the implementation
+  is small and fully analyzed.'

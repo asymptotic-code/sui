@@ -1,0 +1,27 @@
+verdict: not_fixed
+confidence: high
+reasoning: 'The fix did not touch the spec the issue targets. split_staked_sui_spec
+  in the current working tree is byte-for-byte identical to the originally flagged
+  spec_source: it still declares the SpecTransferAddress/SpecTransferAddressExists
+  ghosts but never reads them, and its only three ensures all reference the mutated
+  original `stake` (staked_sui_amount, pool_id, stake_activation_epoch). The newly
+  created StakedSui consumed by transfer::transfer(stake.split(...), ctx.sender())
+  is still never bound to any spec-visible variable, so none of its three properties
+  (principal==split_amount, pool_id==old, stake_activation_epoch==old) are constrained,
+  and the conservation property (two halves summing to original) remains unverified
+  — exactly the gap the issue describes. The fix agent timed out (successful_fix=false)
+  after editing OTHER specs in the same file (split_spec for staking_pool::split,
+  join_staked_sui_spec, join_fungible_staked_sui_spec, split_fungible_staked_sui_spec,
+  pool_token_exchange_rate_at_epoch_spec, sui_amount_spec), but it never modified
+  split_staked_sui_spec, so the original coverage gap is 100% intact.'
+evidence: 'git status shows specs/sources/staking_pool_specs.move modified, but git
+  diff contains NO hunk for split_staked_sui_spec. Direct read of the function (file
+  offset 8958, single occurrence) shows it unchanged vs spec_source. Regex confirms
+  0 reads of ghost::global<SpecTransferAddress> anywhere in the file, so the declared
+  transfer ghosts are dead. The three ensures are: staked_sui_amount(stake)==original-split_amount,
+  pool_id(stake)==old_pool_id, stake_activation_epoch(stake)==old_epoch — all on the
+  original stake; no ensures/ghost surfaces the transferred receipt. The sibling split_spec
+  (target staking_pool::split) was strengthened to verify result_amount==split_amount
+  / result_pool_id==old / result_epoch==old plus conservation, but that is a different
+  spec function and does not propagate the constraint into split_staked_sui_spec,
+  whose body consumes the new object via transfer without binding it.'

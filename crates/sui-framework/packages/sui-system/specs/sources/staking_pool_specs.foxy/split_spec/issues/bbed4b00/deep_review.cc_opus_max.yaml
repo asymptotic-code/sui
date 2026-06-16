@@ -1,0 +1,29 @@
+true_issue: true
+issue_in: spec
+severity: high
+confidence: high
+reasoning: 'Confirmed by direct read of staking_pool_specs.move: split_spec contains
+  exactly three asserts (split_amount <= original; original - split_amount >= MIN_STAKING_THRESHOLD;
+  split_amount >= MIN_STAKING_THRESHOLD) and ZERO ensures. The abort modeling is correct
+  and complete, but no postcondition about the function''s effect is proved — not
+  result.principal == split_amount, not self.principal == old - split_amount, and
+  not the conservation invariant the writeup explicitly names as the key property.
+  The (a)/(b) call is firmly (a) SPEC gap, not a code defect. The implementation builds
+  the new object via self.principal.split(split_amount), and balance::split is the
+  textbook-correct primitive (asserts self.value >= value; self.value = self.value
+  - value; returns Balance { value }), which is provably conservation-preserving:
+  old == (old - split) + split, the return balance equals exactly split_amount, and
+  pool_id / stake_activation_epoch are copied unchanged. Adding every missing ensures
+  would therefore pass against this implementation — there is no scenario where tightening
+  the spec exposes a system bug, which is the test that rules out (b). I considered
+  (b) and rejected it: there is no arithmetic path, aliasing, or ordering in split
+  that could corrupt the remaining balance or mis-size the split, because the only
+  mutation flows through the audited balance::split. Severity stays high because this
+  is a value-bearing staking-principal primitive whose entire purpose (principal conservation)
+  is completely unverified, yet the spec is annotated done (VERIFY 🛡️/✅), giving false
+  assurance; an implementation that split off the wrong amount would pass split_spec
+  unchanged. The return-side effect is not even indirectly covered — the sibling split_staked_sui_spec
+  checks the remaining stake''s amount/pool_id/epoch but transfers the returned object
+  away without asserting its value, so result.principal == split_amount and the conservation
+  invariant are proved nowhere in the suite. Confidence is high: the zero-ensures
+  fact is directly observed, not inferred.'

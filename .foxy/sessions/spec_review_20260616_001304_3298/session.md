@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: stake-activation-epoch-spec-review
+description: Review spec for stake_activation_epoch_spec against verification plan and source code.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:13:04.330006
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -4412,3 +4412,104 @@ except Exception as e:
 
 ---
 
+## Assistant
+
+The `all_accesses` is huge, but I don't need it — this is a trivial pure getter. I have everything needed to write the review.
+
+### Code `toolu_01VV94qghjBNR9mCngoFDXQM`
+
+````python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::stake_activation_epoch_spec"
+verdict = "has_gaps"
+
+issues = [
+    {
+        "description": "The spec has no `ensures` clause. The verification plan requires `ensures(result == staked_sui.stake_activation_epoch)`, which is the entire point of specifying a pure field projection. As written, the spec proves only that `stake_activation_epoch` does not abort (trivially true for an immutable-reference field read) and asserts nothing about the returned value. A buggy implementation that returned a different field (e.g. `pool_id` cast, or a constant) would pass this spec unchanged. The single load-bearing postcondition is missing.",
+        "severity": "high",
+        "confidence": "high",
+    },
+]
+
+analysis = (
+    "`stake_activation_epoch` is a pure accessor that returns `staked_sui.stake_activation_epoch` "
+    "directly. It takes an immutable `&StakedSui` reference, mutates nothing, and cannot abort — so "
+    "the writeup correctly lists no aborts and no requires. The only obligation is the single "
+    "postcondition tying the return value to the stored field.\n\n"
+    "**Aborts / requires:** Nothing to cover. The function reads a `u64` field through an immutable "
+    "reference; there is no arithmetic, no table access, no early return. The empty `asserts`/`requires` "
+    "sets are correct and complete.\n\n"
+    "**Ensures (the gap):** The spec is empty where it most matters. The writeup's sole `ensures` — "
+    "`result == staked_sui.stake_activation_epoch` — is absent. Without it the proof degenerates to a "
+    "`_SpecNoAbortCheck` tautology: it confirms the body is abort-free but says nothing about the value "
+    "returned. For a getter, the value identity *is* the specification; omitting it means the spec "
+    "verifies essentially nothing about correctness. This is the classic 'passes the prover but checks "
+    "the wrong (empty) thing' situation.\n\n"
+    "**no_opaque:** The spec carries `no_opaque`, which is appropriate for a getter — callers that rely on "
+    "`stake_activation_epoch(s)` resolving to `s.stake_activation_epoch` need the body inlined rather than "
+    "abstracted behind a (here, vacuous) contract. Note, however, that `no_opaque` makes the missing "
+    "`ensures` even more consequential: with no postcondition AND no opaque contract, this spec provides no "
+    "reusable guarantee to the many downstream callers (`request_withdraw_stake`, "
+    "`convert_to_fungible_staked_sui`, `withdraw_from_principal`, `calculate_rewards`) that index the "
+    "exchange-rates table by this epoch.\n\n"
+    "**Fix:** add the field-projection postcondition. Exposing the private field to the spec may require a "
+    "`#[test_only, ext(pure)]` accessor on `StakedSui` (or reading it directly if the spec module has "
+    "visibility):\n\n"
+    "```move\n"
+    "ensures(result == staking_pool::stake_activation_epoch_field(staked_sui));\n"
+    "```\n\n"
+    "where the helper returns `staked_sui.stake_activation_epoch`. With `no_opaque` the prover inlines the "
+    "body, so the equality discharges immediately."
+)
+
+strengths = [
+    "Correctly identifies the function as abort-free and includes no spurious asserts/requires.",
+    "Uses `no_opaque`, the right opacity choice for a field-projecting getter so callers see the inlined body.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict=verdict,
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+foxy_inspect("review built")
+
+````
+
+> 980 in, 1420 out, 64254 cache read, 17402 cache create
+
+### Result `toolu_01VV94qghjBNR9mCngoFDXQM`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::stake_activation_epoch_spec`\n\n**Verdict:** \u25b3 Has Gaps\n\n## Issues\n\n- \u25cf **high/high**: The spec has no `ensures` clause. The verification plan requires `ensures(result == staked_sui.stake_activation_epoch)`, which is the entire point of specifying a pure field projection. As written, the spec proves only that `stake_activation_epoch` does not abort (trivially true for an immutable-reference field read) and asserts nothing about the returned value. A buggy implementation that returned a different field (e.g. `pool_id` cast, or a constant) would pass this spec unchanged. The single load-bearing postcondition is missing.\n\n## Analysis\n\n`stake_activation_epoch` is a pure accessor that returns `staked_sui.stake_activation_epoch` directly. It takes an immutable `&StakedSui` reference, mutates nothing, and cannot abort \u2014 so the writeup correctly lists no aborts and no requires. The only obligation is the single postcondition tying the return value to the stored field.\n\n**Aborts / requires:** Nothing to cover. The function reads a `u64` field through an immutable reference; there is no arithmetic, no table access, no early return. The empty `asserts`/`requires` sets are correct and complete.\n\n**Ensures (the gap):** The spec is empty where it most matters. The writeup's sole `ensures` \u2014 `result == staked_sui.stake_activation_epoch` \u2014 is absent. Without it the proof degenerates to a `_SpecNoAbortCheck` tautology: it confirms the body is abort-free but says nothing about the value returned. For a getter, the value identity *is* the specification; omitting it means the spec verifies essentially nothing about correctness. This is the classic 'passes the prover but checks the wrong (empty) thing' situation.\n\n**no_opaque:** The spec carries `no_opaque`, which is appropriate for a getter \u2014 callers that rely on `stake_activation_epoch(s)` resolving to `s.stake_activation_epoch` need the body inlined rather than abstracted behind a (here, vacuous) contract. Note, however, that `no_opaque` makes the missing `ensures` even more consequential: with no postcondition AND no opaque contract, this spec provides no reusable guarantee to the many downstream callers (`request_withdraw_stake`, `convert_to_fungible_staked_sui`, `withdraw_from_principal`, `calculate_rewards`) that index the exchange-rates table by this epoch.\n\n**Fix:** add the field-projection postcondition. Exposing the private field to the spec may require a `#[test_only, ext(pure)]` accessor on `StakedSui` (or reading it directly if the spec module has visibility):\n\n```move\nensures(result == staking_pool::stake_activation_epoch_field(staked_sui));\n```\n\nwhere the helper returns `staked_sui.stake_activation_epoch`. With `no_opaque` the prover inlines the body, so the equality discharges immediately.\n\n## Strengths\n\n- Correctly identifies the function as abort-free and includes no spurious asserts/requires.\n- Uses `no_opaque`, the right opacity choice for a field-projecting getter so callers see the inlined body.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | c53758fb7f201fac94804c401b79b87a9ab472580ffba681484722111310c46c |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 30.90s |
+| ended_at | 2026-06-16T00:13:35.232832 |
+| cost | $0.3051 |
+| tokens | 18149 in / 1653 out |
+| cache | 128508 read / 17402 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::stake_activation_epoch_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/stake_activation_epoch_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/stake_activation_epoch_spec/review.meta.yaml

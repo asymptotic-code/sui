@@ -1,0 +1,28 @@
+true_issue: true
+issue_in: spec
+severity: high
+confidence: high
+reasoning: 'True issue, and it is a SPEC gap (a), not a code defect (b). The spec
+  body (staking_pool_specs.move, split_fungible_staked_sui_spec) is exactly one asserts
+  (split_amount <= fungible_staked_sui_value) followed by the target call and a bare
+  return -- it contains zero ensures, so it proves only abort-freedom and constrains
+  nothing about behavior. The flagged property result.value == split_amount is therefore
+  genuinely unverified, as are the original-value deduction, the pool_id frame, and
+  the conservation property. I classify this as (a) because the implementation (staking_pool.move:517-537)
+  is correct: it constructs the result with value: split_amount, performs fungible_staked_sui.value
+  = value - split_amount, and copies pool_id, so (old - split_amount) + split_amount
+  == old holds. Consequently, adding ensures(result.value == split_amount) would still
+  PASS the prover -- tightening the spec does not expose any system bug, which is
+  the decisive test that the defect is in the spec. I considered (b) and rejected
+  it: deduction, pool_id preservation, and the absence of any StakingPool/total_supply
+  mutation all match the writeup''s intended contract; the only behavioral quirk (a
+  0-amount split is permitted, unlike StakedSui.split''s MIN_STAKING_THRESHOLD) is
+  a documented design choice, not a conservation violation. Severity is high even
+  though it is a spec gap: this is a value-conserving split, and the missing ensures
+  is the load-bearing conservation check -- without it an implementation that returns
+  the wrong amount (0, or split_amount*2, minting fungible-stake value from nothing)
+  passes silently, which is precisely the token mint/burn bug class formal verification
+  is meant to catch. Per the exact-arithmetic rule for numeric effects, the spec needs
+  result.value == split_amount, fungible_staked_sui.value == old - split_amount, result.pool_id
+  == fungible_staked_sui.pool_id, and the conservation equality. Confidence high:
+  the spec unambiguously has no ensures, so this is not a false positive.'

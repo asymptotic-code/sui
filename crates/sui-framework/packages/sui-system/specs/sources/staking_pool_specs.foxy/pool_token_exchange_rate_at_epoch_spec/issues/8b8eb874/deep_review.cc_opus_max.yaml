@@ -1,0 +1,26 @@
+true_issue: true
+issue_in: spec
+severity: medium
+confidence: high
+reasoning: 'TRUE issue, and it lives in the SPEC (a), not the code (b). The spec (staking_pool_specs.move)
+  is `requires(...)` + a bare call to the target with ZERO `ensures`. It therefore
+  verifies only abort-freedom (_Check/_SpecNoAbortCheck; _Assume is vacuous with no
+  asserts) and proves nothing about the return value — the deactivation clamp, the
+  preactive 1:1 rate, and the backwards-scan result are all unconstrained. So the
+  review''s claim that the clamp is unverified is correct. I considered and rejected
+  (b): the clamp at staking_pool.move:600-601 is the idiom `deactivation_epoch.get_with_default(epoch).min(epoch)`,
+  a textbook clamp, and I traced every boundary it concerns. Active pool (deactivation=None):
+  clamped=epoch, min(epoch,epoch)=epoch → no clamp. Deactivated at D, query E>D: clamped=D,
+  min(D,E)=D → clamps to D. Query E==D: min(D,D)=D (no off-by-one). Query E==D+1:
+  min(D,D+1)=D. Query E==D-1: min(D,D-1)=D-1 (correctly no clamp inside the active
+  window). Every case matches the writeup observation (''any query with epoch > deactivation_epoch
+  returns the rate recorded at deactivation_epoch''). The code is correct, so tightening
+  the spec with a value-level `ensures` (e.g. a find-style result over [activation_epoch,
+  min(deactivation_or_epoch, epoch)] with a loop invariant, or a scenario spec asserting
+  f(pool,E1)==f(pool,E2) for E1,E2>=D when deactivated) is expected to PASS — it would
+  not surface a system bug, which is the defining mark of (a). Severity medium: this
+  is a central reward-accounting helper whose entire value contract is unverified,
+  so adding the ensures has real coverage value, but there is no actual defect or
+  security risk. Confidence high: the spec gap is directly readable (no ensures at
+  all) and the code correctness is established by exhaustive boundary tracing of a
+  trivial clamp.'

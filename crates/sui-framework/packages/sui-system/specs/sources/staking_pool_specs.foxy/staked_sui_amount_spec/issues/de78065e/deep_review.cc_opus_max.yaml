@@ -1,0 +1,28 @@
+true_issue: true
+issue_in: spec
+severity: low
+confidence: high
+reasoning: 'Verified directly from source. The spec (staking_pool_specs.move L209-214)
+  is a `#[spec(prove, ...)]` target whose body is exactly `staking_pool::staked_sui_amount(staked_sui)`
+  with NO ensures/asserts/requires. A prove-spec with no postcondition on a non-aborting
+  function verifies nothing about behavior — it only confirms the call type-checks
+  and composes, so it passes as a pure tautology while displaying a green @VERIFY(🛡️/✅)
+  marker. The original review''s core claim is factually correct. This is unambiguously
+  (a) a SPEC gap, not (b) a code defect. The target (staking_pool.move L483) is a
+  single-expression transparent delegate `staked_sui.principal.value()`: no arithmetic,
+  no branch, no abort path, no intermediate state — there is no surface in which an
+  implementation defect could hide, and `Balance::value()` is a trusted stdlib accessor.
+  The decisive (a)-vs-(b) test: if we tighten the spec to `ensures(result == <principal
+  accessor>.value())`, the prover passes trivially because the function literally
+  IS that expression; tightening exposes no system bug, so the code is correct and
+  the fault lies entirely in the spec. I considered (b) and rule it out on this evidence.
+  Severity is low rather than the review''s medium: the consequence of the gap is
+  bounded by the triviality of the accessor (no defect can exist), and the spec is
+  `no_opaque`, so the downstream specs that use `staked_sui_amount` as their principal
+  abstraction (L62-64 join, L190-197 split) inline the body and do not actually depend
+  on this spec''s missing ensures. The genuine but minor cost is spec hygiene: a load-bearing
+  accessor''s contract is never formally tied to the private `principal` field, and
+  the dashboard reports a vacuous target as verified. The fix (add a `#[test_only,
+  ext(pure)]` principal accessor and `ensures(result == accessor(staked_sui).value())`)
+  is correct and worthwhile, but it is a completeness/quality fix, not the discovery
+  of a real vulnerability.'

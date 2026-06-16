@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-specs-review
+description: Review staking pool spec against verification plan and protocol context.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:13:22.496804
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12647,3 +12647,100 @@ error: invalid object declaration
 
 ---
 
+## Assistant
+
+The `all_accesses` lookup failed due to a compilation issue (the package can't resolve `sui::` framework modules in isolation), but for this trivial getter I have everything I need from the provided source. Let me complete the review directly.
+
+### Code `toolu_01UguHvtN53r734LusVZtsP2`
+
+```python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::sui_amount_spec"
+
+analysis = (
+    "`sui_amount` is a pure field getter: it takes `&PoolTokenExchangeRate` and returns "
+    "the `sui_amount: u64` field with no transformation, no arithmetic, no state mutation, "
+    "and no abort paths. `PoolTokenExchangeRate` has `copy + drop + store` (no `key`), so it "
+    "is a pure value type and the getter cannot touch protocol state.\n\n"
+    "The writeup lists no aborts and no requires (correct — there are none), and a single "
+    "ensures: `result == exchange_rate.sui_amount`. The actual spec targets `staking_pool::sui_amount`, "
+    "calls it, and returns the result, but contains **0 asserts, 0 requires, and 0 ensures**. "
+    "It therefore verifies nothing beyond the fact that the call type-checks and does not abort "
+    "(the implicit `_SpecNoAbortCheck`/abort-freedom obligation).\n\n"
+    "The one verifiable property — the return-value identity `result == exchange_rate.sui_amount` "
+    "— is missing. Adding it is cheap and would pin the getter to the field it claims to read. "
+    "Because `sui_amount` is a private field, the ensures needs the field exposed to the spec, "
+    "e.g. via a `#[test_only, ext(pure)]` accessor or by reading `exchange_rate.sui_amount` "
+    "directly through a spec helper; alternatively `no_opaque` keeps the body inline so callers "
+    "see the field read. Note the `@VERIFY(🛡️/✅)` marker claims a passing/abort-modeled state, "
+    "but with no ensures the spec is effectively an empty stub for a function that has a clear, "
+    "trivially provable postcondition.\n\n"
+    "Since the input is an immutable reference (`&PoolTokenExchangeRate`), there are no "
+    "unchanged-field obligations to add — the type system guarantees the value is not mutated."
+)
+
+issues = [
+    {
+        "description": (
+            "The spec has no `ensures` for the return value. The only verifiable property of this "
+            "getter is `result == exchange_rate.sui_amount`, and it is absent — so the spec proves "
+            "nothing about correctness (it does not even constrain that the returned u64 is the "
+            "`sui_amount` field rather than, say, `pool_token_amount`). Add "
+            "`ensures(result == exchange_rate.sui_amount);` (exposing the private field via a "
+            "`#[test_only, ext(pure)]` accessor or `no_opaque`)."
+        ),
+        "severity": "medium",
+        "confidence": "high",
+    }
+]
+
+strengths = [
+    "Correctly identifies that the getter has no abort paths and no preconditions — no spurious asserts/requires were added.",
+    "Spec compiles and passes the prover, establishing abort-freedom for the call.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict="has_gaps",
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+foxy_inspect(md)
+```
+
+> 149606 in, 1225 out, 64254 cache read, 17141 cache create
+
+### Result `toolu_01UguHvtN53r734LusVZtsP2`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::sui_amount_spec`\n\n**Verdict:** \u25b3 Has Gaps\n\n## Issues\n\n- \u25cb **medium/high**: The spec has no `ensures` for the return value. The only verifiable property of this getter is `result == exchange_rate.sui_amount`, and it is absent \u2014 so the spec proves nothing about correctness (it does not even constrain that the returned u64 is the `sui_amount` field rather than, say, `pool_token_amount`). Add `ensures(result == exchange_rate.sui_amount);` (exposing the private field via a `#[test_only, ext(pure)]` accessor or `no_opaque`).\n\n## Analysis\n\n`sui_amount` is a pure field getter: it takes `&PoolTokenExchangeRate` and returns the `sui_amount: u64` field with no transformation, no arithmetic, no state mutation, and no abort paths. `PoolTokenExchangeRate` has `copy + drop + store` (no `key`), so it is a pure value type and the getter cannot touch protocol state.\n\nThe writeup lists no aborts and no requires (correct \u2014 there are none), and a single ensures: `result == exchange_rate.sui_amount`. The actual spec targets `staking_pool::sui_amount`, calls it, and returns the result, but contains **0 asserts, 0 requires, and 0 ensures**. It therefore verifies nothing beyond the fact that the call type-checks and does not abort (the implicit `_SpecNoAbortCheck`/abort-freedom obligation).\n\nThe one verifiable property \u2014 the return-value identity `result == exchange_rate.sui_amount` \u2014 is missing. Adding it is cheap and would pin the getter to the field it claims to read. Because `sui_amount` is a private field, the ensures needs the field exposed to the spec, e.g. via a `#[test_only, ext(pure)]` accessor or by reading `exchange_rate.sui_amount` directly through a spec helper; alternatively `no_opaque` keeps the body inline so callers see the field read. Note the `@VERIFY(\ud83d\udee1\ufe0f/\u2705)` marker claims a passing/abort-modeled state, but with no ensures the spec is effectively an empty stub for a function that has a clear, trivially provable postcondition.\n\nSince the input is an immutable reference (`&PoolTokenExchangeRate`), there are no unchanged-field obligations to add \u2014 the type system guarantees the value is not mutated.\n\n## Strengths\n\n- Correctly identifies that the getter has no abort paths and no preconditions \u2014 no spurious asserts/requires were added.\n- Spec compiles and passes the prover, establishing abort-freedom for the call.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | 5db820aefb53585b082c9c0eb1a9df9c5669e02bc7a54b2390f5f5a9b321ad1b |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 23.54s |
+| ended_at | 2026-06-16T00:13:46.035988 |
+| cost | $1.0403 |
+| tokens | 166521 in / 1451 out |
+| cache | 128508 read / 17141 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::sui_amount_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/sui_amount_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/sui_amount_spec/review.meta.yaml

@@ -1,0 +1,38 @@
+_provenance:
+  schema_version: 1
+  session: cc_d1_spec_deep_review_20260616_002020_751940_b64a2b06
+  session_path: /Users/cos/asymptotic/agent/clients/mysten/sui/.foxy/sessions/cc_d1_spec_deep_review_20260616_002020_751940_b64a2b06/session.md
+  produced_at: '2026-06-16T07:21:40.090445+00:00'
+  input:
+    project: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system
+    collection: spec_issue
+    field: deep_review
+    variant: cc_opus_max
+    key: staking_pool_specs::split_fungible_staked_sui_spec/597f050c
+    module: staking_pool_specs
+    function: split_fungible_staked_sui_spec
+    issue_hash: 597f050c
+  model: claude-opus-4-8
+  effort: max
+  harness: cc
+  foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
+  prompt_part_hashes:
+    base: 5fdb6c5e65d5df8a
+    core: 35fc153c53e2c232
+    file_ops: b76d200c47b2271e
+    project_env: 21a3de2d42771978
+    spec_deep_review: 5a3954cefbd5a552
+    spec_loop: 26d59a7f8c0f21db
+    spec_postcondition: c9935e5df9cbd57c
+    spec_precondition: 74781a107ed639cf
+    spec_scenario: d1ce03efba7186ff
+    sui_prover_guide: 9b7aaa77fb185386
+    _global: f14f67e6881a217e51a61d71211fcbd89683864b6071a1190e19edbdc783a728
+  budget:
+    timeout: 600
+    usage:
+      input_tokens: 3331
+      output_tokens: 6241
+      cache_read_tokens: 562489
+      cache_creation_tokens: 43434
+      cost_usd: 0.8904565

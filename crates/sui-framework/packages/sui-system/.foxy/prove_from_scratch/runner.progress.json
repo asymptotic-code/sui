@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-06-16T07:11:43.543314+00:00",
-  "phase": "review",
-  "phase_index": 5,
+  "updated_at": "2026-06-16T10:39:38.215652+00:00",
+  "phase": "human_review",
+  "phase_index": 10,
   "work_done": 0,
-  "progress": 5000000,
-  "status": "running"
+  "progress": 10000000,
+  "status": "completed"
 }

@@ -1,0 +1,14 @@
+{
+  "phase": "annotate",
+  "completed_at": "2026-06-16T10:39:37.724122+00:00",
+  "summary": {
+    "total_specs": 20,
+    "wrote": 4,
+    "inserted": 4,
+    "replaced": 0,
+    "unchanged": 16,
+    "mismatched_unwritten": 0,
+    "errors": 0,
+    "errors_sample": []
+  }
+}

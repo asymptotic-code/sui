@@ -51,20 +51,26 @@ fun is_equal_staking_metadata_spec(
     result
 }
 
-// @VERIFY(🛡️/✅)
+// @VERIFY(⚙️/✅)
 #[spec(prove, target=staking_pool::join_staked_sui)]
 fun join_staked_sui_spec(
     self: &mut StakedSui,
     other: StakedSui,
 ) {
+    let old_self_amount = staking_pool::staked_sui_amount(self);
+    let old_other_amount = staking_pool::staked_sui_amount(&other);
     asserts(staking_pool::is_equal_staking_metadata(self, &other));
     asserts(
-        staking_pool::staked_sui_amount(self)
+        old_self_amount
             .to_int()
-            .add(staking_pool::staked_sui_amount(&other).to_int())
+            .add(old_other_amount.to_int())
             .lte(std::u64::max_value!().to_int()),
     );
-    staking_pool::join_staked_sui(self, other)
+    staking_pool::join_staked_sui(self, other);
+    ensures(
+        staking_pool::staked_sui_amount(self)
+            .to_int() == old_self_amount.to_int().add(old_other_amount.to_int()),
+    );
 }
 
 // @VERIFY(🛡️/✅)
@@ -85,7 +91,7 @@ fun is_preactive_spec(
     result
 }
 
-// @VERIFY(🛡️/✅)
+// @VERIFY(⚙️/✅)
 #[spec(prove, target=staking_pool::join_fungible_staked_sui)]
 fun join_fungible_staked_sui_spec(
     self: &mut FungibleStakedSui,
@@ -97,7 +103,18 @@ fun join_fungible_staked_sui_spec(
             .add(staking_pool::fungible_staked_sui_value(&other).to_int())
             .lte(std::u64::max_value!().to_int()),
     );
-    staking_pool::join_fungible_staked_sui(self, other)
+
+    let old_self_value = staking_pool::fungible_staked_sui_value(self);
+    let old_other_value = staking_pool::fungible_staked_sui_value(&other);
+    let old_pool_id = staking_pool::fungible_staked_sui_pool_id(self);
+
+    staking_pool::join_fungible_staked_sui(self, other);
+
+    ensures(
+        staking_pool::fungible_staked_sui_value(self).to_int()
+            == old_self_value.to_int().add(old_other_value.to_int()),
+    );
+    ensures(staking_pool::fungible_staked_sui_pool_id(self) == old_pool_id);
 }
 
 
@@ -119,12 +136,14 @@ fun pending_stake_withdraw_amount_spec(
 }
 
 #[spec(prove, target=staking_pool::pool_id, no_opaque)]
+// @VERIFY(🛡️/✅)
 fun pool_id_spec(
     staked_sui: &StakedSui,
 ): ID {
     staking_pool::pool_id(staked_sui)
 }
 
+// @VERIFY(🛡️/✅)
 #[spec(prove, target=staking_pool::pool_token_amount, no_opaque)]
 fun pool_token_amount_spec(
     exchange_rate: &PoolTokenExchangeRate,
@@ -142,7 +161,14 @@ fun pool_token_exchange_rate_at_epoch_loop_inv(
         && staking_pool::exchange_rates(pool).contains(activation_epoch)
 }
 
-// @VERIFY(🛡️/✅)
+// @VERIFY(⚙️/✅)
+// Postconditions verify the preactive branch: a preactive pool, or an active
+// pool queried at an epoch before its activation, always receives the 1:1
+// initial_exchange_rate (sui_amount = 0, pool_token_amount = 0). The historical
+// table-lookup value (backward scan + deactivation clamp) is not characterized:
+// every result-value postcondition (existence/maximality/exact-hit) is
+// intractable for the prover on this Table-scanning loop, and the deactivation
+// clamp is unobservable (the pinned framework exposes no deactivation_epoch getter).
 #[spec(prove, target=staking_pool::pool_token_exchange_rate_at_epoch)]
 fun pool_token_exchange_rate_at_epoch_spec(
     pool: &StakingPool,
@@ -150,10 +176,21 @@ fun pool_token_exchange_rate_at_epoch_spec(
 ): PoolTokenExchangeRate {
     requires(pool.is_preactive()
         || staking_pool::exchange_rates(pool).contains(*staking_pool::activation_epoch(pool).borrow()));
-    staking_pool::pool_token_exchange_rate_at_epoch(pool, epoch)
+    let result = staking_pool::pool_token_exchange_rate_at_epoch(pool, epoch);
+    if (staking_pool::is_preactive(pool)) {
+        ensures(staking_pool::sui_amount(&result) == 0);
+        ensures(staking_pool::pool_token_amount(&result) == 0);
+    } else {
+        let activation = *staking_pool::activation_epoch(pool).borrow();
+        if (activation > epoch) {
+            ensures(staking_pool::sui_amount(&result) == 0);
+            ensures(staking_pool::pool_token_amount(&result) == 0);
+        };
+    };
+    result
 }
 
-// @VERIFY(🛡️/✅)
+// @VERIFY(⚙️/✅)
 #[spec(prove, target=staking_pool::split, no_opaque)]
 fun split_spec(
     self: &mut StakedSui,
@@ -161,21 +198,57 @@ fun split_spec(
     ctx: &mut TxContext,
 ): StakedSui {
     let original_amount = staking_pool::staked_sui_amount(self);
+    let old_pool_id = staking_pool::pool_id(self);
+    let old_epoch = staking_pool::stake_activation_epoch(self);
     asserts(split_amount <= original_amount);
     asserts(original_amount.to_int().sub(split_amount.to_int()).gte(MIN_STAKING_THRESHOLD.to_int()));
     asserts(split_amount >= MIN_STAKING_THRESHOLD);
-    staking_pool::split(self, split_amount, ctx)
+    let result = staking_pool::split(self, split_amount, ctx);
+    let result_amount = staking_pool::staked_sui_amount(&result);
+    let result_pool_id = staking_pool::pool_id(&result);
+    let result_epoch = staking_pool::stake_activation_epoch(&result);
+    ensures(result_amount == split_amount);
+    ensures(staking_pool::staked_sui_amount(self).to_int() == original_amount.to_int().sub(split_amount.to_int()));
+    ensures(
+        staking_pool::staked_sui_amount(self)
+            .to_int()
+            .add(result_amount.to_int())
+            == original_amount.to_int(),
+    );
+    ensures(staking_pool::pool_id(self) == old_pool_id);
+    ensures(staking_pool::stake_activation_epoch(self) == old_epoch);
+    ensures(result_pool_id == old_pool_id);
+    ensures(result_epoch == old_epoch);
+    result
 }
 
-// @VERIFY(🛡️/✅)
+// @VERIFY(⚙️/✅)
 #[spec(prove, target=staking_pool::split_fungible_staked_sui)]
 fun split_fungible_staked_sui_spec(
     fungible_staked_sui: &mut FungibleStakedSui,
     split_amount: u64,
     ctx: &mut TxContext,
 ): FungibleStakedSui {
-    asserts(split_amount <= staking_pool::fungible_staked_sui_value(fungible_staked_sui));
-    staking_pool::split_fungible_staked_sui(fungible_staked_sui, split_amount, ctx)
+    let original_value = staking_pool::fungible_staked_sui_value(fungible_staked_sui);
+    let old_pool_id = staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui);
+    asserts(split_amount <= original_value);
+    let result = staking_pool::split_fungible_staked_sui(fungible_staked_sui, split_amount, ctx);
+    let result_value = staking_pool::fungible_staked_sui_value(&result);
+    let result_pool_id = staking_pool::fungible_staked_sui_pool_id(&result);
+    ensures(result_value == split_amount);
+    ensures(
+        staking_pool::fungible_staked_sui_value(fungible_staked_sui).to_int()
+            == original_value.to_int().sub(split_amount.to_int()),
+    );
+    ensures(
+        staking_pool::fungible_staked_sui_value(fungible_staked_sui)
+            .to_int()
+            .add(result_value.to_int())
+            == original_value.to_int(),
+    );
+    ensures(staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui) == old_pool_id);
+    ensures(result_pool_id == old_pool_id);
+    result
 }
 
 // @VERIFY(⚙️/✅) cloud out-of-resources; verified locally via run_on
@@ -199,10 +272,13 @@ fun split_staked_sui_spec(
     ensures(staking_pool::stake_activation_epoch(stake) == old_epoch);
 }
 
+// @VERIFY(🛡️/✅)
+
 #[spec(prove, target=staking_pool::stake_activation_epoch, no_opaque)]
 fun stake_activation_epoch_spec(
     staked_sui: &StakedSui,
 ): u64 {
+    // @VERIFY(🛡️/✅)
     staking_pool::stake_activation_epoch(staked_sui)
 }
 
@@ -214,7 +290,7 @@ fun staked_sui_amount_spec(
 }
 
 // @VERIFY(🛡️/✅)
-#[spec(prove, target=staking_pool::sui_amount)]
+#[spec(prove, target=staking_pool::sui_amount, no_opaque)]
 fun sui_amount_spec(
     exchange_rate: &PoolTokenExchangeRate,
 ): u64 {

@@ -1,0 +1,25 @@
+true_issue: true
+issue_in: spec
+severity: high
+confidence: high
+reasoning: 'True issue, and it lives in the SPEC (a), not the code. The spec''s three
+  ensures all reference only the mutated original `stake` (staked_sui_amount/pool_id/stake_activation_epoch
+  of `stake`). The newly created object returned by `stake.split(split_amount, ctx)`
+  is consumed immediately by `transfer::transfer(..., ctx.sender())` and is never
+  bound to a spec-visible variable, so none of its three properties (principal==split_amount,
+  pool_id==old, stake_activation_epoch==old) are constrained. The declared ghost vars
+  SpecTransferAddress / SpecTransferAddressExists are never referenced in any ensures,
+  so even the fact and recipient of the transfer go unverified. Exactly 3 of the 6
+  writeup ensures — the entire output half, including the conservation invariant (two
+  principals summing to the original) — are unproven. I ruled out (b) by reading staking_pool::split
+  in sources/staking_pool.move: the constructor sets `pool_id: self.pool_id`, `stake_activation_epoch:
+  self.stake_activation_epoch`, and `principal: self.principal.split(split_amount)`
+  (balance::split returns exactly split_amount and reduces self by that amount), so
+  all three required properties hold and the original-side aborts/invariants the spec
+  already proves are consistent with it. The code is correct; tightening the spec
+  would close the coverage gap, not expose a defect. Severity is high because the
+  unverified portion is the function''s entire purpose (the transferred split receipt)
+  plus principal conservation on a financial staking primitive — a future regression
+  in split() (e.g. wrong pool_id or doubled principal) would pass silently. Verifying
+  it requires ghost-object infrastructure to capture the transferred object''s fields,
+  which the current spec lacks.'

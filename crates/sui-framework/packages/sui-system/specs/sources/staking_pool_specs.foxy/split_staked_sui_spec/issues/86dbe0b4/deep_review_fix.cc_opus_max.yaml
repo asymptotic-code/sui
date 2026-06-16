@@ -1,0 +1,3 @@
+successful_fix: false
+branch: null
+fix_error: 'Agent ''spec_improve'' failed: Timed out after 10800s'

@@ -1,0 +1,26 @@
+verdict: fixed
+confidence: high
+reasoning: 'The original issue (split_spec had zero ensures, proving nothing about
+  the function''s effect) is fully resolved. The fix added exactly the missing postconditions
+  and the prover confirms them. The three asserts are byte-identical to the pre-fix
+  version, so the complete-and-correct abort modeling is preserved with no weakening
+  or removed coverage; the change is purely additive (seven ensures plus snapshot
+  bindings). All three postconditions the issue named are now present and proved:
+  result_amount == split_amount (result.principal == split_amount), staked_sui_amount(self)
+  == original_amount - split_amount (self.principal == old - split_amount), and the
+  conservation invariant staked_sui_amount(self) + result_amount == original_amount.
+  Metadata preservation (pool_id and stake_activation_epoch on both self and result)
+  is additionally proved. Every ensures uses exact equality, so a wrong-amount or
+  corrupted-balance implementation would now fail. No regression: only ensures were
+  added; the prover verifies the whole spec cleanly.'
+evidence: 'git diff of staking_pool_specs.move shows the three asserts unchanged (split_amount
+  <= original_amount; original-split >= MIN_STAKING_THRESHOLD; split >= MIN_STAKING_THRESHOLD)
+  and seven ensures newly added at lines 208-219. Source staking_pool.move:483 confirms
+  staked_sui_amount(s) = s.principal.value(), so the ensures check the exact principal-value
+  properties the issue named. Prover run `sui-prover --functions split_spec --trace`
+  from the specs package returned code 0 with ''Verification successful'': split_spec_Check
+  passed all 14 VC sub-goals (7 body abort-freedom + 7 ensures), split_spec_Assume
+  passed all 3 (asserts are the exact non-abort conditions), split_spec_SpecNoAbortCheck
+  passed all 10. MIN_STAKING_THRESHOLD = 1_000_000_000 matches the writeup. File is
+  modified in the working tree on main (uncommitted, branch null per fix state), which
+  matches the observed state.'

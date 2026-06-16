@@ -1,0 +1,26 @@
+verdict: fixed
+confidence: high
+reasoning: 'The original issue was that join_fungible_staked_sui_spec carried only
+  the two abort asserts (same-pool, overflow) and ZERO ensures, so it proved abort-freedom
+  but not the core accounting effect self.value == old(self.value) + old(other.value);
+  a no-op/drop/miscompute would pass. The current spec now snapshots old_self_value,
+  old_other_value, and old_pool_id before the call and adds two postconditions: ensures(value(self).to_int()
+  == old_self_value.to_int().add(old_other_value.to_int())) (L113-116) — exactly the
+  demanded postcondition — and ensures(pool_id(self) == old_pool_id) (L117, a sound
+  frame strengthening). The two abort asserts (L100 same-pool, L101 overflow) are
+  retained verbatim, so nothing was weakened; the spec is strictly stronger. The plain
+  `let` snapshot is the correct idiom (the accessor returns a copyable u64, so `clone!`
+  is unnecessary). I confirmed both accessors are plain field getters (no $pure opacity
+  issue) and the target does self.value = self.value + value after destructuring other.
+  No regression: a no-op, drop, or self.value=other.value implementation would now
+  fail the L113 ensures.'
+evidence: 'Ran `sui-prover --functions join_fungible_staked_sui_spec --trace --timeout
+  120 --force-timeout` from the specs package (rc=0, ''Verification successful'').
+  All three checks pass: _Check (4 splits — abort at staking_pool.move:532 EWrongPool,
+  abort at :536 the addition, ensures at staking_pool_specs.move:113 value-sum, ensures
+  at :117 pool-id) ✅; _Assume (2 splits at :100/:101 asserts) ✅; _SpecNoAbortCheck
+  (4 splits) ✅. git diff shows the fix adds the snapshots and the two ensures while
+  keeping both asserts intact, and updates the marker from 🛡️/✅ to ⚙️/✅ (abort-modeling
+  → done/passing), consistent with adding semantic postconditions. The async run_sui_prover
+  fork timed out during setup (infra), so I ran the prover directly via subprocess
+  to obtain this result.'

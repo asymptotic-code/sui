@@ -1,0 +1,23 @@
+true_issue: true
+issue_in: spec
+severity: high
+confidence: high
+reasoning: 'True gap, and it lives in the SPEC (a), not the code. The spec (staking_pool_specs.move:89-101)
+  carries the two abort asserts (same-pool, overflow) but has ZERO ensures, so with
+  `prove` and the `@VERIFY(.../✅)` annotation it advertises verification while proving
+  only abort-freedom. The function''s sole meaningful effect is `self.value = self.value
+  + value` (staking_pool.move:535-542, where the destructure binds value = other.value),
+  exactly the writeup''s first ensures `self.value == old(self.value) + old(other.value)`;
+  the current spec would still pass a no-op, a drop, or `self.value = other.value`,
+  so it catches no value-accounting bug. I ruled out (b): the implementation is correct
+  — the addition is the right arithmetic, the pool guard matches EWrongPool, and `id.delete()`
+  properly destroys the source UID with no leak; the accessors (lines 475, 511) are
+  plain field getters, so there is no hidden mismatch. Decisive test for (a) vs (b):
+  adding the missing ensures would PROVE (the overflow assert already discharges the
+  addition''s only abort path) rather than expose a defect — tightening the spec completes
+  coverage without revealing a system bug, which is the signature of a spec gap. Severity
+  high because this is a value-conservation primitive and the absent ensures is the
+  one exact-arithmetic postcondition that defines correctness (the rubric treats missing
+  exact arithmetic on value-moving ops as a serious gap); confidence high because
+  the 5-line function, getters, and spec are fully visible and the fix is mechanical
+  and provably discharges.'

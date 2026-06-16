@@ -1,0 +1,24 @@
+true_issue: true
+issue_in: spec
+severity: medium
+confidence: high
+reasoning: 'TRUE ISSUE, and it is (a) a SPEC gap, not (b) a code defect. Evidence
+  for the gap: the spec body is literally `staking_pool::pending_stake_withdraw_amount(staking_pool)`
+  with no `ensures`; the field name `pending_total_sui_withdraw` appears 0 times in
+  the spec file, so the writeup''s sole postcondition `result == staking_pool.pending_total_sui_withdraw`
+  is not encoded. For a field projection, abort-freedom is trivial, so this spec proves
+  nothing meaningful about the return value -- it would pass for ANY u64 the implementation
+  returned. That risk is concrete here: the struct has two adjacent u64 fields `pending_stake`
+  (line 58) and `pending_total_sui_withdraw` (line 61), and a sibling accessor `pending_stake_amount`
+  (line 621) that returns the OTHER field, so a refactor that swapped the projected
+  field would slip through silently. I rule out (b) code: target source (staking_pool.move:626-627)
+  is a single correct field read with no transformation, branching, or mutation, and
+  the writeup confirms that exact behavior is intended; tightening the spec to `ensures(result
+  == staking_pool.pending_total_sui_withdraw())` (via a test_only/ext(pure) accessor)
+  would pass immediately and is NOT expected to expose any system bug -- the implementation
+  already does exactly this. I down-rate severity from the original high to medium:
+  it is a 100%-vacuous getter spec worth fixing for regression protection given the
+  confusable fields, but the code is provably correct, it is a leaf accessor, and
+  the `no_opaque` flag means callers inline the real body rather than rely on this
+  spec''s empty postcondition, so no downstream proof is currently being misled --
+  the only false confidence is the standalone @VERIFY(✅) marker.'
