@@ -1,0 +1,5 @@
+executed: true
+stdout: /var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_3v1qumd_.txt
+to_foxy_logs: "}\n\n#[spec(prove, target=staking_pool::staked_sui_amount, no_opaque)]\n\
+  fun staked_sui_amount_spec(\n    staked_sui: &StakedSui,\n): u64 {\n    staking_pool::staked_sui_amount(staked_sui)\n\
+  }\n\n#[spec(prove, target=staking_pool::sui_amount, ignore_abort)]\n"

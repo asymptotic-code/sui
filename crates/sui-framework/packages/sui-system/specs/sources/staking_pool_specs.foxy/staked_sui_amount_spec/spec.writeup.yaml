@@ -1,0 +1,26 @@
+function: staking_pool_specs::staked_sui_amount_spec
+complexity: low
+summary: Returns the principal SUI balance of a StakedSui object by reading the value
+  of its principal Balance<SUI> field.
+role: Pure accessor exposed as the canonical way to read how much SUI a staking receipt
+  holds. Used directly in reward-calculation logic (calculate_rewards calls staked_sui.amount())
+  and available as a method alias (.amount()) on StakedSui throughout the protocol.
+aborts: []
+requires: []
+ensures:
+- condition: result == staked_sui.principal.value()
+  reason: The function is defined as a single-expression delegate to Balance::value();
+    the returned u64 must equal the underlying balance value.
+- condition: result >= MIN_STAKING_THRESHOLD (1_000_000_000)
+  reason: Any valid StakedSui produced by request_add_stake or split enforces the
+    minimum threshold invariant; the accessor reflects that the principal can never
+    be below 1 SUI for a properly-constructed object.
+observations:
+- The function has zero branches, zero aborts, and zero side effects — it is a transparent
+  projection.
+- The result is the principal deposit amount and does NOT include accrued rewards;
+  callers wanting full redemption value must combine this with the exchange-rate computation
+  in calculate_rewards.
+- The MIN_STAKING_THRESHOLD postcondition is a system-level invariant rather than
+  something enforced inside this function; it is appropriate as a spec assumption
+  (requires) rather than a guaranteed ensures in isolation.

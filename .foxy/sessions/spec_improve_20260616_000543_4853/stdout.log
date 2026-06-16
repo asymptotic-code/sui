@@ -1,0 +1,27 @@
+[FOXY_EVENT] {"type": "inspect", "text": "project=/Users/cos/asymptotic/agent/clients/mysten/sui"}
+[FOXY_EVENT] {"type": "inspect", "text": "packages=['/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system', '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs']"}
+[FOXY_EVENT] {"type": "inspect", "text": "=== SPEC SOURCE ==="}
+[FOXY_EVENT] {"type": "inspect", "text": "#[spec(prove, target=staking_pool::staked_sui_amount, ignore_abort, no_opaque)]\nfun staked_sui_amount_spec(\n    staked_sui: &StakedSui,\n): u64 {\n    staking_pool::staked_sui_amount(staked_sui)\n}"}
+[FOXY_EVENT] {"type": "inspect", "text": "=== ATTRIBUTES ==="}
+[FOXY_EVENT] {"type": "inspect", "text": "{'prove': True, 'skip': False, 'skip_reason': None, 'target': 'staking_pool::staked_sui_amount', 'no_opaque': True, 'timeout': None, 'spec_only': False, 'focus': False, 'ignore_abort': True, 'uninterpreted': [], 'include': [], 'boogie_opt': [], 'extra_bpl': []}"}
+[FOXY_EVENT] {"type": "inspect", "text": "=== TARGET ==="}
+[FOXY_EVENT] {"type": "inspect", "text": "{'qualified_name': 'staking_pool::staked_sui_amount', 'module': 'staking_pool', 'function_name': 'staked_sui_amount', 'file_path': '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/sources/staking_pool.move', 'line_start': 483, 'line_end': 483, 'visibility': 'public', 'is_entry': False, 'function_type': 'source', 'attributes': [], 'source': '/// Returns the principal amount of `StakedSui`.\\npublic fun staked_sui_amount(staked_sui: &StakedSui): u64 { staked_sui.principal.value() }'}"}
+[FOXY_EVENT] {"type": "inspect", "text": "spec file dir context"}
+[FOXY_EVENT] {"type": "file_op", "op": "read", "label": "/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/sources/staking_pool.move"}
+[FOXY_EVENT] {"type": "inspect", "text": "public struct StakedSui has key, store {\n    id: UID,\n    /// ID of the staking pool we are staking with.\n    pool_id: ID,\n    /// The epoch at which the stake becomes active.\n    stake_activation_epoch: u64,\n    /// The staked SUI tokens.\n    principal: Balance<SUI>,\n}"}
+[FOXY_EVENT] {"type": "file_op", "op": "grep", "label": "staked_sui_amount_spec in *.move"}
+[FOXY_EVENT] {"type": "inspect", "text": "crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move:210:fun staked_sui_amount_spec("}
+[FOXY_EVENT] {"type": "file_op", "op": "read", "label": "crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move:200-220"}
+[FOXY_EVENT] {"type": "inspect", "text": "}\n\n#[spec(prove, target=staking_pool::stake_activation_epoch, no_opaque)]\nfun stake_activation_epoch_spec(\n    staked_sui: &StakedSui,\n): u64 {\n    staking_pool::stake_activation_epoch(staked_sui)\n}\n\n#[spec(prove, target=staking_pool::staked_sui_amount, ignore_abort, no_opaque)]\nfun staked_sui_amount_spec(\n    staked_sui: &StakedSui,\n): u64 {\n    staking_pool::staked_sui_amount(staked_sui)\n}\n\n#[spec(prove, target=staking_pool::sui_amount, ignore_abort)]\nfun sui_amount_spec(\n    exchange_rate: &PoolTokenExchangeRate,\n): u64 {\n    staking_pool::sui_amount(exchange_rate)\n"}
+[FOXY_EVENT] {"type": "file_op", "op": "edit", "label": "crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move"}
+[FOXY_EVENT] {"type": "diff", "lines": [["-", 209, "#[spec(prove, target=staking_pool::staked_sui_amount, ignore_abort, no_opaque)]"], ["+", null, "#[spec(prove, target=staking_pool::staked_sui_amount, no_opaque)]"]]}
+[FOXY_EVENT] {"type": "file_op", "op": "read", "label": "crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move:209-216"}
+[FOXY_EVENT] {"type": "inspect", "text": "#[spec(prove, target=staking_pool::staked_sui_amount, no_opaque)]\nfun staked_sui_amount_spec(\n    staked_sui: &StakedSui,\n): u64 {\n    staking_pool::staked_sui_amount(staked_sui)\n}\n\n#[spec(prove, target=staking_pool::sui_amount, ignore_abort)]\n"}
+[FOXY_EVENT] {"type": "inspect", "text": "None"}
+Running: sui-prover --functions staked_sui_amount_spec --timeout 60 --force-timeout --cloud
+Working directory: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs
+
+[FOXY_EVENT] {"type": "inspect", "text": "status=success exit_code=0"}
+[FOXY_EVENT] {"type": "inspect", "text": "\ud83d\udd04 staking_pool_specs::staked_sui_amount_spec_Check\n\ud83d\udd04 staking_pool_specs::staked_sui_amount_spec_Assume\n\ud83d\udd04 staking_pool_specs::staked_sui_amount_spec_SpecNoAbortCheck\n\u2705 staking_pool_specs::staked_sui_amount_spec_Check\n\u2705 staking_pool_specs::staked_sui_amount_spec_SpecNoAbortCheck\n\u2705 staking_pool_specs::staked_sui_amount_spec_Assume\nVerification successful"}
+[FOXY_EVENT] {"type": "file_op", "op": "read", "label": "crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move:207-216"}
+[FOXY_EVENT] {"type": "inspect", "text": "}\n\n#[spec(prove, target=staking_pool::staked_sui_amount, no_opaque)]\nfun staked_sui_amount_spec(\n    staked_sui: &StakedSui,\n): u64 {\n    staking_pool::staked_sui_amount(staked_sui)\n}\n\n#[spec(prove, target=staking_pool::sui_amount, ignore_abort)]\n"}

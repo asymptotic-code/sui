@@ -206,7 +206,7 @@ fun stake_activation_epoch_spec(
     staking_pool::stake_activation_epoch(staked_sui)
 }
 
-#[spec(prove, target=staking_pool::staked_sui_amount, ignore_abort, no_opaque)]
+#[spec(prove, target=staking_pool::staked_sui_amount, no_opaque)]
 fun staked_sui_amount_spec(
     staked_sui: &StakedSui,
 ): u64 {

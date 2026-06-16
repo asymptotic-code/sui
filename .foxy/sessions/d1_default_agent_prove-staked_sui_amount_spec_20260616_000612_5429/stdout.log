@@ -1,0 +1,4 @@
+Running: sui-prover --functions staked_sui_amount_spec --timeout 60 --force-timeout --cloud
+Working directory: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs
+
+[FOXY_EVENT] {"type": "inspect", "text": "\ud83d\udd04 staking_pool_specs::staked_sui_amount_spec_Check\n\ud83d\udd04 staking_pool_specs::staked_sui_amount_spec_Assume\n\ud83d\udd04 staking_pool_specs::staked_sui_amount_spec_SpecNoAbortCheck\n\u2705 staking_pool_specs::staked_sui_amount_spec_Assume\n\u2705 staking_pool_specs::staked_sui_amount_spec_SpecNoAbortCheck\n\u2705 staking_pool_specs::staked_sui_amount_spec_Check\nVerification successful"}
