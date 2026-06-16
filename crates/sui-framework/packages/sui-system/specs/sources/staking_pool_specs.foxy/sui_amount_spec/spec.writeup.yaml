@@ -1,0 +1,17 @@
+function: staking_pool_specs::sui_amount_spec
+complexity: low
+summary: Read-only accessor that returns the sui_amount field from a PoolTokenExchangeRate
+  value
+role: Pure field getter for PoolTokenExchangeRate, called by consumers of exchange
+  rate data (e.g., reward calculations, UI introspection) that need the SUI component
+  of the stored pool-token-to-SUI ratio
+aborts: []
+requires: []
+ensures:
+- condition: result == exchange_rate.sui_amount
+  reason: Returns the sui_amount field directly with no transformation
+observations:
+- No arithmetic, no state mutation, no abort paths — the only verifiable property
+  is the return-value identity
+- PoolTokenExchangeRate has copy+drop+store (no key), so it is a pure value type;
+  the getter cannot modify protocol state

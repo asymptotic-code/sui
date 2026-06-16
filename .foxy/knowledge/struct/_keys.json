@@ -1,6 +1,6 @@
 {
-  "source_tree": "73b29adf1b7b5bcf",
-  "head": "e4e4f82aa6e50e6ecb2acda306467442019904c8",
+  "source_tree": "63f60cc4c8a72298",
+  "head": "7c1f0678ac6f253a7186951b2c823f12fef6c64d",
   "scopes": {
     "own": [
       "genesis::GenesisChainParameters",
@@ -83,5 +83,5 @@
       "voting_power::VotingPowerInfoV2"
     ]
   },
-  "generated_at": "2026-06-16T06:57:08.913772+00:00"
+  "generated_at": "2026-06-16T07:08:36.570342+00:00"
 }

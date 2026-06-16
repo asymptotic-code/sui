@@ -1,0 +1,5 @@
+executed: true
+stdout: /var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_0vqi5y5y.txt
+to_foxy_logs: "\n// @VERIFY(\U0001F6E1️/✅)\n#[spec(prove, target=staking_pool::sui_amount)]\n\
+  fun sui_amount_spec(\n    exchange_rate: &PoolTokenExchangeRate,\n): u64 {\n   \
+  \ staking_pool::sui_amount(exchange_rate)\n}\n\n"
