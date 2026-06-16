@@ -103,3 +103,10 @@
   "failed": 0,
   "reaped": 0
 }
+{
+  "status": "ok",
+  "submitted": 1,
+  "done": 1,
+  "failed": 0,
+  "reaped": 0
+}

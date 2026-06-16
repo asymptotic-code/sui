@@ -1,0 +1,23 @@
+function: staking_pool_specs::stake_activation_epoch_spec
+complexity: low
+summary: Pure accessor returning the epoch at which a StakedSui receipt becomes active,
+  reading directly from the stake_activation_epoch field of the StakedSui struct.
+role: Read-only getter exposing the stake_activation_epoch field of StakedSui; consumed
+  by callers (e.g. request_withdraw_stake, convert_to_fungible_staked_sui, pool_token_exchange_rate_at_epoch
+  lookups) that need to know when a given stake began earning rewards. Spec function
+  mirrors the public staking_pool::stake_activation_epoch accessor.
+aborts: []
+requires: []
+ensures:
+- condition: result == staked_sui.stake_activation_epoch
+  reason: Function is a pure field projection; return value must exactly equal the
+    stored field value.
+observations:
+- The function takes an immutable reference, so no state is mutated and no abort is
+  possible.
+- stake_activation_epoch is set once at request_add_stake time and never mutated thereafter;
+  the returned value is therefore stable across the lifetime of the StakedSui object.
+- The field is used as an epoch index into the pool's exchange_rates table; correctness
+  of downstream exchange-rate lookups depends on this value being accurately reported.
+- Splitting a StakedSui via staking_pool::split preserves stake_activation_epoch in
+  both halves, so the getter behaves identically on split fragments.

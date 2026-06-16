@@ -1,0 +1,156 @@
+project=/Users/cos/asymptotic/agent/clients/mysten/sui
+packages=['/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system', '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs']
+=== SPEC SOURCE ===
+#[spec(prove, target=staking_pool::stake_activation_epoch, ignore_abort, no_opaque)]
+fun stake_activation_epoch_spec(
+    staked_sui: &StakedSui,
+): u64 {
+    staking_pool::stake_activation_epoch(staked_sui)
+}
+=== SPEC ATTRIBUTES ===
+{'prove': True, 'skip': False, 'skip_reason': None, 'target': 'staking_pool::stake_activation_epoch', 'no_opaque': True, 'timeout': None, 'spec_only': False, 'focus': False, 'ignore_abort': True, 'uninterpreted': [], 'include': [], 'boogie_opt': [], 'extra_bpl': []}
+=== TARGET SOURCE ===
+{'qualified_name': 'staking_pool::stake_activation_epoch', 'module': 'staking_pool', 'function_name': 'stake_activation_epoch', 'file_path': '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/sources/staking_pool.move', 'line_start': 488, 'line_end': 490, 'visibility': 'public', 'is_entry': False, 'function_type': 'source', 'attributes': [], 'source': '/// Returns the activation epoch of `StakedSui`.\npublic fun stake_activation_epoch(staked_sui: &StakedSui): u64 {\n    staked_sui.stake_activation_epoch\n}'}
+=== CALLEES ===
+[]
+spec dir: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/stake_activation_epoch_spec
+crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.move:203:fun stake_activation_epoch_spec(
+    asserts(split_amount >= MIN_STAKING_THRESHOLD);
+    staking_pool::split_staked_sui(stake, split_amount, ctx);
+    ensures(staking_pool::staked_sui_amount(stake).to_int() == original_amount.to_int().sub(split_amount.to_int()));
+    ensures(staking_pool::pool_id(stake) == old_pool_id);
+    ensures(staking_pool::stake_activation_epoch(stake) == old_epoch);
+}
+
+#[spec(prove, target=staking_pool::stake_activation_epoch, ignore_abort, no_opaque)]
+fun stake_activation_epoch_spec(
+    staked_sui: &StakedSui,
+): u64 {
+    staking_pool::stake_activation_epoch(staked_sui)
+}
+
+#[spec(prove, target=staking_pool::staked_sui_amount, ignore_abort, no_opaque)]
+fun staked_sui_amount_spec(
+    staked_sui: &StakedSui,
+): u64 {
+    staking_pool::staked_sui_amount(staked_sui)
+}
+
+    staking_pool::staked_sui_amount(staked_sui)
+}
+
+#[spec(prove, target=staking_pool::sui_amount, ignore_abort)]
+fun sui_amount_spec(
+    exchange_rate: &PoolTokenExchangeRate,
+): u64 {
+    staking_pool::sui_amount(exchange_rate)
+}
+
+#[spec(prove, target=staking_pool::sui_balance, ignore_abort)]
+fun sui_balance_spec(
+    pool: &StakingPool,
+): u64 {
+    staking_pool::sui_balance(pool)
+}
+
+=== look for a stake_activation_epoch getter in source / test_only accessor ===
+staking_pool.move:80:    stake_activation_epoch: u64,
+staking_pool.move:138:    stake_activation_epoch: u64,
+staking_pool.move:149:        stake_activation_epoch,
+staking_pool.move:165:    if (staked_sui.stake_activation_epoch > ctx.epoch() && !pool.is_preactive()) {
+staking_pool.move:279:    let StakedSui { id, pool_id, stake_activation_epoch, principal } = staked_sui;
+staking_pool.move:282:    assert!(ctx.epoch() >= stake_activation_epoch, ECannotMintFungibleStakedSuiYet);
+staking_pool.move:288:        stake_activation_epoch,
+staking_pool.move:331:    let exchange_rate_at_staking_epoch = pool.pool_token_exchange_rate_at_epoch(staked_sui.stake_activation_epoch);
+staking_pool.move:485:public use fun stake_activation_epoch as StakedSui.activation_epoch;
+staking_pool.move:488:public fun stake_activation_epoch(staked_sui: &StakedSui): u64 {
+staking_pool.move:489:    staked_sui.stake_activation_epoch
+staking_pool.move:546:/// All the other parameters of the StakedSui like `stake_activation_epoch` or `pool_id` remain the same.
+staking_pool.move:557:        stake_activation_epoch: self.stake_activation_epoch,
+staking_pool.move:589:    (self.stake_activation_epoch == other.stake_activation_epoch)
+staking_pool.move:692:        let exchange_rate_at_staking_epoch = pool.pool_token_exchange_rate_at_epoch(staked_sui.stake_activation_epoch);
+validator.move:148:    stake_activation_epoch: u64,
+validator.move:157:    stake_activation_epoch: u64,
+validator.move:312:    let stake_activation_epoch = staked_sui.activation_epoch();
+validator.move:318:        stake_activation_epoch,
+validator.move:373:    let stake_activation_epoch = staked_sui.activation_epoch();
+validator.move:382:        stake_activation_epoch,
+#[spec(prove, target=staking_pool::stake_activation_epoch, no_opaque)]
+fun stake_activation_epoch_spec(
+    staked_sui: &StakedSui,
+): u64 {
+    let result = staking_pool::stake_activation_epoch(staked_sui);
+    ensures(result == staking_pool::stake_activation_epoch(staked_sui));
+    result
+}
+
+#[spec(prove, target=staking_pool::staked_sui_amount, ignore_abort, no_opaque)]
+
+--- StakedSui struct ---
+    id: UID,
+    /// ID of the staking pool we are staking with.
+    pool_id: ID,
+    /// The epoch at which the stake becomes active.
+    stake_activation_epoch: u64,
+    /// The staked SUI tokens.
+    principal: Balance<SUI>,
+}
+
+#[spec(prove, target=staking_pool::stake_activation_epoch, no_opaque)]
+fun stake_activation_epoch_spec(
+    staked_sui: &StakedSui,
+): u64 {
+    staking_pool::stake_activation_epoch(staked_sui)
+}
+
+#[spec(prove, target=staking_pool::staked_sui_amount, ignore_abort, no_opaque)]
+<class 'NoneType'>
+None
+#1 prove-from-scratch/improve/attempt-1 (1 items) [running] 2753s
+#81 sui-prover: specs [done] 576s
+#82 prove-final-check [done] 513s
+#83 sui-prover: specs [done] 510s
+#84 function_local_accesses [done] 466s
+I need to analyze the `split_spec` function body directly.
+
+The function body contains only one statement:
+```move
+staking_pool::split(self, split_amount, ctx)
+```
+
+This is a function call passing `self` (a `&mut StakedSui`), `split_amount`, and `ctx` as arguments. There are no direct field accesses, struct packing, dynamic field operations, transfers, or event emissions in the function body itself.
+
+- No field reads or writes (passing `self` by `&mut` to another function is not a field access)
+- No struct packing
+- No dynamic field operations
+- No transfers
+- No emits
+
+```json
+{"reads": [], "writes": [], "dynamic_reads": [], "dynamic_writes": [], "transfers": [], "emits": []}
+```
+#85 prove-split_spec [error] 324s
+#86 prove-split_spec [done] 324s
+#87 sui-prover: specs [done] 321s
+#88 prove-split-fss [error] 156s
+#89 prove-split-fss [error] 156s
+#90 sui-prover: specs [done] 151s
+#91 sui-prover: specs [done] 143s
+#92 prove-stake_activation_epoch [error] 11s
+#93 prove-stake_activation_epoch [running] 11s
+#94 sui-prover: specs [done] 8s
+status: success
+keys: ['status', 'result', 'response', 'stop_reason', 'turns', 'tokens_used', 'usage', 'total_usage', 'time_elapsed', 'error', 'cost_usd', 'harness', 'session_dir']
+result field: {'summary': 'PASS stake_activation_epoch_spec', 'details': ['PASS staking_pool_specs::stake_activation_epoch_spec (_Check)', 'PASS staking_pool_specs::stake_activation_epoch_spec (_Assume)', 'PASS staking_pool_specs::stake_activation_epoch_spec (_SpecNoAbortCheck)'], 'totals': {'passed': 1, 'failed': 0, 'timeout': 0}, 'exit_code': 0, 'status': 'success'}
+response: None
+error: None
+}
+
+#[spec(prove, target=staking_pool::stake_activation_epoch, no_opaque)]
+fun stake_activation_epoch_spec(
+    staked_sui: &StakedSui,
+): u64 {
+    staking_pool::stake_activation_epoch(staked_sui)
+}
+
+#[spec(prove, target=staking_pool::staked_sui_amount, ignore_abort, no_opaque)]

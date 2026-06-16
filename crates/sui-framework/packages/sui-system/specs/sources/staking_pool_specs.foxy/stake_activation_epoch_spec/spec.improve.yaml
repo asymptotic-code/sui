@@ -1,0 +1,12 @@
+starting_state: stub
+final_state: complete
+changes_made:
+- 'Removed ignore_abort from the #[spec(...)] attribute'
+prover_runs: 1
+prover_final: pass
+issues: []
+notes: 'Target is a pure field getter (returns staked_sui.stake_activation_epoch)
+  with no abort paths -- no asserts needed. With no_opaque the prover inlines the
+  getter, so no meaningful (non-tautological) ensures can be added without a separate
+  spec-visible field accessor. All three phases pass: _Check, _Assume, _SpecNoAbortCheck
+  (latter confirms genuine abort-freedom).'

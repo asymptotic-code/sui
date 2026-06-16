@@ -199,7 +199,7 @@ fun split_staked_sui_spec(
     ensures(staking_pool::stake_activation_epoch(stake) == old_epoch);
 }
 
-#[spec(prove, target=staking_pool::stake_activation_epoch, ignore_abort, no_opaque)]
+#[spec(prove, target=staking_pool::stake_activation_epoch, no_opaque)]
 fun stake_activation_epoch_spec(
     staked_sui: &StakedSui,
 ): u64 {
