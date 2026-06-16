@@ -1,0 +1,41 @@
+# foxy worker_pool config -- edit to taste
+# Place at <project>/.foxy/worker_pool/config.toml
+
+branch    = "specs"
+pool_size = 8
+interval  = 180
+
+# Headroom-aware soft gate. Read from the rate-limit headers cached by the
+# model client. Below floor, acquire_slot refuses (raises BudgetExhausted);
+# at or above full, no throttle. Stepped capacity in between.
+# headroom_floor_pct = 5
+# headroom_full_pct  = 30
+
+# Skip specific items (one entry per line):
+# skip = [
+#   "module::function_spec",
+#   "module::function_spec spec_knowledge/review",
+# ]
+
+# Exclude directories (substring match on item path):
+# exclude_dirs = [
+#   "/vendor/",
+#   "/switchboard_sui/",
+# ]
+
+# Override the step ladder:
+# [[steps]]
+# collection = "spec_knowledge"
+# field = "improve"
+#
+# [[steps]]
+# collection = "spec_knowledge"
+# field = "review"
+#
+# [[steps]]
+# collection = "spec_issue_knowledge"
+# field = "deep_review.cc_opus_max"
+#
+# [[steps]]
+# collection = "spec_issue_knowledge"
+# field = "deep_review_fix.cc_opus_max"

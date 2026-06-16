@@ -1,0 +1,46 @@
+spec: staking_pool_specs::split_staked_sui_spec
+target: staking_pool::split_staked_sui
+starting_state: stub
+final_state: semantics
+prover_final: pass
+prover_phases:
+  _Check: pass
+  _Assume: pass
+  _SpecNoAbortCheck: pass
+changes_made:
+- Removed ignore_abort from split_staked_sui_spec.
+- 'Added 3 asserts covering every abort path in the inlined split(): split_amount
+  <= principal_value; principal_value - split_amount >= MIN_STAKING_THRESHOLD (via
+  .to_int()); split_amount >= MIN_STAKING_THRESHOLD.'
+- 'Added 3 ensures (semantics on retained stake): principal reduced by split_amount;
+  pool_id preserved; stake_activation_epoch preserved.'
+- Declared transfer ghost globals (SpecTransferAddressExists/SpecTransferAddress)
+  since split_staked_sui transitively calls transfer::transfer whose sui-specs spec
+  uses them.
+- 'Added imports: prover::prover::{asserts,ensures}, prover::ghost, specs::transfer_spec
+  ghosts; duplicated const MIN_STAKING_THRESHOLD = 1_000_000_000.'
+- Added no_opaque to 4 same-package stub getter/helper specs (staked_sui_amount_spec,
+  split_spec, pool_id_spec, stake_activation_epoch_spec) so they inline (transparent)
+  instead of acting as harmful ignore_abort opaque contracts.
+- Set run_on = b"local" on the spec (cloud backend returned 'out of resources/timeout'
+  on every cloud attempt; local proves all three phases deterministically; CI honors
+  per-spec run_on).
+- 'Fixed specs/Move.toml: removed explicit `SuiSystem = {local="../"}` to re-enable
+  the prover''s auto-add (tool''s own recommendation) so prover::prover / std::integer
+  / sui-specs resolve; without it no real spec can compile.'
+- Updated @VERIFY annotation to (⚙️/✅).
+prover_runs: 8
+issues:
+- 'Cloud prover is unusable for this spec right now: 5 cloud runs each failed exactly
+  one of the three goals with the generic ''cloud verification out of resources/timeout''
+  (different goal each run, ~0.1s) while local passes all three. Worked around with
+  run_on = b"local".'
+- 'Could NOT add ensures for the newly-created StakedSui (principal == split_amount,
+  pool_id/epoch preserved): it is transferred to ctx.sender() inside the function
+  and not returned, and sui-specs'' transfer spec only tracks the recipient address
+  via ghost, not the transferred object''s fields. This is a framework limitation,
+  not a missing assertion.'
+- Move.lock shows auto-add resolves SuiSystem to the prover-instrumented fork (asymptotic-code/sui,
+  rev next), not the local in-tree package; this is the only config where prover::prover/Integer/sui-specs
+  exist. All three phases passing confirms the spec's abort conditions match that
+  code (identical to in-tree split's three asserts).

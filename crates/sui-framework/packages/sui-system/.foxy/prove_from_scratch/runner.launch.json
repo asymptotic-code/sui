@@ -1,0 +1,24 @@
+{
+  "pid": 22660,
+  "run_id": "d106e9832c874f97bc0a21bbce75e7f9",
+  "started_at": "2026-06-16T06:16:40.160770+00:00",
+  "cmd": [
+    "in-process"
+  ],
+  "options": {
+    "branch": "specs",
+    "pool_size": 8,
+    "n_scaffold": null,
+    "n_improve": 1,
+    "n_review": 6,
+    "n_deep_review": 6,
+    "n_deep_review_fix": 4,
+    "n_fix_review": 4,
+    "from_phase": "improve",
+    "stop_after": null,
+    "skip": "",
+    "retries": 1,
+    "strict": false
+  },
+  "log_path": "/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/.foxy/prove_from_scratch/runner.log"
+}

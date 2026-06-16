@@ -2,7 +2,21 @@
 # This file should be checked in.
 
 [move]
-version = 4
+version = 3
+manifest_digest = "8D08E819D0109C14E3462F9D858242267568671CDE9310B293CAD6FFC2B98F59"
+deps_digest = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+
+[[move.package]]
+id = "MoveStdlib"
+source = { local = "../move-stdlib" }
+
+[[move.package]]
+id = "Sui"
+source = { local = "../sui-framework" }
+
+dependencies = [
+  { id = "MoveStdlib", name = "MoveStdlib" },
+]
 
 [pinned.testnet.MoveStdlib]
 source = { local = "../move-stdlib" }

@@ -1,0 +1,6 @@
+[project]
+name = "sui-system"
+
+[packages]
+SuiSystem = { path = "crates/sui-framework/packages/sui-system" }
+SuiSystemSpecs = { path = "crates/sui-framework/packages/sui-system/specs" }

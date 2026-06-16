@@ -1,0 +1,8 @@
+[package]
+name = "SuiSystemSpecs"
+edition = "2024.beta"
+
+[dependencies]
+
+[addresses]
+sui_system_specs = "0x0"

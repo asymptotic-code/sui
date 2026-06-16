@@ -1,0 +1,27 @@
+function: staking_pool_specs::split_staked_sui_spec
+complexity: low
+summary: Entry point that splits a StakedSui into two parts — the original stake has
+  its principal reduced by split_amount, and a new StakedSui with that principal is
+  created and transferred to the transaction sender. Both resulting parts must meet
+  the 1 SUI minimum threshold.
+role: User-facing entry point allowing StakedSui holders to partition their staking
+  position into two independent receipts; called directly by stake owners to split
+  without going through validator_set or sui_system. The new object is transferred
+  to ctx.sender() while the original stake is mutated in place.
+aborts:
+- condition: split_amount > stake.principal.value()
+  reason: Split amount exceeds the available principal balance (EInsufficientSuiTokenBalance)
+- condition: stake.principal.value() - split_amount < MIN_STAKING_THRESHOLD
+  reason: Remaining principal after split would fall below the 1 SUI minimum (EStakedSuiBelowThreshold)
+- condition: split_amount < MIN_STAKING_THRESHOLD
+  reason: The split portion itself would be below the 1 SUI minimum (EStakedSuiBelowThreshold)
+requires:
+- split_amount >= MIN_STAKING_THRESHOLD (1_000_000_000 MIST)
+- stake.principal.value() - split_amount >= MIN_STAKING_THRESHOLD
+ensures:
+- stake.principal.value() == old(stake.principal.value()) - split_amount
+- stake.pool_id == old(stake.pool_id)
+- stake.stake_activation_epoch == old(stake.stake_activation_epoch)
+- new StakedSui transferred to ctx.sender() has principal.value() == split_amount
+- new StakedSui has pool_id == old(stake.pool_id)
+- new StakedSui has stake_activation_epoch == old(stake.stake_activation_epoch)

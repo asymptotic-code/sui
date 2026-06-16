@@ -1,0 +1,33 @@
+_provenance:
+  schema_version: 1
+  session: cc_d1_spec_writeup_20260615_224908_868138_f74b85ea
+  session_path: /Users/cos/asymptotic/agent/clients/mysten/sui/.foxy/sessions/cc_d1_spec_writeup_20260615_224908_868138_f74b85ea/session.md
+  produced_at: '2026-06-16T05:50:07.393642+00:00'
+  input:
+    project: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system
+    collection: spec
+    field: writeup
+    variant: null
+    key: staking_pool_specs::split_staked_sui_spec
+    module: staking_pool_specs
+    function: split_staked_sui_spec
+  model: claude-sonnet-4-6
+  effort: max
+  harness: cc
+  foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
+  prompt_part_hashes:
+    base: 5fdb6c5e65d5df8a
+    core: 35fc153c53e2c232
+    file_ops: b76d200c47b2271e
+    function_knowledge: ec5c60d9b1e6f113
+    project_env: 21a3de2d42771978
+    spec_writeup: 61585c0ab1a10352
+    _global: c026fbaf0d33c0e2930e3f9f4826cf5146d4fe887ef1a95a1812aefafe6040b3
+  budget:
+    timeout: 300
+    usage:
+      input_tokens: 9
+      output_tokens: 3781
+      cache_read_tokens: 59746
+      cache_creation_tokens: 119081
+      cost_usd: 0.8022298
