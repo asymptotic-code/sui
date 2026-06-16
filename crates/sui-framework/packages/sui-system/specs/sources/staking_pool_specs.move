@@ -125,7 +125,7 @@ fun pool_id_spec(
     staking_pool::pool_id(staked_sui)
 }
 
-#[spec(prove, target=staking_pool::pool_token_amount, ignore_abort)]
+#[spec(prove, target=staking_pool::pool_token_amount, no_opaque)]
 fun pool_token_amount_spec(
     exchange_rate: &PoolTokenExchangeRate,
 ): u64 {

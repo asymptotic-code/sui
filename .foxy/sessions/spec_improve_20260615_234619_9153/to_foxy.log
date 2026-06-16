@@ -1,0 +1,113 @@
+SPEC SOURCE:
+#[spec(prove, target=staking_pool::pool_token_amount, ignore_abort)]
+fun pool_token_amount_spec(
+    exchange_rate: &PoolTokenExchangeRate,
+): u64 {
+    staking_pool::pool_token_amount(exchange_rate)
+}
+ATTRIBUTES: {'prove': True, 'skip': False, 'skip_reason': None, 'target': 'staking_pool::pool_token_amount', 'no_opaque': False, 'timeout': None, 'spec_only': False, 'focus': False, 'ignore_abort': True, 'uninterpreted': [], 'include': [], 'boogie_opt': [], 'extra_bpl': []}
+TARGET:
+public fun pool_token_amount(exchange_rate: &PoolTokenExchangeRate): u64 {
+    exchange_rate.pool_token_amount
+}
+STRUCTS:
+[]
+SPEC FILE: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/pool_token_amount_spec/spec.source.move
+PACKAGES: ['/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system', '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs']
+staking_pool.move:56:    exchange_rates: Table<u64, PoolTokenExchangeRate>,
+staking_pool.move:69:public struct PoolTokenExchangeRate has copy, drop, store {
+staking_pool.move:232:    latest_exchange_rate: PoolTokenExchangeRate,
+staking_pool.move:363:            PoolTokenExchangeRate {
+staking_pool.move:400:    let latest_exchange_rate = PoolTokenExchangeRate {
+staking_pool.move:595:): PoolTokenExchangeRate {
+staking_pool.move:625:public(package) fun exchange_rates(pool: &StakingPool): &Table<u64, PoolTokenExchangeRate> {
+staking_pool.move:629:public fun sui_amount(exchange_rate: &PoolTokenExchangeRate): u64 {
+staking_pool.move:633:public fun pool_token_amount(exchange_rate: &PoolTokenExchangeRate): u64 {
+staking_pool.move:643:fun get_sui_amount(exchange_rate: &PoolTokenExchangeRate, token_amount: u64): u64 {
+staking_pool.move:653:fun get_token_amount(exchange_rate: &PoolTokenExchangeRate, sui_amount: u64): u64 {
+staking_pool.move:663:fun initial_exchange_rate(): PoolTokenExchangeRate {
+staking_pool.move:664:    PoolTokenExchangeRate { sui_amount: 0, pool_token_amount: 0 }
+staking_pool.move:796:    let exchange_rate = PoolTokenExchangeRate {
+sui_system.move:49:use sui_system::staking_pool::{StakedSui, FungibleStakedSui, PoolTokenExchangeRate};
+sui_system.move:541:): &Table<u64, PoolTokenExchangeRate> {
+sui_system_state_inner.move:15:use sui_system::staking_pool::{StakedSui, FungibleStakedSui, PoolTokenExchangeRate};
+sui_system_state_inner.move:1116:): &Table<u64, PoolTokenExchangeRate> {
+validator.move:16:    PoolTokenExchangeRate,
+validator.move:586:public fun pool_token_exchange_rate_at_epoch(self: &Validator, epoch: u64): PoolTokenExchangeRate {
+validator_set.move:16:    PoolTokenExchangeRate,
+validator_set.move:98:    pool_token_exchange_rate: PoolTokenExchangeRate,
+validator_set.move:113:    pool_token_exchange_rate: PoolTokenExchangeRate,
+validator_set.move:665:): &Table<u64, PoolTokenExchangeRate> {
+sources/staking_pool_specs.move:129:fun pool_token_amount_spec(
+
+#[spec(prove, target=staking_pool::pool_id, no_opaque)]
+fun pool_id_spec(
+    staked_sui: &StakedSui,
+): ID {
+    staking_pool::pool_id(staked_sui)
+}
+
+#[spec(prove, target=staking_pool::pool_token_amount, ignore_abort)]
+fun pool_token_amount_spec(
+    exchange_rate: &PoolTokenExchangeRate,
+): u64 {
+    staking_pool::pool_token_amount(exchange_rate)
+}
+
+#[spec(prove, target=staking_pool::pool_token_exchange_rate_at_epoch, ignore_abort)]
+fun pool_token_exchange_rate_at_epoch_spec(
+    pool: &StakingPool,
+    epoch: u64,
+): PoolTokenExchangeRate {
+    staking_pool::pool_token_exchange_rate_at_epoch(pool, epoch)
+#[spec(prove, target=staking_pool::pool_token_amount, no_opaque)]
+fun pool_token_amount_spec(
+    exchange_rate: &PoolTokenExchangeRate,
+): u64 {
+    staking_pool::pool_token_amount(exchange_rate)
+}
+
+None
+#1 prove-from-scratch/improve/attempt-1 (1 items) [running] 1702s
+#56 prove-join_staked_sui [error] 499s
+#57 prove-join_staked_sui [done] 499s
+#58 sui-prover: specs [error] 495s
+#59 sui-prover: specs [done] 484s
+#60 sui-prover: specs [done] 481s
+#61 prove-pending_stake_amount [error] 378s
+#62 prove-pending_stake_amount [done] 378s
+#63 sui-prover: specs [done] 374s
+#64 prove-pending_stake_withdraw_amount [error] 229s
+#65 prove-pending_stake_withdraw_amount [done] 229s
+#66 sui-prover: specs [done] 224s
+#67 function_local_accesses [done] 197s
+#68 prove-pool_id_spec [error] 128s
+#69 prove-pool_id_spec [done] 128s
+#70 sui-prover: specs [done] 125s
+#71 prove-pool_token_amount_spec [error] 11s
+#72 prove-pool_token_amount_spec [running] 11s
+#73 sui-prover: specs [done] 7s
+None
+STATUS: success
+None
+KEYS: ['status', 'result', 'response', 'stop_reason', 'turns', 'tokens_used', 'usage', 'total_usage', 'time_elapsed', 'error', 'cost_usd', 'harness', 'session_dir']
+status: success
+result: {'summary': 'PASS pool_token_amount_spec', 'details': ['PASS staking_pool_specs::pool_token_amount_spec (_Check)', 'PASS staking_pool_specs::pool_token_amount_spec (_Assume)', 'PASS staking_pool_specs::pool_token_amount_spec (_SpecNoAbortCheck)'], 'totals': {'passed': 1, 'failed': 0, 'timeout': 0}}
+stop_reason: tool_use
+turns: 2
+tokens_used: 962
+usage: {'input_tokens': 575, 'output_tokens': 387, 'cache_read_input_tokens': 278326, 'cache_creation_input_tokens': 4215}
+total_usage: {'input_tokens': 575, 'output_tokens': 387, 'cache_read_input_tokens': 278326, 'cache_creation_input_tokens': 4215}
+time_elapsed: 12.297883987426758
+cost_usd: 0.10683404999999999
+harness: foxy
+session_dir: /Users/cos/asymptotic/agent/clients/mysten/sui/.foxy/sessions/d1_default_agent_prove-pool_token_amount_spec_20260615_234706_2960
+}
+
+#[spec(prove, target=staking_pool::pool_token_amount, no_opaque)]
+fun pool_token_amount_spec(
+    exchange_rate: &PoolTokenExchangeRate,
+): u64 {
+    staking_pool::pool_token_amount(exchange_rate)
+}
+

@@ -1,0 +1,23 @@
+function: staking_pool_specs::pool_token_amount_spec
+complexity: low
+summary: Returns the pool_token_amount field from a PoolTokenExchangeRate struct —
+  the total number of pool tokens recorded at the time this exchange rate snapshot
+  was taken.
+role: Read-only accessor for the pool token side of an exchange rate snapshot. Called
+  by callers (e.g. get_token_amount, check_balance_invariants, process_pending_stakes_and_withdraws)
+  that need to inspect the stored pool token balance component of a PoolTokenExchangeRate
+  value. Exposed publicly to allow off-chain tooling and other packages to read exchange
+  rate data.
+aborts: []
+requires: []
+ensures:
+- condition: result == exchange_rate.pool_token_amount
+  reason: The function is a pure field projection; the return value equals exactly
+    the pool_token_amount field of the input struct.
+observations:
+- PoolTokenExchangeRate has copy+drop+store abilities and no invariants enforced at
+  the struct level; pool_token_amount may be 0 (e.g. for the initial_exchange_rate
+  sentinel), which callers such as get_sui_amount and get_token_amount handle explicitly.
+- The accessor is the public surface for reading pool_token_amount; direct field access
+  outside the module is not possible, making this function the canonical way to observe
+  the pool token side of any exchange rate.

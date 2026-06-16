@@ -1,0 +1,16 @@
+starting_state: stub
+final_state: asserts
+changes_made:
+- 'Removed ignore_abort from #[spec(...)] attribute'
+- Added no_opaque (matches sibling getter pool_id_spec; lets callers see this getter's
+  $pure inline)
+- 'No asserts needed: target pool_token_amount is a pure field read (exchange_rate.pool_token_amount)
+  with no abort paths'
+prover_runs: 1
+prover_final: pass
+abort_check_verified: true
+phases_passed:
+- _Check
+- _Assume
+- _SpecNoAbortCheck
+issues: []
