@@ -102,7 +102,8 @@ fun join_fungible_staked_sui_spec(
 
 
 
-#[spec(prove, target=staking_pool::pending_stake_amount, ignore_abort)]
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::pending_stake_amount)]
 fun pending_stake_amount_spec(
     staking_pool: &StakingPool,
 ): u64 {

@@ -1,0 +1,21 @@
+function: staking_pool_specs::pending_stake_amount_spec
+complexity: low
+summary: Returns the total SUI value of all pending stake requests accumulated in
+  the current epoch for a given staking pool. The value is the raw field read of StakingPool.pending_stake,
+  which is incremented by request_add_stake and decremented (or zeroed) by request_withdraw_stake
+  and process_pending_stake.
+role: Read-only getter on StakingPool; used by external observers (e.g. validator
+  dashboards, off-chain tooling, and tests via pending_stake_amount()) to inspect
+  the intra-epoch pending stake queue before epoch advancement processes it. Not callable
+  from any entry point — serves as an inspection primitive.
+aborts: []
+requires: []
+ensures:
+- condition: result == staking_pool.pending_stake
+  reason: Function is a direct field projection with no transformation
+observations:
+- 'pending_stake is ephemeral: it accumulates throughout the epoch and is zeroed out
+  by process_pending_stake at epoch boundaries; querying mid-epoch reflects only same-epoch
+  additions not yet applied to sui_balance'
+- A return value of 0 is normal both for a freshly-created pool and immediately after
+  epoch advancement

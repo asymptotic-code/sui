@@ -1,0 +1,5 @@
+executed: true
+stdout: /var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_qo6xz3f5.txt
+to_foxy_logs: "Y(\U0001F6E1️/✅)\n#[spec(prove, target=staking_pool::pending_stake_amount)]\n\
+  fun pending_stake_amount_spec(\n    staking_pool: &StakingPool,\n): u64 {\n    staking_pool::pending_stake_amount(staking_pool)\n\
+  }\n\n#[spec(prove, target=staking_pool::pending_stake_withdraw_amount, ignore_abo"
