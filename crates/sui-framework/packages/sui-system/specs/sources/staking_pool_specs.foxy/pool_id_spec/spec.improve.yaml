@@ -1,0 +1,19 @@
+starting_state: stub
+final_state: asserts_only
+changes_made:
+- Removed ignore_abort from pool_id_spec attribute
+- 'Added zero asserts: target pool_id is a pure field-read getter (staked_sui.pool_id)
+  on a &StakedSui reference with no abort paths (no division, casts, table access,
+  vector indexing, overflow, or assert!)'
+prover_runs: 1
+prover_final: pass
+abort_check_phase_run: true
+phases_passed:
+- _Check
+- _Assume
+- _SpecNoAbortCheck
+issues:
+- 'No ensures added: pool_id returns an opaque ID copied directly from the struct
+  field; the meaningful postcondition (result == staked_sui.pool_id) requires a #[test_only]
+  field accessor on the source struct, out of scope for abort-coverage task. Could
+  be a follow-up to reach ''semantics'' state.'

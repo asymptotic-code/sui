@@ -118,7 +118,7 @@ fun pending_stake_withdraw_amount_spec(
     staking_pool::pending_stake_withdraw_amount(staking_pool)
 }
 
-#[spec(prove, target=staking_pool::pool_id, ignore_abort, no_opaque)]
+#[spec(prove, target=staking_pool::pool_id, no_opaque)]
 fun pool_id_spec(
     staked_sui: &StakedSui,
 ): ID {

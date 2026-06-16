@@ -1,0 +1,7 @@
+🔄 staking_pool_specs::pool_id_spec_Check
+🔄 staking_pool_specs::pool_id_spec_Assume
+🔄 staking_pool_specs::pool_id_spec_SpecNoAbortCheck
+✅ staking_pool_specs::pool_id_spec_Assume
+✅ staking_pool_specs::pool_id_spec_Check
+✅ staking_pool_specs::pool_id_spec_SpecNoAbortCheck
+Verification successful

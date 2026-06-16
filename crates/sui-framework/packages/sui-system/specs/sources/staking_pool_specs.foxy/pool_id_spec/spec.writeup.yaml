@@ -1,0 +1,18 @@
+function: staking_pool_specs::pool_id_spec
+complexity: low
+summary: Returns the pool_id field of a StakedSui receipt — the ID of the staking
+  pool this stake was deposited into.
+role: Read-only accessor on StakedSui used by callers to verify pool membership (e.g.
+  EWrongPool checks in request_withdraw_stake, withdraw_from_principal, redeem_fungible_staked_sui)
+  and by wallets/UIs to identify which validator a stake receipt belongs to.
+aborts: []
+requires: []
+ensures:
+- condition: result == staked_sui.pool_id
+  reason: The function is a direct field projection with no computation; the returned
+    ID must equal the stored pool_id field.
+observations:
+- pool_id is set once at stake creation (request_add_stake) and never mutated thereafter,
+  so the accessor is a pure read with no side effects.
+- The returned ID is used by multiple callers to assert pool membership before performing
+  mutations, making this a foundational correctness primitive for EWrongPool invariants.
