@@ -1,0 +1,7 @@
+🔄 staking_pool_specs::is_inactive_spec_Check
+🔄 staking_pool_specs::is_inactive_spec_Assume
+🔄 staking_pool_specs::is_inactive_spec_SpecNoAbortCheck
+✅ staking_pool_specs::is_inactive_spec_SpecNoAbortCheck
+✅ staking_pool_specs::is_inactive_spec_Assume
+✅ staking_pool_specs::is_inactive_spec_Check
+Verification successful

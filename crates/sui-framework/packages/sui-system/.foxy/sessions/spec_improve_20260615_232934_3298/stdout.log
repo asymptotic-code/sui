@@ -1,0 +1,32 @@
+[FOXY_EVENT] {"type": "inspect", "text": "project=/Users/cos/asymptotic/agent/clients/mysten/sui"}
+[FOXY_EVENT] {"type": "inspect", "text": "spec source:\n#[spec(prove, target=staking_pool::is_inactive, ignore_abort)]\nfun is_inactive_spec(\n    pool: &StakingPool,\n): bool {\n    staking_pool::is_inactive(pool)\n}"}
+[FOXY_EVENT] {"type": "inspect", "text": "spec file path: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/is_inactive_spec/spec.writeup.yaml"}
+[FOXY_EVENT] {"type": "inspect", "text": "target keys: ['qualified_name', 'module', 'function_name', 'file_path', 'line_start', 'line_end', 'visibility', 'is_entry', 'function_type', 'attributes', 'source']"}
+[FOXY_EVENT] {"type": "inspect", "text": "{'qualified_name': 'staking_pool::is_inactive', 'module': 'staking_pool', 'function_name': 'is_inactive', 'file_path': '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/sources/staking_pool.move', 'line_start': 505, 'line_end': 507, 'visibility': 'public', 'is_entry': False, 'function_type': 'source', 'attributes': [], 'source': '/// Returns true if the input staking pool is inactive.\\npublic fun is_inactive(pool: &StakingPool): bool {\\n    pool.deactivation_epoch.is_some()\\n}'}"}
+[FOXY_EVENT] {"type": "inspect", "text": "target source:\n/// Returns true if the input staking pool is inactive.\npublic fun is_inactive(pool: &StakingPool): bool {\n    pool.deactivation_epoch.is_some()\n}"}
+[FOXY_EVENT] {"type": "inspect", "text": "callees: []"}
+[FOXY_EVENT] {"type": "file_op", "op": "grep", "label": "deactivation_epoch in staking_pool.move"}
+[FOXY_EVENT] {"type": "inspect", "text": ""}
+[FOXY_EVENT] {"type": "inspect", "text": "cwd: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system"}
+[FOXY_EVENT] {"type": "file_op", "op": "grep", "label": "deactivation_epoch: in *.move"}
+[FOXY_EVENT] {"type": "inspect", "text": "sources/staking_pool.move:45:    deactivation_epoch: Option<u64>,\nsources/staking_pool.move:120:        deactivation_epoch: option::none(),\nsources/staking_pool.move:461:public(package) fun deactivate_staking_pool(pool: &mut StakingPool, deactivation_epoch: u64) {\nsources/validator.move:266:public(package) fun deactivate(self: &mut Validator, deactivation_epoch: u64) {"}
+[FOXY_EVENT] {"type": "file_op", "op": "grep", "label": "is_inactive_spec in *.move"}
+[FOXY_EVENT] {"type": "inspect", "text": "staking_pool_specs.move:55:fun is_inactive_spec("}
+[FOXY_EVENT] {"type": "file_op", "op": "read", "label": "specs/sources/staking_pool_specs.move:50-62"}
+[FOXY_EVENT] {"type": "inspect", "text": "    ));\n    result\n}\n\n#[spec(prove, target=staking_pool::is_inactive, ignore_abort)]\nfun is_inactive_spec(\n    pool: &StakingPool,\n): bool {\n    staking_pool::is_inactive(pool)\n}\n\n#[spec(prove, target=staking_pool::is_preactive, ignore_abort)]\nfun is_preactive_spec(\n"}
+[FOXY_EVENT] {"type": "file_op", "op": "read", "label": "specs/sources/staking_pool_specs.move:1-30"}
+[FOXY_EVENT] {"type": "inspect", "text": "module specs::staking_pool_specs;\n\nuse sui::tx_context::TxContext;\n\nuse sui_system::staking_pool::PoolTokenExchangeRate;\n\nuse sui_system::staking_pool::StakingPool;\n\nuse sui_system::staking_pool::StakedSui;\n\nuse sui_system::staking_pool;\nuse sui_system::staking_pool::FungibleStakedSui;\nuse sui::object::ID;\n\n#[spec_only]\nuse prover::prover::{asserts, ensures};\n#[spec_only]\nuse prover::ghost;\n#[spec_only]\nuse specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};\n\nconst MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;\n\n// @VERIFY(\ud83d\udee1\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id)]\nfun fungible_staked_sui_pool_id_spec(\n    fungible_staked_sui: &FungibleStakedSui,\n): ID {\n    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)\n}\n"}
+[FOXY_EVENT] {"type": "file_op", "op": "edit", "label": "specs/sources/staking_pool_specs.move"}
+[FOXY_EVENT] {"type": "diff", "lines": [["-", 54, "#[spec(prove, target=staking_pool::is_inactive, ignore_abort)]"], ["+", null, "// @VERIFY(\ud83d\udee1\ufe0f/\ud83c\udf00)"], ["+", null, "#[spec(prove, target=staking_pool::is_inactive)]"]]}
+[FOXY_EVENT] {"type": "inspect", "text": "edited"}
+[FOXY_EVENT] {"type": "inspect", "text": "result type: <class 'NoneType'>, value: None"}
+[FOXY_EVENT] {"type": "inspect", "text": "is_fork=False, num messages=27"}
+Running: sui-prover --functions is_inactive_spec --timeout 60 --force-timeout --cloud
+Working directory: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs
+
+[FOXY_EVENT] {"type": "inspect", "text": "status=success, exit_code=0"}
+[FOXY_EVENT] {"type": "inspect", "text": "\ud83d\udd04 staking_pool_specs::is_inactive_spec_Check\n\ud83d\udd04 staking_pool_specs::is_inactive_spec_Assume\n\ud83d\udd04 staking_pool_specs::is_inactive_spec_SpecNoAbortCheck\n\u2705 staking_pool_specs::is_inactive_spec_Assume\n\u2705 staking_pool_specs::is_inactive_spec_Check\n\u2705 staking_pool_specs::is_inactive_spec_SpecNoAbortCheck\nVerification successful"}
+[FOXY_EVENT] {"type": "file_op", "op": "edit", "label": "specs/sources/staking_pool_specs.move"}
+[FOXY_EVENT] {"type": "diff", "lines": [["-", 54, "// @VERIFY(\ud83d\udee1\ufe0f/\ud83c\udf00)"], ["+", null, "// @VERIFY(\ud83d\udee1\ufe0f/\u2705)"]]}
+[FOXY_EVENT] {"type": "file_op", "op": "read", "label": "specs/sources/staking_pool_specs.move:54-61"}
+[FOXY_EVENT] {"type": "inspect", "text": "// @VERIFY(\ud83d\udee1\ufe0f/\u2705)\n#[spec(prove, target=staking_pool::is_inactive)]\nfun is_inactive_spec(\n    pool: &StakingPool,\n): bool {\n    staking_pool::is_inactive(pool)\n}\n\n"}

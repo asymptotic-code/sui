@@ -1,0 +1,85 @@
+project=/Users/cos/asymptotic/agent/clients/mysten/sui
+spec source:
+#[spec(prove, target=staking_pool::is_inactive, ignore_abort)]
+fun is_inactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_inactive(pool)
+}
+spec file path: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/is_inactive_spec/spec.writeup.yaml
+target keys: ['qualified_name', 'module', 'function_name', 'file_path', 'line_start', 'line_end', 'visibility', 'is_entry', 'function_type', 'attributes', 'source']
+{'qualified_name': 'staking_pool::is_inactive', 'module': 'staking_pool', 'function_name': 'is_inactive', 'file_path': '/Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/sources/staking_pool.move', 'line_start': 505, 'line_end': 507, 'visibility': 'public', 'is_entry': False, 'function_type': 'source', 'attributes': [], 'source': '/// Returns true if the input staking pool is inactive.\npublic fun is_inactive(pool: &StakingPool): bool {\n    pool.deactivation_epoch.is_some()\n}'}
+target source:
+/// Returns true if the input staking pool is inactive.
+public fun is_inactive(pool: &StakingPool): bool {
+    pool.deactivation_epoch.is_some()
+}
+callees: []
+cwd: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system
+sources/staking_pool.move:45:    deactivation_epoch: Option<u64>,
+sources/staking_pool.move:120:        deactivation_epoch: option::none(),
+sources/staking_pool.move:461:public(package) fun deactivate_staking_pool(pool: &mut StakingPool, deactivation_epoch: u64) {
+sources/validator.move:266:public(package) fun deactivate(self: &mut Validator, deactivation_epoch: u64) {
+staking_pool_specs.move:55:fun is_inactive_spec(
+    ));
+    result
+}
+
+#[spec(prove, target=staking_pool::is_inactive, ignore_abort)]
+fun is_inactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_inactive(pool)
+}
+
+#[spec(prove, target=staking_pool::is_preactive, ignore_abort)]
+fun is_preactive_spec(
+module specs::staking_pool_specs;
+
+use sui::tx_context::TxContext;
+
+use sui_system::staking_pool::PoolTokenExchangeRate;
+
+use sui_system::staking_pool::StakingPool;
+
+use sui_system::staking_pool::StakedSui;
+
+use sui_system::staking_pool;
+use sui_system::staking_pool::FungibleStakedSui;
+use sui::object::ID;
+
+#[spec_only]
+use prover::prover::{asserts, ensures};
+#[spec_only]
+use prover::ghost;
+#[spec_only]
+use specs::transfer_spec::{SpecTransferAddress, SpecTransferAddressExists};
+
+const MIN_STAKING_THRESHOLD: u64 = 1_000_000_000;
+
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::fungible_staked_sui_pool_id)]
+fun fungible_staked_sui_pool_id_spec(
+    fungible_staked_sui: &FungibleStakedSui,
+): ID {
+    staking_pool::fungible_staked_sui_pool_id(fungible_staked_sui)
+}
+edited
+result type: <class 'NoneType'>, value: None
+is_fork=False, num messages=27
+status=success, exit_code=0
+🔄 staking_pool_specs::is_inactive_spec_Check
+🔄 staking_pool_specs::is_inactive_spec_Assume
+🔄 staking_pool_specs::is_inactive_spec_SpecNoAbortCheck
+✅ staking_pool_specs::is_inactive_spec_Assume
+✅ staking_pool_specs::is_inactive_spec_Check
+✅ staking_pool_specs::is_inactive_spec_SpecNoAbortCheck
+Verification successful
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::is_inactive)]
+fun is_inactive_spec(
+    pool: &StakingPool,
+): bool {
+    staking_pool::is_inactive(pool)
+}
+

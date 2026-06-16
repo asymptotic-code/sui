@@ -1,0 +1,37 @@
+function: staking_pool_specs::is_inactive_spec
+complexity: low
+summary: Returns true if the staking pool has been deactivated — i.e., if its deactivation_epoch
+  field holds a Some value. A pool transitions to inactive when deactivate_staking_pool
+  is called, which sets deactivation_epoch to Some(<epoch>). Pre-active and active
+  pools have deactivation_epoch == None and return false.
+role: 'Read-only predicate on StakingPool used throughout the protocol to gate stake
+  operations: request_add_stake aborts with EDelegationToInactivePool when this returns
+  true; request_withdraw_stake and process_pending_stake_withdraw branch on it to
+  trigger immediate withdrawal processing for inactive pools; deactivate_staking_pool
+  uses it to assert no double-deactivation (EDeactivationOfInactivePool); convert_to_fungible_staked_sui
+  uses it to assert the pool is neither preactive nor inactive (EPoolPreactiveOrInactive).'
+aborts: []
+requires: []
+ensures:
+- condition: result == pool.deactivation_epoch.is_some()
+  reason: The return value is exactly the Option::is_some() test on deactivation_epoch
+    — true iff the pool was deactivated at some past epoch.
+- condition: 'result == true implies exists e: u64 such that pool.deactivation_epoch
+    == Some(e)'
+  reason: Equivalently, a true result witnesses a concrete deactivation epoch stored
+    in the field.
+- condition: result == false implies pool.deactivation_epoch == None
+  reason: A false result means the pool is either pre-active (activation_epoch.is_none())
+    or active; in both cases deactivation_epoch is None.
+- condition: pool is not modified
+  reason: The function takes an immutable reference; no state changes occur.
+observations:
+- 'The three pool lifecycle states are encoded in two Option fields: pre-active =
+  activation_epoch.is_none(); active = activation_epoch.is_some() && deactivation_epoch.is_none();
+  inactive = deactivation_epoch.is_some(). is_inactive checks only the second field,
+  so an inactive pool may also have activation_epoch.is_some().'
+- 'Once set, deactivation_epoch is never cleared — deactivate_staking_pool guards
+  against double-deactivation, and there is no reactivation path. The predicate is
+  therefore monotone: once true it stays true.'
+- The spec function should be a transparent wrapper (or inlined alias) of staking_pool::is_inactive
+  so the prover can reason about callers that branch on pool.is_inactive().

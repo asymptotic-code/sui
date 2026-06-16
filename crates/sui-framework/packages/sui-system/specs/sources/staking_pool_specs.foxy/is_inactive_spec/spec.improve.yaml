@@ -1,0 +1,5 @@
+executed: true
+stdout: /var/folders/n2/rx0nqjvn0px8cv2gw3x6f1ww0000gn/T/foxy_stdout_d5budu78.txt
+to_foxy_logs: "// @VERIFY(\U0001F6E1️/✅)\n#[spec(prove, target=staking_pool::is_inactive)]\n\
+  fun is_inactive_spec(\n    pool: &StakingPool,\n): bool {\n    staking_pool::is_inactive(pool)\n\
+  }\n\n"

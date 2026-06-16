@@ -51,7 +51,8 @@ fun is_equal_staking_metadata_spec(
     result
 }
 
-#[spec(prove, target=staking_pool::is_inactive, ignore_abort)]
+// @VERIFY(🛡️/✅)
+#[spec(prove, target=staking_pool::is_inactive)]
 fun is_inactive_spec(
     pool: &StakingPool,
 ): bool {
