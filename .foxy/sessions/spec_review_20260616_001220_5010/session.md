@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-spec-review
+description: Review specification for pending_stake_amount_spec against verification plan and source code.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:12:20.501166
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12651,3 +12651,102 @@ error: invalid object declaration
 
 ---
 
+## Assistant
+
+The `all_accesses` lookup failed due to a compilation environment issue (the prover-specific dependencies aren't on the standard build path), but I have everything I need from the provided source. This is a trivial getter — I'll review based on the source and writeup directly.
+
+### Code `toolu_01EweUF9vjcJwnXXP5Ajf3yz`
+
+```python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::pending_stake_amount_spec"
+
+analysis = (
+    "`pending_stake_amount` is a pure field projection: it returns `staking_pool.pending_stake` "
+    "with no transformation, no branching, and no mutation. The writeup correctly classifies it as "
+    "low complexity with no aborts and no requires, and lists a single postcondition: "
+    "`result == staking_pool.pending_stake`.\n\n"
+    "**Aborts / requires:** None expected. A bare `u64` field read on an immutable reference cannot abort, "
+    "so the absence of `asserts`/`requires` in the spec is correct and complete.\n\n"
+    "**Ensures coverage:** This is the one gap. The writeup's sole ensures "
+    "(`result == staking_pool.pending_stake`) is NOT present in the spec body. The spec calls the target "
+    "and returns its value but states no postcondition at all (0 ensures). Without the ensures, the "
+    "_Check VC is vacuous — the prover confirms only that the body type-checks and does not abort, not "
+    "that the returned value actually equals the field. A caller relying on this spec opaquely would learn "
+    "nothing about the return value.\n\n"
+    "Because `pending_stake` is a private field, the ensures needs a `#[test_only, ext(pure)]` accessor "
+    "(or the existing public `pending_stake_amount` getter, used carefully to avoid the `$pure`-opaque "
+    "trap described in the accessor-spec guidance). The fix is a one-liner: "
+    "`ensures(result == staking_pool::pending_stake_amount(staking_pool));` — though since that getter is "
+    "the target itself, a private-field accessor is cleaner.\n\n"
+    "**Immutable reference:** Frame conditions are unnecessary here. The parameter is `&StakingPool` "
+    "(immutable), so the type system already guarantees no field is mutated; no unchanged-field ensures "
+    "are warranted.\n\n"
+    "The `@VERIFY(🛡️/✅)` marker and `no_opaque` are not present; this is a plain `#[spec(prove, target=...)]`. "
+    "The spec passes the prover precisely because, with no ensures, there is nothing substantive to discharge."
+)
+
+issues = [
+    {
+        "description": (
+            "The spec states no postcondition. The expected ensures `result == staking_pool.pending_stake` "
+            "(the function's only observable behavior — returning the raw pending_stake field) is missing, "
+            "so the spec verifies nothing about the return value. The _Check VC is effectively vacuous: it "
+            "confirms the body does not abort but never ties `result` to the field, leaving the getter's "
+            "core contract unverified. Add an ensures via a pure accessor on the private `pending_stake` field."
+        ),
+        "severity": "high",
+        "confidence": "high",
+    },
+]
+
+strengths = [
+    "Correctly omits asserts/requires — a u64 field read on an immutable reference has no abort paths.",
+    "Spec structure (target, signature, return-through) matches the trivial getter and passes all three checks.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict="has_gaps",
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+
+```
+
+> 149429 in, 1278 out, 64254 cache read, 17264 cache create
+
+### Result `toolu_01EweUF9vjcJwnXXP5Ajf3yz`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::pending_stake_amount_spec`\n\n**Verdict:** \u25b3 Has Gaps\n\n## Issues\n\n- \u25cf **high/high**: The spec states no postcondition. The expected ensures `result == staking_pool.pending_stake` (the function's only observable behavior \u2014 returning the raw pending_stake field) is missing, so the spec verifies nothing about the return value. The _Check VC is effectively vacuous: it confirms the body does not abort but never ties `result` to the field, leaving the getter's core contract unverified. Add an ensures via a pure accessor on the private `pending_stake` field.\n\n## Analysis\n\n`pending_stake_amount` is a pure field projection: it returns `staking_pool.pending_stake` with no transformation, no branching, and no mutation. The writeup correctly classifies it as low complexity with no aborts and no requires, and lists a single postcondition: `result == staking_pool.pending_stake`.\n\n**Aborts / requires:** None expected. A bare `u64` field read on an immutable reference cannot abort, so the absence of `asserts`/`requires` in the spec is correct and complete.\n\n**Ensures coverage:** This is the one gap. The writeup's sole ensures (`result == staking_pool.pending_stake`) is NOT present in the spec body. The spec calls the target and returns its value but states no postcondition at all (0 ensures). Without the ensures, the _Check VC is vacuous \u2014 the prover confirms only that the body type-checks and does not abort, not that the returned value actually equals the field. A caller relying on this spec opaquely would learn nothing about the return value.\n\nBecause `pending_stake` is a private field, the ensures needs a `#[test_only, ext(pure)]` accessor (or the existing public `pending_stake_amount` getter, used carefully to avoid the `$pure`-opaque trap described in the accessor-spec guidance). The fix is a one-liner: `ensures(result == staking_pool::pending_stake_amount(staking_pool));` \u2014 though since that getter is the target itself, a private-field accessor is cleaner.\n\n**Immutable reference:** Frame conditions are unnecessary here. The parameter is `&StakingPool` (immutable), so the type system already guarantees no field is mutated; no unchanged-field ensures are warranted.\n\nThe `@VERIFY(\ud83d\udee1\ufe0f/\u2705)` marker and `no_opaque` are not present; this is a plain `#[spec(prove, target=...)]`. The spec passes the prover precisely because, with no ensures, there is nothing substantive to discharge.\n\n## Strengths\n\n- Correctly omits asserts/requires \u2014 a u64 field read on an immutable reference has no abort paths.\n- Spec structure (target, signature, return-through) matches the trivial getter and passes all three checks.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | dc30d59d7349c566910a8b8b0f7fa9943b647ef354ab169c641a57b79d6aaaf3 |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 25.25s |
+| ended_at | 2026-06-16T00:12:45.751615 |
+| cost | $1.0411 |
+| tokens | 166515 in / 1456 out |
+| cache | 128508 read / 17264 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::pending_stake_amount_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/pending_stake_amount_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/pending_stake_amount_spec/review.meta.yaml

@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-spec-review
+description: Review and verify the join_staked_sui_spec against its specification and implementation.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:12:19.722279
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12683,3 +12683,104 @@ error: invalid object declaration
 
 ---
 
+## Assistant
+
+The `all_accesses` lookup failed due to a compilation issue in the project (vendor dependencies unresolved), but I have everything needed from the provided source, module, and writeup to complete the review. Let me produce it.
+
+### Code `toolu_01Y28q3qFe1sFVGmpgkWsmYW`
+
+```python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::join_staked_sui_spec"
+
+analysis = """The target `join_staked_sui(self, other)` does three observable things:
+1. Aborts if `is_equal_staking_metadata(self, &other)` is false (mismatched pool_id or stake_activation_epoch -> EIncompatibleStakedSui).
+2. Destroys `other` (deletes its UID, extracts its principal Balance<SUI>).
+3. Joins `other.principal` into `self.principal`.
+
+ABORT COVERAGE
+- The single abort path is `!is_equal_staking_metadata(self, &other)`. The spec correctly inverts it: `asserts(staking_pool::is_equal_staking_metadata(self, &other))`. This is exact and complete.
+- The spec adds a second assert bounding the combined principal: `staked_sui_amount(self).to_int().add(staked_sui_amount(&other).to_int()).lte(u64::MAX)`. The source's `self.principal.join(principal)` is a `Balance::join` which sums u64 values; the prover models this as a potential overflow abort, so this assert is needed to discharge the SpecNoAbort/Check abort proof. It is a defensive precondition rather than a real-world reachable abort (combined principal exceeding ~1.8e19 MIST is beyond total SUI supply), but it is correctly placed BEFORE the call. No abort path is missing.
+
+POSTCONDITION COVERAGE — THIS IS THE MAIN GAP
+The spec has ZERO `ensures`. It is purely an abort/precondition spec. Every behavioral guarantee from the writeup is unverified:
+- `self.principal.value() == old(self.principal.value()) + old(other.principal.value())` — the central correctness property of a merge. Not checked. A buggy implementation that, say, dropped `other`'s principal, double-counted it, or wrote the wrong sum would still pass this spec. Given the overflow assert already computes exactly this sum in Integer space, capturing `old` values and adding one `ensures(staked_sui_amount(self).to_int() == old_self_amt.add(old_other_amt))` would be cheap and is the single most valuable addition.
+- `self.pool_id` unchanged and `self.stake_activation_epoch` unchanged — frame conditions on the mutated `&mut StakedSui`. Not checked. Since `self` is a mutable reference, the prover does not guarantee these fields are preserved across the opaque-free call; an implementation that overwrote `self.pool_id` from `other` would go undetected.
+- `self.principal.value() >= MIN_STAKING_THRESHOLD` (min-stake invariant preservation) — not checked. This follows trivially from the inputs but is the protocol-level invariant this function must not break.
+
+The spec is consistent with the implementation (it passes the prover) and correctly models the only abort, but it verifies essentially nothing about WHAT the function computes. For a merge function whose entire purpose is balance accounting, the absence of the sum `ensures` is a real correctness gap, not a stylistic one.
+
+NOTES
+- `@VERIFY(🛡️/✅)` marks this as having an abort-modeling concern resolved; the overflow assert is the documented handling.
+- This is a client-side object merge with no StakingPool state touched, so no pool-side frame conditions are needed — that part of the writeup is correctly reflected by the spec's narrow scope."""
+
+issues = [
+    {
+        "description": "The spec has no `ensures` verifying the core merge accounting: `self.principal.value()` after the call must equal `old(self.principal.value()) + old(other.principal.value())`. This is the central correctness property of `join_staked_sui` and is entirely unverified — an implementation that dropped, double-counted, or mis-summed the joined principal would still pass. The overflow assert already computes this exact sum in Integer space, so capturing the two `old` amounts and adding one equality `ensures` is straightforward.",
+        "severity": "high",
+        "confidence": "high",
+    },
+    {
+        "description": "No frame `ensures` that `self.pool_id` and `self.stake_activation_epoch` are unchanged. `self` is a `&mut StakedSui`, so the prover does not guarantee these fields are preserved across the call; an implementation overwriting `self`'s metadata from `other` would go undetected. Both should be asserted equal to their pre-call (`clone!`) values.",
+        "severity": "medium",
+        "confidence": "high",
+    },
+    {
+        "description": "The minimum-stake invariant `self.principal.value() >= MIN_STAKING_THRESHOLD` (1 SUI) is not asserted post-join. It follows trivially from the input invariant but is the protocol-level property this function must preserve; making it explicit documents and guards the invariant.",
+        "severity": "low",
+        "confidence": "medium",
+    },
+]
+
+strengths = [
+    "The sole abort condition (`!is_equal_staking_metadata`) is modeled exactly and correctly inverted as an `asserts`.",
+    "The combined-principal overflow assert is placed correctly before the call and uses `.to_int()` arbitrary-precision arithmetic, properly discharging the `Balance::join` overflow proof obligation.",
+    "Scope is correctly narrow — it recognizes this is a client-side object merge with no StakingPool state changes, so it avoids spurious pool-side frame conditions.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict="has_gaps",
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+foxy_inspect("review built")
+
+```
+
+> 149408 in, 2042 out, 64254 cache read, 18018 cache create
+
+### Result `toolu_01Y28q3qFe1sFVGmpgkWsmYW`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::join_staked_sui_spec`\n\n**Verdict:** \u25b3 Has Gaps\n\n## Issues\n\n- \u25cf **high/high**: The spec has no `ensures` verifying the core merge accounting: `self.principal.value()` after the call must equal `old(self.principal.value()) + old(other.principal.value())`. This is the central correctness property of `join_staked_sui` and is entirely unverified \u2014 an implementation that dropped, double-counted, or mis-summed the joined principal would still pass. The overflow assert already computes this exact sum in Integer space, so capturing the two `old` amounts and adding one equality `ensures` is straightforward.\n- \u25cb **medium/high**: No frame `ensures` that `self.pool_id` and `self.stake_activation_epoch` are unchanged. `self` is a `&mut StakedSui`, so the prover does not guarantee these fields are preserved across the call; an implementation overwriting `self`'s metadata from `other` would go undetected. Both should be asserted equal to their pre-call (`clone!`) values.\n- \u25ab **low/medium**: The minimum-stake invariant `self.principal.value() >= MIN_STAKING_THRESHOLD` (1 SUI) is not asserted post-join. It follows trivially from the input invariant but is the protocol-level property this function must preserve; making it explicit documents and guards the invariant.\n\n## Analysis\n\nThe target `join_staked_sui(self, other)` does three observable things:\n1. Aborts if `is_equal_staking_metadata(self, &other)` is false (mismatched pool_id or stake_activation_epoch -> EIncompatibleStakedSui).\n2. Destroys `other` (deletes its UID, extracts its principal Balance<SUI>).\n3. Joins `other.principal` into `self.principal`.\n\nABORT COVERAGE\n- The single abort path is `!is_equal_staking_metadata(self, &other)`. The spec correctly inverts it: `asserts(staking_pool::is_equal_staking_metadata(self, &other))`. This is exact and complete.\n- The spec adds a second assert bounding the combined principal: `staked_sui_amount(self).to_int().add(staked_sui_amount(&other).to_int()).lte(u64::MAX)`. The source's `self.principal.join(principal)` is a `Balance::join` which sums u64 values; the prover models this as a potential overflow abort, so this assert is needed to discharge the SpecNoAbort/Check abort proof. It is a defensive precondition rather than a real-world reachable abort (combined principal exceeding ~1.8e19 MIST is beyond total SUI supply), but it is correctly placed BEFORE the call. No abort path is missing.\n\nPOSTCONDITION COVERAGE \u2014 THIS IS THE MAIN GAP\nThe spec has ZERO `ensures`. It is purely an abort/precondition spec. Every behavioral guarantee from the writeup is unverified:\n- `self.principal.value() == old(self.principal.value()) + old(other.principal.value())` \u2014 the central correctness property of a merge. Not checked. A buggy implementation that, say, dropped `other`'s principal, double-counted it, or wrote the wrong sum would still pass this spec. Given the overflow assert already computes exactly this sum in Integer space, capturing `old` values and adding one `ensures(staked_sui_amount(self).to_int() == old_self_amt.add(old_other_amt))` would be cheap and is the single most valuable addition.\n- `self.pool_id` unchanged and `self.stake_activation_epoch` unchanged \u2014 frame conditions on the mutated `&mut StakedSui`. Not checked. Since `self` is a mutable reference, the prover does not guarantee these fields are preserved across the opaque-free call; an implementation that overwrote `self.pool_id` from `other` would go undetected.\n- `self.principal.value() >= MIN_STAKING_THRESHOLD` (min-stake invariant preservation) \u2014 not checked. This follows trivially from the inputs but is the protocol-level invariant this function must not break.\n\nThe spec is consistent with the implementation (it passes the prover) and correctly models the only abort, but it verifies essentially nothing about WHAT the function computes. For a merge function whose entire purpose is balance accounting, the absence of the sum `ensures` is a real correctness gap, not a stylistic one.\n\nNOTES\n- `@VERIFY(\ud83d\udee1\ufe0f/\u2705)` marks this as having an abort-modeling concern resolved; the overflow assert is the documented handling.\n- This is a client-side object merge with no StakingPool state touched, so no pool-side frame conditions are needed \u2014 that part of the writeup is correctly reflected by the spec's narrow scope.\n\n## Strengths\n\n- The sole abort condition (`!is_equal_staking_metadata`) is modeled exactly and correctly inverted as an `asserts`.\n- The combined-principal overflow assert is placed correctly before the call and uses `.to_int()` arbitrary-precision arithmetic, properly discharging the `Balance::join` overflow proof obligation.\n- Scope is correctly narrow \u2014 it recognizes this is a client-side object merge with no StakingPool state changes, so it avoids spurious pool-side frame conditions.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | 85439062a9ada70c0ef5a9bc30ac9dcf66747a51be0245ce45795ef1a4ee8dbe |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 34.16s |
+| ended_at | 2026-06-16T00:12:53.883167 |
+| cost | $1.0686 |
+| tokens | 167247 in / 2221 out |
+| cache | 128508 read / 18018 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::join_staked_sui_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/join_staked_sui_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/join_staked_sui_spec/review.meta.yaml

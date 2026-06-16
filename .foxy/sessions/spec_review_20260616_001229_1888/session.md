@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-spec-review
+description: Review staking_pool_specs::pool_id_spec against verification plan and source code.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:12:29.188936
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12645,3 +12645,96 @@ error: invalid object declaration
 
 ---
 
+## Assistant
+
+The `all_accesses` lookup failed because the project compilation has unbound modules (a sui-framework dependency resolution issue), but I have everything I need to review this simple accessor from the provided source. Let me produce the review.
+
+### Code `toolu_01VTaTFC9eAjKagWABFwVssn`
+
+```python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::pool_id_spec"
+
+analysis = (
+    "`pool_id` is a pure field projection: `public fun pool_id(staked_sui: &StakedSui): ID "
+    "{ staked_sui.pool_id }`. It reads a single immutable `&StakedSui` reference and returns the "
+    "`pool_id` field with no computation, no mutation, and no abort paths.\n\n"
+    "The writeup lists `aborts: []`, `requires: []`, and a single `ensures: result == staked_sui.pool_id`. "
+    "That postcondition is the entire correctness contract for this accessor.\n\n"
+    "The actual spec calls `staking_pool::pool_id(staked_sui)` under `#[spec(prove, target=..., no_opaque)]` "
+    "but contains **zero ensures, zero asserts, zero requires**. With `no_opaque`, the function body is inlined "
+    "for callers, so the prover can still connect `pool_id(s)` to `s.pool_id` at call sites — which is why this "
+    "passes. But the spec itself asserts nothing: it neither states nor checks that the returned ID equals the "
+    "stored `pool_id` field. A spec that proves no property provides no verification value beyond confirming the "
+    "function compiles and is abort-free.\n\n"
+    "There are correctly no abort checks to add (the function cannot abort — immutable field read), and no "
+    "unchanged-field checks are warranted because the parameter is an immutable reference. The one missing piece "
+    "is the single postcondition from the writeup.\n\n"
+    "Adding the field projection postcondition is straightforward. Because `pool_id` is itself the canonical "
+    "accessor for the field, the ensures can be expressed against the captured input, e.g. `let r = "
+    "staking_pool::pool_id(staked_sui); ensures(r == staking_pool::pool_id(staked_sui)); r` is tautological — "
+    "instead bind a snapshot of the field via a `#[test_only]`/`#[spec_only]` accessor or compare against the "
+    "input's field directly so the ensures is meaningful (e.g. `ensures(result == staked_sui.pool_id)` using a "
+    "spec-visible field accessor). This is foundational: multiple callers (`request_withdraw_stake`, "
+    "`withdraw_from_principal`, `redeem_fungible_staked_sui`) rely on pool-id equality for their `EWrongPool` "
+    "membership checks, so a meaningful ensures here anchors those downstream proofs."
+)
+
+issues = [
+    {
+        "description": (
+            "The spec has no `ensures` at all, so it does not verify the function's only correctness property: "
+            "that the returned `ID` equals the `StakedSui.pool_id` field. As written, the spec proves nothing "
+            "about the return value (it passes only because `no_opaque` inlines the trivial body at call sites). "
+            "Add `ensures(result == staked_sui.pool_id)` (via a spec-visible field accessor) so the projection is "
+            "actually checked — this is the foundation for the EWrongPool pool-membership invariants used by "
+            "request_withdraw_stake, withdraw_from_principal, and redeem_fungible_staked_sui."
+        ),
+        "severity": "medium",
+        "confidence": "high",
+    },
+]
+
+strengths = [
+    "Correctly targets the right function with a faithful signature and uses `no_opaque`, which is the appropriate flag for a trivial getter so callers see the inlined body.",
+    "Correctly adds no spurious abort checks — the function reads an immutable reference and cannot abort.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict="has_gaps",
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+
+```
+
+> 149445 in, 1432 out, 64254 cache read, 17134 cache create
+
+### Result `toolu_01VTaTFC9eAjKagWABFwVssn`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::pool_id_spec`\n\n**Verdict:** \u25b3 Has Gaps\n\n## Issues\n\n- \u25cb **medium/high**: The spec has no `ensures` at all, so it does not verify the function's only correctness property: that the returned `ID` equals the `StakedSui.pool_id` field. As written, the spec proves nothing about the return value (it passes only because `no_opaque` inlines the trivial body at call sites). Add `ensures(result == staked_sui.pool_id)` (via a spec-visible field accessor) so the projection is actually checked \u2014 this is the foundation for the EWrongPool pool-membership invariants used by request_withdraw_stake, withdraw_from_principal, and redeem_fungible_staked_sui.\n\n## Analysis\n\n`pool_id` is a pure field projection: `public fun pool_id(staked_sui: &StakedSui): ID { staked_sui.pool_id }`. It reads a single immutable `&StakedSui` reference and returns the `pool_id` field with no computation, no mutation, and no abort paths.\n\nThe writeup lists `aborts: []`, `requires: []`, and a single `ensures: result == staked_sui.pool_id`. That postcondition is the entire correctness contract for this accessor.\n\nThe actual spec calls `staking_pool::pool_id(staked_sui)` under `#[spec(prove, target=..., no_opaque)]` but contains **zero ensures, zero asserts, zero requires**. With `no_opaque`, the function body is inlined for callers, so the prover can still connect `pool_id(s)` to `s.pool_id` at call sites \u2014 which is why this passes. But the spec itself asserts nothing: it neither states nor checks that the returned ID equals the stored `pool_id` field. A spec that proves no property provides no verification value beyond confirming the function compiles and is abort-free.\n\nThere are correctly no abort checks to add (the function cannot abort \u2014 immutable field read), and no unchanged-field checks are warranted because the parameter is an immutable reference. The one missing piece is the single postcondition from the writeup.\n\nAdding the field projection postcondition is straightforward. Because `pool_id` is itself the canonical accessor for the field, the ensures can be expressed against the captured input, e.g. `let r = staking_pool::pool_id(staked_sui); ensures(r == staking_pool::pool_id(staked_sui)); r` is tautological \u2014 instead bind a snapshot of the field via a `#[test_only]`/`#[spec_only]` accessor or compare against the input's field directly so the ensures is meaningful (e.g. `ensures(result == staked_sui.pool_id)` using a spec-visible field accessor). This is foundational: multiple callers (`request_withdraw_stake`, `withdraw_from_principal`, `redeem_fungible_staked_sui`) rely on pool-id equality for their `EWrongPool` membership checks, so a meaningful ensures here anchors those downstream proofs.\n\n## Strengths\n\n- Correctly targets the right function with a faithful signature and uses `no_opaque`, which is the appropriate flag for a trivial getter so callers see the inlined body.\n- Correctly adds no spurious abort checks \u2014 the function reads an immutable reference and cannot abort.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | 8faf44bd2757ab2c0200fb28f4b5588e462813226edb42c40c9ee27107444b91 |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 27.46s |
+| ended_at | 2026-06-16T00:12:56.649262 |
+| cost | $1.0439 |
+| tokens | 166387 in / 1624 out |
+| cache | 128508 read / 17134 create |

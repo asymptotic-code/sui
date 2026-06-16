@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-spec-review
+description: Review staking pool spec for pending stake withdraw amount against verification plan.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:12:26.504063
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12652,3 +12652,100 @@ error: invalid object declaration
 
 ---
 
+## Assistant
+
+The `all_accesses` lookup failed due to a compilation issue (the package has unbound modules when parsed in isolation), but this is a trivial getter so I have everything I need from the source. Let me produce the review directly.
+
+### Code `toolu_01ExHwUzPdWKqmDLeZn69RYj`
+
+```python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::pending_stake_withdraw_amount_spec"
+
+analysis = (
+    "The target `pending_stake_withdraw_amount` is a one-line pure field projection: it returns "
+    "`staking_pool.pending_total_sui_withdraw`. The writeup confirms there are no abort conditions "
+    "and no preconditions; the only stated postcondition is `result == staking_pool.pending_total_sui_withdraw`.\n\n"
+    "**Aborts:** None. A bare field read on an immutable `&StakingPool` reference cannot abort, so the "
+    "absence of `asserts` is correct and complete. There is nothing to cover here.\n\n"
+    "**Postcondition coverage:** This is the one substantive gap. The spec body merely calls the target and "
+    "returns its result without an `ensures` clause. Because the spec carries `no_opaque`, the prover inlines "
+    "the function body, so the `_Check` proof trivially passes — but the spec verifies *nothing* about the "
+    "return value. It does not assert `result == staking_pool.pending_total_sui_withdraw`. As written, this "
+    "spec only establishes that the call type-checks and is abort-free; it provides no behavioral guarantee a "
+    "caller could rely on, and it would still pass if the function were changed to return a different field "
+    "(e.g. `pending_stake` or `pending_pool_token_withdraw`).\n\n"
+    "Since `pending_total_sui_withdraw` is a private field, exposing it in the `ensures` requires a "
+    "`#[test_only, ext(pure)]` accessor in the implementation module (or a spec-only getter), after which the "
+    "postcondition `ensures(result == staking_pool.pending_total_sui_withdraw())` should be added. With "
+    "`no_opaque` the projection unfolds inline, so this is straightforward to discharge.\n\n"
+    "**Unchanged state:** The parameter is an immutable `&StakingPool`, so no frame conditions are needed — "
+    "the type system guarantees the pool is not mutated."
+)
+
+issues = [
+    {
+        "description": (
+            "The spec has no `ensures` clause, so it verifies nothing about the return value. The writeup's "
+            "sole postcondition `result == staking_pool.pending_total_sui_withdraw` is not encoded. Because the "
+            "function reads a private field, add a `#[test_only, ext(pure)]` accessor (or spec-only getter) and "
+            "then `ensures(result == staking_pool.pending_total_sui_withdraw())`. As written the spec would still "
+            "pass even if the implementation returned a different field (e.g. `pending_stake`), creating false "
+            "confidence."
+        ),
+        "severity": "high",
+        "confidence": "high",
+    },
+]
+
+strengths = [
+    "Correctly identifies the function as abort-free and omits unnecessary `asserts`.",
+    "Uses `no_opaque`, the right choice for a trivial getter so the field projection unfolds inline.",
+    "Targets the correct function with the proper `_spec` naming convention.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict="has_gaps",
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+
+```
+
+> 149454 in, 1248 out, 64254 cache read, 17384 cache create
+
+### Result `toolu_01ExHwUzPdWKqmDLeZn69RYj`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::pending_stake_withdraw_amount_spec`\n\n**Verdict:** \u25b3 Has Gaps\n\n## Issues\n\n- \u25cf **high/high**: The spec has no `ensures` clause, so it verifies nothing about the return value. The writeup's sole postcondition `result == staking_pool.pending_total_sui_withdraw` is not encoded. Because the function reads a private field, add a `#[test_only, ext(pure)]` accessor (or spec-only getter) and then `ensures(result == staking_pool.pending_total_sui_withdraw())`. As written the spec would still pass even if the implementation returned a different field (e.g. `pending_stake`), creating false confidence.\n\n## Analysis\n\nThe target `pending_stake_withdraw_amount` is a one-line pure field projection: it returns `staking_pool.pending_total_sui_withdraw`. The writeup confirms there are no abort conditions and no preconditions; the only stated postcondition is `result == staking_pool.pending_total_sui_withdraw`.\n\n**Aborts:** None. A bare field read on an immutable `&StakingPool` reference cannot abort, so the absence of `asserts` is correct and complete. There is nothing to cover here.\n\n**Postcondition coverage:** This is the one substantive gap. The spec body merely calls the target and returns its result without an `ensures` clause. Because the spec carries `no_opaque`, the prover inlines the function body, so the `_Check` proof trivially passes \u2014 but the spec verifies *nothing* about the return value. It does not assert `result == staking_pool.pending_total_sui_withdraw`. As written, this spec only establishes that the call type-checks and is abort-free; it provides no behavioral guarantee a caller could rely on, and it would still pass if the function were changed to return a different field (e.g. `pending_stake` or `pending_pool_token_withdraw`).\n\nSince `pending_total_sui_withdraw` is a private field, exposing it in the `ensures` requires a `#[test_only, ext(pure)]` accessor in the implementation module (or a spec-only getter), after which the postcondition `ensures(result == staking_pool.pending_total_sui_withdraw())` should be added. With `no_opaque` the projection unfolds inline, so this is straightforward to discharge.\n\n**Unchanged state:** The parameter is an immutable `&StakingPool`, so no frame conditions are needed \u2014 the type system guarantees the pool is not mutated.\n\n## Strengths\n\n- Correctly identifies the function as abort-free and omits unnecessary `asserts`.\n- Uses `no_opaque`, the right choice for a trivial getter so the field projection unfolds inline.\n- Targets the correct function with the proper `_spec` naming convention.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | 58585d282be79be6aafb8facfb99e9d8dd32bee27ee63c56cc1172016506ac93 |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 22.97s |
+| ended_at | 2026-06-16T00:12:49.469806 |
+| cost | $1.0421 |
+| tokens | 166647 in / 1439 out |
+| cache | 128508 read / 17384 create |
+
+
+## Knowledge Output
+
+- field: spec/review/staking_pool_specs::pending_stake_withdraw_amount_spec
+- data: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/pending_stake_withdraw_amount_spec/spec.review.md
+- meta: /Users/cos/asymptotic/agent/clients/mysten/sui/crates/sui-framework/packages/sui-system/specs/sources/staking_pool_specs.foxy/pending_stake_withdraw_amount_spec/review.meta.yaml

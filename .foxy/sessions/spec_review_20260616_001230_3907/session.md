@@ -9,8 +9,8 @@ timeout: 360
 token_budget: null
 harness: foxy
 parent_session: null
-name: null
-description: null
+name: staking-pool-token-spec-review
+description: Review specification for pool token amount calculation against verification plan.
 cwd: /Users/cos/asymptotic/agent/clients/mysten/sui
 started_at: 2026-06-16T00:12:30.390942
 foxy_commit: 38346c7c25594d3c381dff95b53fe33dba150411
@@ -12650,3 +12650,100 @@ error: invalid object declaration
 
 ---
 
+## Assistant
+
+The `all_accesses` lookup failed because the package doesn't compile standalone (vendored framework deps unresolved), but for this trivial getter I have everything I need from the provided source, module, and writeup.
+
+### Code `toolu_01HrDeH7VJ9o9VUqF8dXSS93`
+
+```python
+from foxy.skills.spec_review.api import format_review_md
+
+function = "staking_pool_specs::pool_token_amount_spec"
+
+analysis = (
+    "The target `staking_pool::pool_token_amount` is a pure field projection: "
+    "`exchange_rate.pool_token_amount`. It takes an immutable `&PoolTokenExchangeRate`, "
+    "performs no arithmetic, touches no table/dynamic field, never aborts, and has no "
+    "preconditions. The writeup confirms this: empty `aborts`, empty `requires`, and a "
+    "single `ensures` -- `result == exchange_rate.pool_token_amount`.\n\n"
+    "The spec is marked `#[spec(prove, no_opaque)]` and simply forwards to the target, "
+    "returning its result. There are 0 asserts, 0 requires, and 0 ensures.\n\n"
+    "Abort coverage: nothing to cover -- the function cannot abort, so the absence of "
+    "`asserts` is correct. The `_Assume` check passes vacuously (no asserts), and "
+    "`_SpecNoAbortCheck` is trivial.\n\n"
+    "Postcondition coverage: this is the one real gap. The writeup's sole `ensures` "
+    "(`result == exchange_rate.pool_token_amount`) is not present in the spec. Because "
+    "the spec carries `no_opaque`, the prover inlines the body, so the call site is "
+    "connected to the field read and the spec still passes -- but the spec does not "
+    "actually *assert* the projection. As written it verifies nothing beyond "
+    "well-formedness: it would still pass if the accessor returned the wrong field "
+    "(e.g. `sui_amount`) or any other u64, since there is no `ensures` to contradict. "
+    "Adding `ensures(result == staking_pool::pool_token_amount(exchange_rate))` is "
+    "circular and useless; the meaningful check requires exposing the field to the spec "
+    "(e.g. a `#[test_only, ext(pure)]` accessor) and asserting equality against it, "
+    "matching the writeup's intent.\n\n"
+    "Since the input is an immutable reference, there are no mutations or unchanged-field "
+    "obligations to verify -- the type system already guarantees `PoolTokenExchangeRate` "
+    "is untouched. The `no_opaque` flag is appropriate for a getter and is not itself an issue."
+)
+
+issues = [
+    {
+        "description": (
+            "The spec has no `ensures`, so it does not verify the function's only "
+            "behavioral property: that the returned u64 equals the struct's "
+            "`pool_token_amount` field. As written the spec passes vacuously and would "
+            "continue to pass even if the accessor returned the wrong field (e.g. "
+            "`sui_amount`) or an unrelated value. Add an ensures tying the result to the "
+            "field -- e.g. expose `pool_token_amount` via a `#[test_only, ext(pure)]` "
+            "accessor and assert `result == that_accessor(exchange_rate)`."
+        ),
+        "severity": "medium",
+        "confidence": "high",
+    }
+]
+
+strengths = [
+    "Correctly omits abort modeling -- the target is a pure, non-aborting field read, so the empty asserts/requires set is right.",
+    "Uses `no_opaque`, the appropriate flag for a trivial getter, keeping the field read transparent to callers.",
+    "Signature and forwarding match the target exactly, so the spec is well-formed and consistent with the implementation.",
+]
+
+md = format_review_md(
+    function=function,
+    verdict="has_gaps",
+    issues=issues,
+    analysis=analysis,
+    strengths=strengths,
+)
+final_result(md)
+foxy_inspect(md[:600])
+```
+
+> 149448 in, 1395 out, 64254 cache read, 17291 cache create
+
+### Result `toolu_01HrDeH7VJ9o9VUqF8dXSS93`
+
+<!-- {"executed":true,"return_value":"# Spec Review: `staking_pool_specs::pool_token_amount_spec`\n\n**Verdict:** \u25b3 Has Gaps\n\n## Issues\n\n- \u25cb **medium/high**: The spec has no `ensures`, so it does not verify the function's only behavioral property: that the returned u64 equals the struct's `pool_token_amount` field. As written the spec passes vacuously and would continue to pass even if the accessor returned the wrong field (e.g. `sui_amount`) or an unrelated value. Add an ensures tying the result to the field -- e.g. expose `pool_token_amount` via a `#[test_only, ext(pure)]` accessor and assert `result == that_accessor(exchange_rate)`.\n\n## Analysis\n\nThe target `staking_pool::pool_token_amount` is a pure field projection: `exchange_rate.pool_token_amount`. It takes an immutable `&PoolTokenExchangeRate`, performs no arithmetic, touches no table/dynamic field, never aborts, and has no preconditions. The writeup confirms this: empty `aborts`, empty `requires`, and a single `ensures` -- `result == exchange_rate.pool_token_amount`.\n\nThe spec is marked `#[spec(prove, no_opaque)]` and simply forwards to the target, returning its result. There are 0 asserts, 0 requires, and 0 ensures.\n\nAbort coverage: nothing to cover -- the function cannot abort, so the absence of `asserts` is correct. The `_Assume` check passes vacuously (no asserts), and `_SpecNoAbortCheck` is trivial.\n\nPostcondition coverage: this is the one real gap. The writeup's sole `ensures` (`result == exchange_rate.pool_token_amount`) is not present in the spec. Because the spec carries `no_opaque`, the prover inlines the body, so the call site is connected to the field read and the spec still passes -- but the spec does not actually *assert* the projection. As written it verifies nothing beyond well-formedness: it would still pass if the accessor returned the wrong field (e.g. `sui_amount`) or any other u64, since there is no `ensures` to contradict. Adding `ensures(result == staking_pool::pool_token_amount(exchange_rate))` is circular and useless; the meaningful check requires exposing the field to the spec (e.g. a `#[test_only, ext(pure)]` accessor) and asserting equality against it, matching the writeup's intent.\n\nSince the input is an immutable reference, there are no mutations or unchanged-field obligations to verify -- the type system already guarantees `PoolTokenExchangeRate` is untouched. The `no_opaque` flag is appropriate for a getter and is not itself an issue.\n\n## Strengths\n\n- Correctly omits abort modeling -- the target is a pure, non-aborting field read, so the empty asserts/requires set is right.\n- Uses `no_opaque`, the appropriate flag for a trivial getter, keeping the field read transparent to callers.\n- Signature and forwarding match the target exactly, so the spec is well-formed and consistent with the implementation.\n"} -->
+```
+✓ ok
+```
+
+---
+
+# Session Complete
+
+| | |
+|---|---|
+| status | success |
+| stop_reason | tool_use |
+| model | claude-opus-4-8 |
+| prompt | 41bb0cfedb048288cd69ac12f1cb23611e7a5ca60789cbaf73c9f1e8a5c3a486 |
+| turns | 2 |
+| tool_calls | 2 |
+| time | 24.95s |
+| ended_at | 2026-06-16T00:12:55.343228 |
+| cost | $1.0442 |
+| tokens | 166572 in / 1562 out |
+| cache | 128508 read / 17291 create |

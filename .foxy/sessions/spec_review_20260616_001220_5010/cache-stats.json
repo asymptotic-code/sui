@@ -1,11 +1,11 @@
 {
-  "turns": 1,
-  "cache_reads_total": 64254,
-  "cache_creations_total": 0,
-  "input_total": 17086,
+  "turns": 2,
+  "cache_reads_total": 128508,
+  "cache_creations_total": 17264,
+  "input_total": 166515,
   "unexpected_breaks": 0,
   "expected_invalidations": 0,
   "last_break_reason": null,
   "last_break_at": null,
-  "hit_ratio": 0.7899434472584215
+  "hit_ratio": 0.41150608254586324
 }
