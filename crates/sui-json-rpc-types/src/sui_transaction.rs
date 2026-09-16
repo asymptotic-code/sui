@@ -19,6 +19,7 @@ use move_bytecode_utils::module_cache::GetModule;
 use move_core_types::annotated_value::MoveTypeLayout;
 use move_core_types::identifier::{IdentStr, Identifier};
 use move_core_types::language_storage::{ModuleId, StructTag, TypeTag};
+use mysten_common::ZipDebugEqIteratorExt;
 use mysten_metrics::monitored_scope;
 use nonempty::NonEmpty;
 use sui_json::{SuiJsonValue, primitive_type};
@@ -626,6 +627,9 @@ impl SuiTransactionBlockKind {
                             EndOfEpochTransactionKind::WriteAccumulatorStorageCost(_) => {
                                 SuiEndOfEpochTransactionKind::WriteAccumulatorStorageCost
                             }
+                            EndOfEpochTransactionKind::ForwardingAddressRegistryCreate => {
+                                SuiEndOfEpochTransactionKind::ForwardingAddressRegistryCreate
+                            }
                         })
                         .collect(),
                 })
@@ -1057,7 +1061,7 @@ impl TryFrom<TransactionEffects> for SuiTransactionBlockEffects {
                 gas_used: effect.gas_cost_summary().clone(),
                 shared_objects: to_sui_object_ref(
                     effect
-                        .input_consensus_objects()
+                        .accessed_consensus_objects()
                         .into_iter()
                         .map(|kind| {
                             #[allow(deprecated)]
@@ -1072,10 +1076,20 @@ impl TryFrom<TransactionEffects> for SuiTransactionBlockEffects {
                 deleted: to_sui_object_ref(effect.deleted().to_vec()),
                 unwrapped_then_deleted: to_sui_object_ref(effect.unwrapped_then_deleted().to_vec()),
                 wrapped: to_sui_object_ref(effect.wrapped().to_vec()),
-                gas_object: OwnedObjectRef {
-                    owner: effect.gas_object().1,
-                    reference: effect.gas_object().0.into(),
-                },
+                gas_object: effect.gas_object().map_or_else(
+                    || OwnedObjectRef {
+                        owner: Owner::AddressOwner(SuiAddress::default()),
+                        reference: SuiObjectRef {
+                            object_id: ObjectID::ZERO,
+                            version: SequenceNumber::default(),
+                            digest: ObjectDigest::MIN,
+                        },
+                    },
+                    |(obj_ref, owner)| OwnedObjectRef {
+                        owner,
+                        reference: obj_ref.into(),
+                    },
+                ),
                 events_digest: effect.events_digest().copied(),
                 dependencies: effect.dependencies().to_vec(),
                 abort_error: effect
@@ -1795,6 +1809,7 @@ pub enum SuiEndOfEpochTransactionKind {
     DisplayRegistryCreate,
     AddressAliasStateCreate,
     WriteAccumulatorStorageCost,
+    ForwardingAddressRegistryCreate,
 }
 
 #[serde_as]
@@ -1903,7 +1918,7 @@ impl SuiProgrammableTransactionBlock {
         Ok(SuiProgrammableTransactionBlock {
             inputs: inputs
                 .into_iter()
-                .zip(input_types)
+                .zip_debug_eq(input_types)
                 .map(|(arg, layout)| SuiCallArg::try_from(arg, layout.as_ref()))
                 .collect::<Result<_, _>>()?,
             commands: commands.into_iter().map(SuiCommand::from).collect(),
@@ -1914,12 +1929,20 @@ impl SuiProgrammableTransactionBlock {
         value: ProgrammableTransaction,
         package_resolver: &Resolver<impl PackageStore>,
     ) -> Result<Self, anyhow::Error> {
-        let input_types = package_resolver.pure_input_layouts(&value).await?;
+        // If the resolver can't infer layouts (e.g. a MoveCall references a function the resolver
+        // can't find), fall back to rendering every pure input as untyped bytes rather than
+        // failing the whole conversion. Matches the legacy `sui-json-rpc` behavior and the
+        // `sui-indexer-alt-graphql` behavior at `programmable/mod.rs`.
+        let input_types = match package_resolver.pure_input_layouts(&value).await {
+            Ok(layouts) => layouts,
+            Err(_) => vec![None; value.inputs.len()],
+        };
+
         let ProgrammableTransaction { inputs, commands } = value;
         Ok(SuiProgrammableTransactionBlock {
             inputs: inputs
                 .into_iter()
-                .zip(input_types)
+                .zip_debug_eq(input_types)
                 .map(|(arg, layout)| SuiCallArg::try_from(arg, layout.as_ref()))
                 .collect::<Result<_, _>>()?,
             commands: commands.into_iter().map(SuiCommand::from).collect(),
@@ -1949,6 +1972,8 @@ impl SuiProgrammableTransactionBlock {
                     else {
                         return result_types;
                     };
+                    #[allow(clippy::disallowed_methods)]
+                    // Intentional zip: types includes implicit TxContext params not in arguments
                     for (arg, type_) in c.arguments.iter().zip(types) {
                         if let (&Argument::Input(i), Some(type_)) = (arg, type_)
                             && let Some(x) = result_types.get_mut(i as usize)
@@ -2401,6 +2426,9 @@ impl SuiCallArg {
                 withdraw_from: match arg.withdraw_from {
                     WithdrawFrom::Sender => SuiWithdrawFrom::Sender,
                     WithdrawFrom::Sponsor => SuiWithdrawFrom::Sponsor,
+                    WithdrawFrom::SenderAllowance { funder, allowance } => {
+                        SuiWithdrawFrom::SenderAllowance { funder, allowance }
+                    }
                 },
             }),
         })
@@ -2499,6 +2527,10 @@ pub enum SuiWithdrawalTypeArg {
 pub enum SuiWithdrawFrom {
     Sender,
     Sponsor,
+    SenderAllowance {
+        funder: SuiAddress,
+        allowance: ObjectID,
+    },
 }
 
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2615,5 +2647,64 @@ impl Filter<EffectsWithInput> for TransactionFilter {
             TransactionFilter::Checkpoint(_) => false,
             TransactionFilter::FromOrToAddress { addr: _ } => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use move_core_types::account_address::AccountAddress;
+    use move_core_types::ident_str;
+    use sui_package_resolver::Package;
+    use sui_package_resolver::error::Error as PackageResolverError;
+    use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
+
+    use super::*;
+
+    struct EmptyPackageStore;
+
+    #[async_trait]
+    impl PackageStore for EmptyPackageStore {
+        async fn fetch(&self, id: AccountAddress) -> sui_package_resolver::Result<Arc<Package>> {
+            Err(PackageResolverError::PackageNotFound(id))
+        }
+    }
+
+    #[tokio::test]
+    async fn programmable_transaction_falls_back_when_layout_resolution_fails() {
+        let mut builder = ProgrammableTransactionBuilder::new();
+        let recipient = builder.pure(SuiAddress::ZERO).unwrap();
+        builder.programmable_move_call(
+            ObjectID::ZERO,
+            ident_str!("pay").to_owned(),
+            ident_str!("pay_all_sui").to_owned(),
+            vec![],
+            vec![recipient],
+        );
+
+        let resolver = Resolver::new(EmptyPackageStore);
+        let transaction = SuiProgrammableTransactionBlock::try_from_with_package_resolver(
+            builder.finish(),
+            &resolver,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(transaction.commands.len(), 1);
+        assert_eq!(transaction.inputs.len(), 1);
+
+        let SuiCallArg::Pure(input) = &transaction.inputs[0] else {
+            panic!("expected pure input");
+        };
+        assert_eq!(input.value_type(), None);
+
+        // SuiAddress::ZERO BCS-encodes to 32 zero bytes. With no layout, those bytes should come
+        // through unchanged as a JSON array of numbers.
+        assert_eq!(
+            input.value().to_json_value(),
+            serde_json::json!(vec![0u8; 32]),
+        );
     }
 }

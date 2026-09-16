@@ -1,8 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use mysten_common::ZipDebugEqIteratorExt;
+
+#[cfg(test)]
 use crate::authority::authority_per_epoch_store::AuthorityPerEpochStore;
 use sui_types::base_types::{ObjectID, ObjectRef};
+#[cfg(test)]
 use sui_types::digests::TransactionDigest;
 use sui_types::error::{SuiErrorKind, SuiResult, UserInputError};
 use sui_types::object::Object;
@@ -18,6 +22,7 @@ impl ObjectLocks {
         Self {}
     }
 
+    #[cfg(test)]
     pub(crate) fn get_transaction_lock(
         &self,
         obj_ref: &ObjectRef,
@@ -95,7 +100,7 @@ impl ObjectLocks {
         let live_objects = Self::multi_get_objects_must_exist(cache, &object_ids)?;
 
         // Validate that all objects are live and versions/digests match
-        for (obj_ref, live_object) in owned_input_objects.iter().zip(live_objects.iter()) {
+        for (obj_ref, live_object) in owned_input_objects.iter().zip_debug_eq(live_objects.iter()) {
             Self::verify_live_object(obj_ref, live_object)?;
         }
 

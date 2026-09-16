@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bincode::Options;
 use itertools::Itertools;
 use move_core_types::language_storage::{ModuleId, StructTag, TypeTag};
+use mysten_common::ZipDebugEqIteratorExt;
 use parking_lot::ArcMutexGuard;
 use prometheus::{
     IntCounter, IntCounterVec, Registry, register_int_counter_vec_with_registry,
@@ -358,7 +359,7 @@ impl IndexStoreTables {
                 entries_a.len(),
                 entries_b.len()
             );
-            for (i, (a, b)) in entries_a.iter().zip(entries_b.iter()).enumerate() {
+            for (i, (a, b)) in entries_a.iter().zip_debug_eq(entries_b.iter()).enumerate() {
                 assert!(
                     a == b,
                     "{name}: mismatch at sorted entry {i}:\n  a={a:?}\n  b={b:?}"
@@ -411,7 +412,7 @@ impl IndexStoreTables {
                 entries_a.len(),
                 entries_b.len()
             );
-            for (i, (a, b)) in entries_a.iter().zip(entries_b.iter()).enumerate() {
+            for (i, (a, b)) in entries_a.iter().zip_debug_eq(entries_b.iter()).enumerate() {
                 assert!(
                     a == b,
                     "{name}: mismatch at sorted entry {i}:\n  a={a:?}\n  b={b:?}"
@@ -478,7 +479,7 @@ impl IndexStoreTables {
                 entries_a.len(),
                 entries_b.len()
             );
-            for (i, (a, b)) in entries_a.iter().zip(entries_b.iter()).enumerate() {
+            for (i, (a, b)) in entries_a.iter().zip_debug_eq(entries_b.iter()).enumerate() {
                 assert!(
                     a == b,
                     "transactions_by_move_function: mismatch at sorted entry {i}:\n  a={a:?}\n  b={b:?}"
@@ -513,7 +514,7 @@ impl IndexStoreTables {
                 vals_a.len(),
                 vals_b.len()
             );
-            for (i, (a, b)) in vals_a.iter().zip(vals_b.iter()).enumerate() {
+            for (i, (a, b)) in vals_a.iter().zip_debug_eq(vals_b.iter()).enumerate() {
                 assert!(
                     a == b,
                     "event_order: mismatch at sorted entry {i}:\n  a={a:?}\n  b={b:?}"
@@ -567,7 +568,7 @@ impl IndexStoreTables {
                 vals_a.len(),
                 vals_b.len()
             );
-            for (i, (a, b)) in vals_a.iter().zip(vals_b.iter()).enumerate() {
+            for (i, (a, b)) in vals_a.iter().zip_debug_eq(vals_b.iter()).enumerate() {
                 assert!(
                     a == b,
                     "event_by_time: mismatch at sorted entry {i}:\n  a={a:?}\n  b={b:?}"
@@ -948,9 +949,7 @@ impl IndexStore {
                 };
 
                 // only process coin types
-                let (coin_type, coin) = object
-                    .coin_type_maybe()
-                    .and_then(|coin_type| object.as_coin_maybe().map(|coin| (coin_type, coin)))?;
+                let (coin_type, coin) = object.coin_type_maybe().zip(object.as_coin_maybe())?;
 
                 let key = CoinIndexKey2::new(
                     *owner,
@@ -988,9 +987,7 @@ impl IndexStore {
                 };
 
                 // only process coin types
-                let (coin_type, coin) = object
-                    .coin_type_maybe()
-                    .and_then(|coin_type| object.as_coin_maybe().map(|coin| (coin_type, coin)))?;
+                let (coin_type, coin) = object.coin_type_maybe().zip(object.as_coin_maybe())?;
 
                 let key = CoinIndexKey2::new(
                     *owner,
@@ -1112,15 +1109,20 @@ impl IndexStore {
                 .map(|(obj_id, module, function)| ((obj_id, module, function, sequence), *digest)),
         )?;
 
-        batch.insert_batch(
-            &self.tables.transactions_to_addr,
-            mutated_objects.filter_map(|(_, owner)| {
+        // objects sent to addresses and accumulator events
+        let affected_addresses = mutated_objects
+            .filter_map(|(_, owner)| {
                 owner
                     .get_address_owner_address()
                     .ok()
                     .map(|addr| ((addr, sequence), digest))
-            }),
-        )?;
+            })
+            .chain(
+                accumulator_events
+                    .iter()
+                    .map(|event| ((event.write.address.address, sequence), digest)),
+            );
+        batch.insert_batch(&self.tables.transactions_to_addr, affected_addresses)?;
 
         // Coin Index
         let cache_updates = self.index_coin(
@@ -1999,13 +2001,10 @@ impl IndexStore {
 
     pub fn insert_genesis_objects(&self, object_index_changes: ObjectIndexChanges) -> SuiResult {
         let mut batch = self.tables.owner_index.batch();
-        batch.insert_batch(
-            &self.tables.owner_index,
-            object_index_changes.new_owners.into_iter(),
-        )?;
+        batch.insert_batch(&self.tables.owner_index, object_index_changes.new_owners)?;
         batch.insert_batch(
             &self.tables.dynamic_field_index,
-            object_index_changes.new_dynamic_fields.into_iter(),
+            object_index_changes.new_dynamic_fields,
         )?;
         batch.write()?;
         Ok(())
@@ -2278,7 +2277,6 @@ mod tests {
     use move_core_types::account_address::AccountAddress;
     use prometheus::Registry;
     use std::collections::BTreeMap;
-    use std::env::temp_dir;
     use sui_types::base_types::{ObjectInfo, ObjectType, SuiAddress};
     use sui_types::digests::TransactionDigest;
     use sui_types::effects::TransactionEvents;
@@ -2295,8 +2293,13 @@ mod tests {
         // and verified from both db and cache.
         // This tests make sure we are invalidating entries in the cache and always reading latest
         // balance.
-        let index_store =
-            IndexStore::new_without_init(temp_dir(), &Registry::default(), Some(128), false);
+        let dir = tempfile::tempdir().unwrap();
+        let index_store = IndexStore::new_without_init(
+            dir.path().to_path_buf(),
+            &Registry::default(),
+            Some(128),
+            false,
+        );
         let address: SuiAddress = AccountAddress::random().into();
         let mut written_objects = BTreeMap::new();
         let mut input_objects = BTreeMap::new();
@@ -2431,7 +2434,13 @@ mod tests {
         use sui_types::base_types::ObjectID;
         use typed_store::Map;
 
-        let index_store = IndexStore::new(temp_dir(), &Registry::default(), Some(128), false);
+        let dir = tempfile::tempdir().unwrap();
+        let index_store = IndexStore::new(
+            dir.path().to_path_buf(),
+            &Registry::default(),
+            Some(128),
+            false,
+        );
         let db = &index_store.tables.transactions_by_move_function;
         db.insert(
             &(

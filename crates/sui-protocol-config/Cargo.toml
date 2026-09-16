@@ -10,7 +10,9 @@ edition = "2024"
 workspace = true
 
 [dependencies]
+antithesis_sdk.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 serde_with.workspace = true
 sui-protocol-config-macros.workspace = true
@@ -26,3 +28,5 @@ rand.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+prost-types.workspace = true
+tempfile.workspace = true

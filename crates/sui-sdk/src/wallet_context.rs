@@ -182,8 +182,7 @@ impl WalletContext {
         force_recache: bool,
     ) -> Result<String, anyhow::Error> {
         let env = self.get_active_env()?;
-        if !force_recache && env.chain_id.is_some() {
-            let chain_id = env.chain_id.as_ref().unwrap();
+        if !force_recache && let Some(chain_id) = env.chain_id.as_ref() {
             info!("Found cached chain ID for env {}: {}", env.alias, chain_id);
             return Ok(chain_id.clone());
         }
@@ -401,6 +400,22 @@ impl WalletContext {
     pub async fn get_reference_gas_price(&self) -> Result<u64, anyhow::Error> {
         self.grpc_client()?
             .get_reference_gas_price()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn get_current_epoch(&self) -> Result<u64, anyhow::Error> {
+        self.grpc_client()?
+            .get_current_epoch()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn get_chain_identifier(
+        &self,
+    ) -> Result<sui_types::digests::ChainIdentifier, anyhow::Error> {
+        self.grpc_client()?
+            .get_chain_identifier()
             .await
             .map_err(Into::into)
     }

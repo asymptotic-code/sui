@@ -23,14 +23,18 @@ use arc_swap::ArcSwap;
 use effects_certifier::*;
 use mysten_common::backoff::ExponentialBackoff;
 use mysten_metrics::{monitored_future, spawn_logged_monitored_task};
+use nonempty::NonEmpty;
 use parking_lot::Mutex;
 use rand::Rng;
+use request_retrier::SELECT_LATENCY_DELTA;
 use sui_config::NodeConfig;
 use sui_types::{
+    base_types::AuthorityName,
     committee::EpochId,
     error::{ErrorCategory, UserInputError},
-    messages_grpc::{PingType, SubmitTxRequest, SubmitTxResult, TxType},
-    transaction::TransactionDataAPI as _,
+    messages_grpc::{SubmitTxRequest, SubmitTxResult, TxType},
+    transaction::{AllowedProposers, TransactionDataAPI as _},
+    transaction_executor::ProposerSelector,
 };
 use tokio::{
     task::JoinSet,
@@ -46,6 +50,10 @@ use crate::{
         OperationFeedback, OperationType, ValidatorClientMetrics, ValidatorClientMonitor,
     },
 };
+
+#[cfg(test)]
+#[path = "unit_tests/proposer_selector_tests.rs"]
+mod proposer_selector_tests;
 
 /// Trait for components that can update their AuthorityAggregator during reconfiguration.
 /// Used by ReconfigObserver to notify components of epoch changes.
@@ -141,6 +149,42 @@ where
         &self.authority_aggregator
     }
 
+    pub fn select_preferred_validators(&self, delta: f64) -> Vec<AuthorityName> {
+        let authority_aggregator = self.authority_aggregator.load();
+        self.client_monitor
+            .select_shuffled_preferred_validators(&authority_aggregator.committee, delta)
+    }
+
+    /// The validators this node would prefer to submit to, as committee indices.
+    ///
+    /// These are the same targets `RequestRetrier` would pick, so a transaction restricted to them
+    /// names the validators it was going to be sent to anyway.
+    fn preferred_proposers_impl(&self, max: usize) -> Option<AllowedProposers> {
+        // Before any latency has been observed the ranking is an arbitrary shuffle, so pinning to
+        // it would be worse than leaving the transaction unrestricted.
+        if !self.client_monitor.has_observed_latencies() {
+            return None;
+        }
+
+        let authority_aggregator = self.authority_aggregator.load();
+        let committee = &authority_aggregator.committee;
+        let mut proposers: Vec<u32> = self
+            .client_monitor
+            .select_shuffled_preferred_validators(committee, SELECT_LATENCY_DELTA)
+            .into_iter()
+            .filter_map(|name| committee.authority_index(&name))
+            .take(max)
+            .collect();
+        // The set is unordered preference; `Validity` requires it strictly increasing.
+        proposers.sort_unstable();
+        proposers.dedup();
+
+        Some(AllowedProposers {
+            epoch: committee.epoch(),
+            proposers: NonEmpty::from_vec(proposers)?,
+        })
+    }
+
     /// Drives transaction to finalization.
     ///
     /// Internally, retries the attempt to finalize a transaction until:
@@ -156,29 +200,27 @@ where
     ) -> Result<QuorumTransactionResponse, TransactionDriverError> {
         const MAX_DRIVE_TRANSACTION_RETRY_DELAY: Duration = Duration::from_secs(10);
 
-        // For ping requests, the amplification factor is always 1.
-        let amplification_factor = if request.ping_type.is_some() {
-            1
-        } else {
-            let gas_price = request
-                .transaction
-                .as_ref()
-                .unwrap()
-                .transaction_data()
-                .gas_price();
-            let reference_gas_price = self.authority_aggregator.load().reference_gas_price;
-            let amplification_factor = gas_price / reference_gas_price.max(1);
-            if amplification_factor == 0 {
-                return Err(TransactionDriverError::ValidationFailed {
-                    error: UserInputError::GasPriceUnderRGP {
-                        gas_price,
-                        reference_gas_price,
-                    }
-                    .to_string(),
-                });
-            }
-            amplification_factor
-        };
+        let tx_data = request.transaction.as_ref().map(|t| t.transaction_data());
+        // gas_price=0 for gasless; use 1 for baseline (RGP-equivalent) priority
+        let amplification_factor =
+            if request.ping_type.is_some() || tx_data.is_some_and(|d| d.is_gasless_transaction()) {
+                1
+            } else {
+                let tx_data = tx_data.unwrap();
+                let gas_price = tx_data.gas_price();
+                let reference_gas_price = self.authority_aggregator.load().reference_gas_price;
+                let amplification_factor = gas_price / reference_gas_price.max(1);
+                if amplification_factor == 0 {
+                    return Err(TransactionDriverError::ValidationFailed {
+                        error: UserInputError::GasPriceUnderRGP {
+                            gas_price,
+                            reference_gas_price,
+                        }
+                        .to_string(),
+                    });
+                }
+                amplification_factor
+            };
 
         let tx_type = request.tx_type();
         let ping_label = if request.ping_type.is_some() {
@@ -364,9 +406,9 @@ where
                     authority_name: name,
                     display_name: auth_agg.get_display_name(&name),
                     operation: if tx_type == TxType::SingleWriter {
-                        OperationType::FastPath
+                        OperationType::SingleWriterFinality
                     } else {
-                        OperationType::Consensus
+                        OperationType::SharedObjectFinality
                     },
                     ping_type,
                     result: Ok(start_time.elapsed()),
@@ -411,7 +453,7 @@ where
                     // Send a consensus ping transaction to the validator
                     match self_clone
                         .drive_transaction(
-                            SubmitTxRequest::new_ping(PingType::Consensus),
+                            SubmitTxRequest::new_ping(),
                             SubmitTransactionOptions {
                                 allowed_validators: vec![display_name.clone()],
                                 ..Default::default()
@@ -457,6 +499,15 @@ where
             let mut reconfig_observer = reconfig_observer.clone_boxed();
             reconfig_observer.run(driver).await;
         }));
+    }
+}
+
+impl<A> ProposerSelector for TransactionDriver<A>
+where
+    A: AuthorityAPI + Send + Sync + 'static + Clone,
+{
+    fn preferred_proposers(&self, max: usize) -> Option<AllowedProposers> {
+        self.preferred_proposers_impl(max)
     }
 }
 

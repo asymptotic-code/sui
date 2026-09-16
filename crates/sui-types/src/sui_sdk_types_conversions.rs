@@ -9,12 +9,13 @@
 //! directly to avoid going through the BCS machinery.
 
 use fastcrypto::traits::ToFromBytes;
+use nonempty::NonEmpty;
 use sui_sdk_types::{
     self, AccumulatorWrite, ActiveJwk, Address, Argument, AuthenticatorStateExpire, Bitmap,
     Bls12381PublicKey, Bls12381Signature, CanceledTransaction, CanceledTransactionV2, ChangeEpoch,
     CheckpointCommitment, CheckpointContents, CheckpointData, CheckpointSummary, Command,
     CommandArgumentError, ConsensusDeterminedVersionAssignments, Digest, Ed25519PublicKey,
-    Ed25519Signature, EndOfEpochTransactionKind, ExecutionError, ExecutionStatus,
+    Ed25519Signature, EndOfEpochTransactionKind, Event, ExecutionError, ExecutionStatus,
     ExecutionTimeObservationKey, ExecutionTimeObservations, FundsWithdrawal, IdOperation,
     Identifier, Input, Jwk, JwkId, MakeMoveVector, MergeCoins, MoveCall, MoveLocation, MovePackage,
     MultisigMemberPublicKey, MultisigMemberSignature, Mutability, Object, ObjectIn, ObjectOut,
@@ -131,6 +132,7 @@ bcs_convert_impl!(
     crate::passkey_authenticator::PasskeyAuthenticator,
     PasskeyAuthenticator
 );
+bcs_convert_impl!(crate::event::Event, Event);
 bcs_convert_impl!(crate::effects::TransactionEvents, TransactionEvents);
 bcs_convert_impl!(crate::transaction::TransactionKind, TransactionKind);
 bcs_convert_impl!(crate::move_package::MovePackage, MovePackage);
@@ -188,6 +190,8 @@ impl From<crate::object::Owner> for Owner {
                 start_version: start_version.value(),
                 owner: owner.into(),
             },
+            // TODO(Party WIP)
+            crate::object::Owner::Party { .. } => todo!("Party WIP"),
         }
     }
 }
@@ -659,9 +663,20 @@ impl From<crate::effects::AccumulatorWriteV1> for AccumulatorWrite {
             type_tag_core_to_sdk(value.address.ty).unwrap(),
             operation,
             match value.value {
-                crate::effects::AccumulatorValue::Integer(value) => value,
-                crate::effects::AccumulatorValue::IntegerTuple(_, _)
-                | crate::effects::AccumulatorValue::EventDigest(_) => todo!(),
+                crate::effects::AccumulatorValue::Integer(value) => {
+                    sui_sdk_types::AccumulatorValue::Integer(value)
+                }
+                crate::effects::AccumulatorValue::IntegerTuple(a, b) => {
+                    sui_sdk_types::AccumulatorValue::IntegerTuple(a, b)
+                }
+                crate::effects::AccumulatorValue::EventDigest(digests) => {
+                    sui_sdk_types::AccumulatorValue::EventDigest(
+                        digests
+                            .into_iter()
+                            .map(|(idx, digest)| (idx, digest.into()))
+                            .collect(),
+                    )
+                }
             },
         )
     }
@@ -697,6 +712,28 @@ impl From<crate::transaction::TransactionExpiration> for TransactionExpiration {
                 chain: Digest::new(*chain.as_bytes()),
                 nonce,
             },
+            crate::transaction::TransactionExpiration::Validity {
+                min_epoch,
+                max_epoch,
+                min_timestamp,
+                max_timestamp,
+                chain,
+                nonce,
+                allowed_proposers,
+            } => Self::Validity {
+                min_epoch,
+                max_epoch,
+                min_timestamp,
+                max_timestamp,
+                chain: Digest::new(*chain.as_bytes()),
+                nonce,
+                allowed_proposers: allowed_proposers.map(|allowed| {
+                    sui_sdk_types::AllowedProposers {
+                        epoch: allowed.epoch,
+                        proposers: allowed.proposers.into(),
+                    }
+                }),
+            },
         }
     }
 }
@@ -720,6 +757,30 @@ impl From<TransactionExpiration> for crate::transaction::TransactionExpiration {
                 max_timestamp,
                 chain: crate::digests::CheckpointDigest::from(chain).into(),
                 nonce,
+            },
+            TransactionExpiration::Validity {
+                min_epoch,
+                max_epoch,
+                min_timestamp,
+                max_timestamp,
+                chain,
+                nonce,
+                allowed_proposers,
+            } => Self::Validity {
+                min_epoch,
+                max_epoch,
+                min_timestamp,
+                max_timestamp,
+                chain: crate::digests::CheckpointDigest::from(chain).into(),
+                nonce,
+                // An empty set is rejected by the sdk's deserializer, so it can only appear on a
+                // value built in memory; drop the restriction rather than fabricating one.
+                allowed_proposers: allowed_proposers.and_then(|allowed| {
+                    Some(crate::transaction::AllowedProposers {
+                        epoch: allowed.epoch,
+                        proposers: NonEmpty::from_vec(allowed.proposers)?,
+                    })
+                }),
             },
             _ => unreachable!("sdk shouldn't have a variant that the mono repo doesn't"),
         }
@@ -839,6 +900,8 @@ impl From<crate::execution_status::CommandArgumentError> for CommandArgumentErro
                 Self::CannotWriteToExtendedReference,
             crate::execution_status::CommandArgumentError::InvalidReferenceArgument =>
                 Self::InvalidReferenceArgument,
+            crate::execution_status::CommandArgumentError::InvalidTxContext =>
+                Self::InvalidTxContext,
         }
     }
 }
@@ -1271,6 +1334,12 @@ impl From<crate::transaction::CallArg> for Input {
                     crate::transaction::WithdrawFrom::Sponsor => {
                         sui_sdk_types::WithdrawFrom::Sponsor
                     }
+                    crate::transaction::WithdrawFrom::SenderAllowance { funder, allowance } => {
+                        sui_sdk_types::WithdrawFrom::SenderAllowance {
+                            funder: funder.into(),
+                            allowance: allowance.into(),
+                        }
+                    }
                 };
 
                 Self::FundsWithdrawal(FundsWithdrawal::new(
@@ -1331,6 +1400,12 @@ impl From<Input> for crate::transaction::CallArg {
                         }
                         sui_sdk_types::WithdrawFrom::Sponsor => {
                             crate::transaction::WithdrawFrom::Sponsor
+                        }
+                        sui_sdk_types::WithdrawFrom::SenderAllowance { funder, allowance } => {
+                            crate::transaction::WithdrawFrom::SenderAllowance {
+                                funder: funder.into(),
+                                allowance: allowance.into(),
+                            }
                         }
                         _ => {
                             unreachable!("sdk shouldn't have a variant that the mono repo doesn't")
@@ -1614,6 +1689,9 @@ impl From<crate::transaction::EndOfEpochTransactionKind> for EndOfEpochTransacti
             ) => Self::WriteAccumulatorStorageCost {
                 storage_cost: storage_cost.storage_cost,
             },
+            crate::transaction::EndOfEpochTransactionKind::ForwardingAddressRegistryCreate => {
+                Self::ForwardingAddressRegistryCreate
+            }
         }
     }
 }

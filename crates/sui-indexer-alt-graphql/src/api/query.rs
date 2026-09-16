@@ -10,9 +10,12 @@ use async_graphql::connection::Connection;
 use fastcrypto::encoding::Base58;
 use fastcrypto::encoding::Encoding;
 use futures::future::try_join_all;
+use prost_types::FieldMask;
 use sui_indexer_alt_reader::fullnode_client::Error::GrpcExecutionError;
 use sui_indexer_alt_reader::fullnode_client::FullnodeClient;
+use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2 as proto;
+use sui_types::dynamic_field::DynamicFieldType;
 use tonic::Code;
 
 use crate::api::mutation::TransactionInputError;
@@ -27,11 +30,18 @@ use crate::api::scalars::uint53::UInt53;
 use crate::api::types::address;
 use crate::api::types::address::Address;
 use crate::api::types::address::AddressKey;
+use crate::api::types::balance;
+use crate::api::types::balance::Balance;
+use crate::api::types::balance::BalanceKey;
+use crate::api::types::checkpoint;
 use crate::api::types::checkpoint::CCheckpoint;
 use crate::api::types::checkpoint::Checkpoint;
 use crate::api::types::checkpoint::filter::CheckpointFilter;
 use crate::api::types::coin_metadata::CoinMetadata;
+use crate::api::types::derived_object;
+use crate::api::types::dynamic_field;
 use crate::api::types::dynamic_field::DynamicField;
+use crate::api::types::dynamic_field::NameKey;
 use crate::api::types::epoch::CEpoch;
 use crate::api::types::epoch::Epoch;
 use crate::api::types::event::CEvent;
@@ -54,6 +64,9 @@ use crate::api::types::object_filter::ObjectFilter;
 use crate::api::types::object_filter::ObjectFilterValidator as OFValidator;
 use crate::api::types::protocol_configs::ProtocolConfigs;
 use crate::api::types::service_config::ServiceConfig;
+use crate::api::types::signature_verify;
+use crate::api::types::signature_verify::IntentScope;
+use crate::api::types::signature_verify::SignatureVerifyResult;
 use crate::api::types::simulation_result::SimulationResult;
 use crate::api::types::transaction::CTransaction;
 use crate::api::types::transaction::Transaction;
@@ -65,9 +78,11 @@ use crate::api::types::zklogin::ZkLoginIntentScope;
 use crate::api::types::zklogin::ZkLoginVerifyResult;
 use crate::error::RpcError;
 use crate::error::bad_user_input;
+use crate::error::feature_unavailable;
 use crate::error::upcast;
 use crate::pagination::Page;
 use crate::pagination::PaginationConfig;
+use crate::pagination::StreamConnection;
 use crate::scope::Scope;
 use crate::task::chain_identifier::ChainIdentifier;
 
@@ -192,20 +207,29 @@ impl Query {
         Ok(Base58::encode(chain_id.wait().await.as_bytes()))
     }
 
-    /// Fetch a checkpoint by its sequence number, or the latest checkpoint if no sequence number is provided.
+    /// Fetch a checkpoint by its sequence number or digest, or the latest checkpoint if neither is provided.
+    ///
+    /// It is an error to specify both `sequenceNumber` and `digest`.
     ///
     /// Returns `null` if the checkpoint does not exist in the store, either because it never existed or because it was pruned.
     async fn checkpoint(
         &self,
         ctx: &Context<'_>,
         sequence_number: Option<UInt53>,
-    ) -> Option<Result<Checkpoint, RpcError>> {
+        digest: Option<Digest>,
+    ) -> Option<Result<Checkpoint, RpcError<checkpoint::Error>>> {
         async {
             let scope = self.scope(ctx)?;
-            Ok(Checkpoint::with_sequence_number(
-                scope,
-                sequence_number.map(|s| s.into()),
-            ))
+            match (sequence_number, digest) {
+                (Some(_), Some(_)) => Err(bad_user_input(checkpoint::Error::BothBoundsSet)),
+                (None, Some(digest)) => Checkpoint::by_digest(ctx, scope, digest.into())
+                    .await
+                    .map_err(upcast),
+                (sequence_number, None) => Ok(Checkpoint::with_sequence_number(
+                    scope,
+                    sequence_number.map(|s| s.into()),
+                )),
+            }
         }
         .await
         .transpose()
@@ -294,7 +318,7 @@ impl Query {
         last: Option<u64>,
         before: Option<CEvent>,
         filter: Option<EventFilter>,
-    ) -> Option<Result<Connection<String, Event>, RpcError>> {
+    ) -> Option<Result<StreamConnection<Event>, RpcError>> {
         Some(
             async {
                 let scope = self.scope(ctx)?;
@@ -317,11 +341,32 @@ impl Query {
         keys: Vec<AddressKey>,
     ) -> Result<Vec<Option<Address>>, RpcError<address::Error>> {
         let scope = self.scope(ctx)?;
-        try_join_all(
-            keys.into_iter()
-                .map(|k| Address::by_key(ctx, scope.clone(), k)),
-        )
-        .await
+        let addresses = keys
+            .into_iter()
+            .map(|k| Address::by_key(ctx, scope.clone(), k));
+
+        try_join_all(addresses).await
+    }
+
+    /// Fetch balances by their addresses and coin types.
+    ///
+    /// Each result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator. Returns a list that is guaranteed to be the same length as `keys`. If an address has no balance of a given type, all three values are zero for that key.
+    async fn multi_get_balances(
+        &self,
+        ctx: &Context<'_>,
+        keys: Vec<BalanceKey>,
+    ) -> Result<Vec<Balance>, RpcError<balance::Error>> {
+        let scope = self.scope(ctx)?;
+        let keys = keys
+            .into_iter()
+            .map(|key| (key.address.into(), key.coin_type.into()))
+            .collect();
+
+        // Query is only exposed at the request root or through Checkpoint.query, both of which
+        // set a checkpoint bound.
+        Ok(Balance::fetch_many(ctx, &scope, keys)
+            .await?
+            .context("Query scope is missing a checkpoint bound")?)
     }
 
     /// Fetch checkpoints by their sequence numbers.
@@ -353,6 +398,54 @@ impl Query {
             .map(|k| Epoch::fetch(ctx, scope.clone(), Some(k)));
 
         try_join_all(epochs).await
+    }
+
+    /// Access derived objects under parent objects using their names and optional version bounds.
+    ///
+    /// Each key can specify at most one of `version`, `rootVersion`, or `atCheckpoint`, with the same semantics as `Query.object`. Returns a list that is guaranteed to be the same length as `keys`. If a derived object has not been claimed, has been deleted, or is not available in the store, its corresponding entry is `null`.
+    async fn multi_get_derived_objects(
+        &self,
+        ctx: &Context<'_>,
+        keys: Vec<NameKey>,
+    ) -> Result<Vec<Option<MoveObject>>, RpcError<dynamic_field::Error>> {
+        let scope = self.scope(ctx)?;
+        let objects = keys
+            .into_iter()
+            .map(|key| derived_object::by_key(ctx, scope.clone(), key));
+
+        try_join_all(objects).await
+    }
+
+    /// Access dynamic fields on parent objects using their names and optional version bounds.
+    ///
+    /// Each key can specify at most one of `version`, `rootVersion`, or `atCheckpoint`, with the same semantics as `Query.object`. Returns a list that is guaranteed to be the same length as `keys`. If a dynamic field could not be found, its corresponding entry in the result is `null`.
+    async fn multi_get_dynamic_fields(
+        &self,
+        ctx: &Context<'_>,
+        keys: Vec<NameKey>,
+    ) -> Result<Vec<Option<DynamicField>>, RpcError<dynamic_field::Error>> {
+        let scope = self.scope(ctx)?;
+        let fields = keys.into_iter().map(|key| {
+            DynamicField::by_key(ctx, scope.clone(), DynamicFieldType::DynamicField, key)
+        });
+
+        try_join_all(fields).await
+    }
+
+    /// Access dynamic object fields on parent objects using their names and optional version bounds.
+    ///
+    /// Each key can specify at most one of `version`, `rootVersion`, or `atCheckpoint`, with the same semantics as `Query.object`. Returns a list that is guaranteed to be the same length as `keys`. If a dynamic object field could not be found, its corresponding entry in the result is `null`.
+    async fn multi_get_dynamic_object_fields(
+        &self,
+        ctx: &Context<'_>,
+        keys: Vec<NameKey>,
+    ) -> Result<Vec<Option<DynamicField>>, RpcError<dynamic_field::Error>> {
+        let scope = self.scope(ctx)?;
+        let fields = keys.into_iter().map(|key| {
+            DynamicField::by_key(ctx, scope.clone(), DynamicFieldType::DynamicObject, key)
+        });
+
+        try_join_all(fields).await
     }
 
     /// Fetch objects by their keys.
@@ -702,7 +795,7 @@ impl Query {
         last: Option<u64>,
         before: Option<CTransaction>,
         #[graphql(validator(custom = "TFValidator"))] filter: Option<TransactionFilter>,
-    ) -> Option<Result<Connection<String, Transaction>, RpcError>> {
+    ) -> Option<Result<StreamConnection<Transaction>, RpcError>> {
         Some(
             async {
                 let scope = self.scope(ctx)?;
@@ -752,7 +845,9 @@ impl Query {
         checks_enabled: Option<bool>,
         do_gas_selection: Option<bool>,
     ) -> Result<SimulationResult, RpcError<TransactionInputError>> {
-        let fullnode_client: &FullnodeClient = ctx.data()?;
+        let Some(fullnode_client) = ctx.data_opt::<FullnodeClient>() else {
+            return Err(feature_unavailable("simulating transactions"));
+        };
 
         // Convert Json to serde_json::Value and parse as proto::Transaction
         let json_value: serde_json::Value = transaction
@@ -761,12 +856,23 @@ impl Query {
         let proto_tx: proto::Transaction = serde_json::from_value(json_value)
             .map_err(|err| bad_user_input(TransactionInputError::InvalidTransactionJson(err)))?;
 
+        let read_mask = FieldMask::from_paths([
+            "transaction.effects",
+            "transaction.transaction",
+            "transaction.events.bcs",
+            "transaction.balance_changes",
+            "transaction.objects.objects.bcs",
+            "transaction.transaction.bcs",
+            "command_outputs",
+        ]);
+
         // Simulate transaction via gRPC
         match fullnode_client
             .simulate_transaction(
                 proto_tx,
                 checks_enabled.unwrap_or(true),
                 do_gas_selection.unwrap_or(false),
+                read_mask,
             )
             .await
         {
@@ -796,6 +902,43 @@ impl Query {
         }
     }
 
+    /// Verify a signature is from the given `author`.
+    ///
+    /// Supports all signature types: Ed25519, Secp256k1, Secp256r1, MultiSig, ZkLogin, and
+    /// Passkey.
+    ///
+    /// Returns successfully if the signature is valid. If the signature is invalid, returns an
+    /// error with the reason for the failure.
+    ///
+    /// - `message` is either a serialized personal message or `TransactionData`, Base64-encoded.
+    /// - `signature` is a serialized signature, also Base64-encoded.
+    /// - `intentScope` indicates whether `message` is to be parsed as a personal message or
+    ///   `TransactionData`.
+    /// - `author` is the signer's address.
+    async fn verify_signature(
+        &self,
+        ctx: &Context<'_>,
+        message: Base64,
+        signature: Base64,
+        intent_scope: IntentScope,
+        author: SuiAddress,
+    ) -> Option<Result<SignatureVerifyResult, RpcError<signature_verify::Error>>> {
+        Some(
+            async {
+                signature_verify::verify_signature(
+                    ctx,
+                    self.scope(ctx)?,
+                    message,
+                    signature,
+                    intent_scope,
+                    author,
+                )
+                .await
+            }
+            .await,
+        )
+    }
+
     /// Verify a zkLogin signature is from the given `author`.
     ///
     /// Returns successfully if the signature is valid. If the signature is invalid, returns an error with the reason for the failure.
@@ -804,6 +947,7 @@ impl Query {
     /// - `signature` is a serialized zkLogin signature, also Base64-encoded.
     /// - `intentScope` indicates whether `bytes` are to be parsed as a personal message or `TransactionData`.
     /// - `author` is the signer's address.
+    #[graphql(deprecation = "Use `verifySignature` instead, which supports all signature types.")]
     async fn verify_zk_login_signature(
         &self,
         ctx: &Context<'_>,

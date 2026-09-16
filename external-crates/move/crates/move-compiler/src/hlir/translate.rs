@@ -4,7 +4,7 @@
 
 use crate::{
     debug_display, debug_display_verbose, diag,
-    diagnostics::{Diagnostic, DiagnosticReporter, Diagnostics, warning_filters::WarningFilters},
+    diagnostics::{Diagnostic, DiagnosticReporter, Diagnostics, filter::FilterScope},
     editions::{FeatureGate, Flavor},
     expansion::ast::{self as E, Fields, ModuleIdent, Mutability},
     hlir::{
@@ -29,6 +29,7 @@ use crate::{
     typing::ast as T,
 };
 
+use move_core_types::runtime_value::MoveValue;
 use move_ir_types::location::*;
 use move_proc_macros::growing_stack;
 use move_symbol_pool::Symbol;
@@ -181,7 +182,7 @@ impl<'env> Context<'env> {
         self.reporter.add_diags(diags);
     }
 
-    pub fn push_warning_filter_scope(&mut self, filters: WarningFilters) {
+    pub fn push_warning_filter_scope(&mut self, filters: FilterScope) {
         self.reporter.push_warning_filter_scope(filters)
     }
 
@@ -210,9 +211,19 @@ impl<'env> Context<'env> {
         let symbol = translate_var(v);
         // We may reuse a name if it appears on both sides of an `or` pattern
         if let Some((cur_mut, cur_t)) = self.function_locals.get(&symbol) {
-            assert!(cur_t == &t);
-            assert!(
+            ice_assert!(
+                self,
+                cur_t == &t,
+                v.loc,
+                "{:?} changed type from {:?} to {:?}",
+                v,
+                cur_t,
+                t
+            );
+            ice_assert!(
+                self,
                 cur_mut == &mut_,
+                v.loc,
                 "{:?} changed mutability from {:?} to {:?}",
                 v,
                 cur_mut,
@@ -313,16 +324,11 @@ pub fn program(compilation_env: &CompilationEnv, prog: T::Program) -> H::Program
     let mut context = Context::new(compilation_env, &prog);
     let T::Program {
         modules: tmodules,
-        warning_filters_table,
         info,
     } = prog;
     let modules = modules(&mut context, tmodules);
 
-    H::Program {
-        modules,
-        warning_filters_table,
-        info,
-    }
+    H::Program { modules, info }
 }
 
 fn modules(
@@ -360,7 +366,7 @@ fn module(
         constants: tconstants,
     } = mdef;
     context.current_package = package_name;
-    context.push_warning_filter_scope(warning_filter);
+    context.push_warning_filter_scope(warning_filter.clone());
     let structs = tstructs.map(|name, s| struct_def(context, name, s));
     let enums = tenums.map(|name, s| enum_def(context, name, s));
 
@@ -415,7 +421,7 @@ fn function(context: &mut Context, _name: FunctionName, f: T::Function) -> H::Fu
         body,
     } = f;
     assert!(macro_.is_none(), "ICE macros filtered above");
-    context.push_warning_filter_scope(warning_filter);
+    context.push_warning_filter_scope(warning_filter.clone());
     let signature = function_signature(context, signature);
     let body = function_body(context, &signature, _name, body);
     context.pop_warning_filter_scope();
@@ -522,10 +528,11 @@ fn constant(context: &mut Context, _name: ConstantName, cdef: T::Constant) -> H:
         index,
         attributes,
         loc,
+        visibility: _,
         signature: tsignature,
         value: tvalue,
     } = cdef;
-    context.push_warning_filter_scope(warning_filter);
+    context.push_warning_filter_scope(warning_filter.clone());
     let signature = base_type(&context.reporter, &tsignature);
     let eloc = tvalue.exp.loc;
     let tseq = {
@@ -569,7 +576,7 @@ fn struct_def(
         type_parameters,
         fields,
     } = sdef;
-    context.push_warning_filter_scope(warning_filter);
+    context.push_warning_filter_scope(warning_filter.clone());
     let fields = struct_fields(context, fields);
     context.pop_warning_filter_scope();
     H::StructDefinition {
@@ -591,7 +598,7 @@ fn struct_fields(context: &mut Context, tfields: N::StructFields) -> H::StructFi
         .into_iter()
         .map(|(f, (idx, (_doc, t)))| (idx, (f, base_type(&context.reporter, &t))))
         .collect::<Vec<_>>();
-    indexed_fields.sort_by(|(idx1, _), (idx2, _)| idx1.cmp(idx2));
+    indexed_fields.sort_by_key(|(idx1, _)| *idx1);
     H::StructFields::Defined(indexed_fields.into_iter().map(|(_, f_ty)| f_ty).collect())
 }
 
@@ -614,7 +621,7 @@ fn enum_def(
         type_parameters,
         variants,
     } = edef;
-    context.push_warning_filter_scope(warning_filter);
+    context.push_warning_filter_scope(warning_filter.clone());
     let variants = variants.map(|_, defn| H::VariantDefinition {
         index: defn.index,
         loc: defn.loc,
@@ -640,7 +647,7 @@ fn variant_fields(context: &mut Context, tfields: N::VariantFields) -> Vec<(Fiel
         .into_iter()
         .map(|(f, (idx, (_doc, t)))| (idx, (f, base_type(&context.reporter, &t))))
         .collect::<Vec<_>>();
-    indexed_fields.sort_by(|(idx1, _), (idx2, _)| idx1.cmp(idx2));
+    indexed_fields.sort_by_key(|(idx1, _)| *idx1);
     indexed_fields.into_iter().map(|(_, f_ty)| f_ty).collect()
 }
 
@@ -1463,7 +1470,7 @@ fn value(
             make_exp(new_unit)
         }
         E::Value(ev) => make_exp(HE::Value(process_value(context, ev))),
-        E::Constant(_m, c) => make_exp(HE::Constant(c)), // only private constants (for now)
+        E::Constant(m, c) => make_exp(HE::Constant(m, c)),
         E::ErrorConstant {
             line_number_loc,
             error_constant,
@@ -1555,7 +1562,7 @@ fn value_fields(
                 .map(|(ndx, (f, (exp_idx, (bt, tf))))| (ndx, f, exp_idx, bt, tf))
                 .collect()
         };
-    texp_fields.sort_by(|(_, _, eidx1, _, _), (_, _, eidx2, _, _)| eidx1.cmp(eidx2));
+    texp_fields.sort_by_key(|(_, _, eidx1, _, _)| *eidx1);
 
     let reorder_fields = texp_fields
         .iter()
@@ -3031,7 +3038,7 @@ fn gen_unused_warnings(
     let is_sui_mode = context.env.package_config(context.current_package).flavor == Flavor::Sui;
 
     for (_, sname, sdef) in structs {
-        context.push_warning_filter_scope(sdef.warning_filter);
+        context.push_warning_filter_scope(sdef.warning_filter.clone());
 
         let has_key = sdef.abilities.has_ability_(Ability_::Key);
 
@@ -3054,4 +3061,92 @@ fn gen_unused_warnings(
 
         context.pop_warning_filter_scope();
     }
+}
+
+//**************************************************************************************************
+// Pre-compiled constants
+//**************************************************************************************************
+
+/// Constants from precompiled modules, etc., were already pre-folded but remain defined as part
+/// of the typing AST. This allows us to grab their definitions to see the initial constant
+/// definition list when processing modules in the CFGIR pass. Constants are only visible within
+/// their package, so only precompiled modules from `packages` (the packages under compilation)
+/// that are not themselves in the compilation (`compiled`) contribute. A `None` value marks a
+/// constant that failed its own compilation (already reported there) or whose value disagrees
+/// with its signature (an ICE, reported here).
+pub(crate) fn precompiled_constants(
+    reporter: &DiagnosticReporter,
+    info: &TypingProgramInfo,
+    compiled: &BTreeSet<ModuleIdent>,
+    packages: &BTreeSet<Option<Symbol>>,
+) -> BTreeMap<(ModuleIdent, ConstantName), (Loc, H::BaseType, Option<H::Value>)> {
+    // Precompiled constants arrive as MoveValues, but we need them as H::Value to include them.
+    // This should only matter under partial compilation (e.g., the IDE).
+    #[growing_stack]
+    fn value_from_move_value(mv: &MoveValue, ty: &H::BaseType) -> Option<H::Value> {
+        use H::TypeName_ as TN;
+        use H::Value_ as V;
+        use MoveValue as MV;
+        let loc = ty.loc;
+        let v_ = match mv {
+            MV::U8(u) => V::U8(*u),
+            MV::U16(u) => V::U16(*u),
+            MV::U32(u) => V::U32(*u),
+            MV::U64(u) => V::U64(*u),
+            MV::U128(u) => V::U128(*u),
+            MV::U256(u) => V::U256(*u),
+            MV::Bool(b) => V::Bool(*b),
+            MV::Address(a) => V::Address(NumericalAddress::new(a.into_bytes(), NumberFormat::Hex)),
+            MV::Vector(vs) => {
+                let H::BaseType_::Apply(
+                    _,
+                    sp!(_, TN::Builtin(sp!(_, N::BuiltinTypeName_::Vector))),
+                    args,
+                ) = &ty.value
+                else {
+                    return None;
+                };
+                let [elem_ty] = args.as_slice() else {
+                    return None;
+                };
+                let elems = vs
+                    .iter()
+                    .map(|v| value_from_move_value(v, elem_ty))
+                    .collect::<Option<Vec<_>>>()?;
+                V::Vector(Box::new(elem_ty.clone()), elems)
+            }
+            MV::Struct(_) | MV::Signer(_) | MV::Variant(_) => return None,
+        };
+        Some(sp(loc, v_))
+    }
+
+    let mut constants = BTreeMap::new();
+    for (mident, minfo) in info.modules.key_cloned_iter() {
+        if compiled.contains(&mident) || !packages.contains(&minfo.package) {
+            continue;
+        }
+        for (cname, cinfo) in minfo.constants.key_cloned_iter() {
+            let signature = base_type(reporter, &cinfo.signature);
+            let value = match cinfo.value.get() {
+                // the constant's own compilation reported an error for it
+                None => None,
+                Some(mv) => {
+                    let value = value_from_move_value(mv, &signature);
+                    if value.is_none() {
+                        reporter.add_diag(ice!((
+                            cinfo.defined_loc,
+                            format!(
+                                "pre-compiled constant '{}::{}' value disagrees with its \
+                                 signature",
+                                mident, cname
+                            )
+                        )));
+                    }
+                    value
+                }
+            };
+            constants.insert((mident, cname), (cinfo.defined_loc, signature, value));
+        }
+    }
+    constants
 }

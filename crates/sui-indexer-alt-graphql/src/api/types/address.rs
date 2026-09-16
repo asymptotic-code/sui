@@ -11,9 +11,12 @@ use async_graphql::Object;
 use async_graphql::connection::Connection;
 use async_graphql::connection::Edge;
 use futures::future::try_join_all;
+use sui_types::base_types::ObjectID;
 use sui_types::base_types::SuiAddress as NativeSuiAddress;
 use sui_types::dynamic_field::DynamicFieldType;
+use sui_types::effects::TransactionEffectsAPI;
 
+use crate::api::scalars::digest::Digest;
 use crate::api::scalars::domain::Domain;
 use crate::api::scalars::id::Id;
 use crate::api::scalars::owner_kind::OwnerKind;
@@ -23,7 +26,9 @@ use crate::api::scalars::uint53::UInt53;
 use crate::api::types::balance;
 use crate::api::types::balance::Balance;
 use crate::api::types::coin_metadata::CoinMetadata;
+use crate::api::types::derived_object;
 use crate::api::types::dynamic_field;
+use crate::api::types::dynamic_field::DerivedObjectKey;
 use crate::api::types::dynamic_field::DynamicField;
 use crate::api::types::dynamic_field::DynamicFieldName;
 use crate::api::types::move_object::MoveObject;
@@ -32,17 +37,22 @@ use crate::api::types::name_record::NameRecord;
 use crate::api::types::object;
 use crate::api::types::object::Object;
 use crate::api::types::object::ObjectKey;
+use crate::api::types::object_change::ObjectChange;
 use crate::api::types::object_filter::ObjectFilter;
 use crate::api::types::object_filter::ObjectFilterValidator as OFValidator;
 use crate::api::types::transaction::CTransaction;
 use crate::api::types::transaction::Transaction;
 use crate::api::types::transaction::filter::TransactionFilter;
 use crate::api::types::transaction::filter::TransactionFilterValidator as TFValidator;
+use crate::api::types::transaction_effects::EffectsContents;
+use crate::api::types::transaction_object::TransactionObject;
+use crate::api::types::unchanged_consensus_object::UnchangedConsensusObject;
 use crate::error::RpcError;
 use crate::error::bad_user_input;
 use crate::error::convert;
 use crate::pagination::Page;
 use crate::pagination::PaginationConfig;
+use crate::pagination::StreamConnection;
 use crate::scope::Scope;
 use crate::task::watermark::Watermarks;
 
@@ -71,10 +81,16 @@ pub(crate) enum AddressTransactionRelationship {
         desc = "Fetch the address as it was at a different root version, or checkpoint.\n\nIf no additional bound is provided, the address is fetched at the latest checkpoint known to the RPC.",
     ),
     field(
+        name = "as_transaction_object",
+        arg(name = "transaction_digest", ty = "Option<Digest>"),
+        ty = "Option<Result<TransactionObject, RpcError>>",
+        desc = "How this addressable entity was referenced by a specific transaction.\n\nReturns `null` if the object was not referenced, or was present only as a non-object marker variant of unchanged consensus input (e.g. cancelled, stream-ended, per-epoch).\n\nThe `transactionDigest` argument may be omitted when the query is scoped under a transaction context (e.g. a parent `Transaction`, `TransactionEffects`, or `Event`); the field then resolves against the in-scope transaction.\n\nPassing an explicit `transactionDigest` other than the in-scope transaction in subscription context is not supported; for arbitrary transaction lookups, use the indexed Query API.",
+    ),
+    field(
         name = "balance",
         arg(name = "coin_type", ty = "TypeInput"),
         ty = "Option<Result<Balance, RpcError<balance::Error>>>",
-        desc = "Fetch the total balance for coins with marker type `coinType` (e.g. `0x2::sui::SUI`), owned by this address.\n\nIf the address does not own any coins of that type, a balance of zero is returned.",
+        desc = "Fetch the balance for `coinType` (e.g. `0x2::sui::SUI`) owned by this address.\n\nThe result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator. Returns `null` when no checkpoint is set in scope (e.g. execution scope). If this address has no balance of that type, all three values are zero.",
     ),
     field(
         name = "balances",
@@ -83,7 +99,7 @@ pub(crate) enum AddressTransactionRelationship {
         arg(name = "last", ty = "Option<u64>"),
         arg(name = "before", ty = "Option<balance::Cursor>"),
         ty = "Option<Result<Connection<String, Balance>, RpcError<balance::Error>>>",
-        desc = "Total balance across coins owned by this address, grouped by coin type.",
+        desc = "Balances held by this address, grouped by coin type.\n\nEach result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator.",
     ),
     field(
         name = "default_name_record",
@@ -91,10 +107,25 @@ pub(crate) enum AddressTransactionRelationship {
         desc = "The domain explicitly configured as the default Name Service name for this address."
     ),
     field(
+        name = "derived_object",
+        arg(name = "name", ty = "DynamicFieldName"),
+        arg(name = "version", ty = "Option<UInt53>"),
+        arg(name = "root_version", ty = "Option<UInt53>"),
+        arg(name = "at_checkpoint", ty = "Option<UInt53>"),
+        ty = "Option<Result<MoveObject, RpcError<dynamic_field::Error>>>",
+        desc = "Access a derived object using its key.\n\nThe object can be bounded by at most one of `version`, `rootVersion`, or `atCheckpoint`, with the same semantics as `Query.object`.\n\nReturns `null` if the derived object has not been claimed, has been deleted, or is not available in the store.",
+    ),
+    field(
         name = "multi_get_balances",
         arg(name = "keys", ty = "Vec<TypeInput>"),
         ty = "Option<Result<Vec<Balance>, RpcError<balance::Error>>>",
-        desc = "Fetch the total balances keyed by coin types (e.g. `0x2::sui::SUI`) owned by this address.\n\nReturns `null` when no checkpoint is set in scope (e.g. execution scope). If the address does not own any coins of a given type, a balance of zero is returned for that type.",
+        desc = "Fetch balances keyed by coin types (e.g. `0x2::sui::SUI`) owned by this address.\n\nEach result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator. Returns `null` when no checkpoint is set in scope (e.g. execution scope). If this address has no balance of a given type, all three values are zero for that type.",
+    ),
+    field(
+        name = "multi_get_derived_objects",
+        arg(name = "keys", ty = "Vec<DerivedObjectKey>"),
+        ty = "Result<Vec<Option<MoveObject>>, RpcError<dynamic_field::Error>>",
+        desc = "Access derived objects using their keys and optional version bounds.\n\nEach key can specify at most one of `version`, `rootVersion`, or `atCheckpoint`, with the same semantics as `Query.object`. Returns a list that is guaranteed to be the same length as `keys`. If a derived object has not been claimed, has been deleted, or is not available in the store, its corresponding entry is `null`.",
     ),
     field(
         name = "objects",
@@ -213,10 +244,68 @@ impl Address {
         .transpose()
     }
 
-    /// Fetch the total balance for coins with marker type `coinType` (e.g. `0x2::sui::SUI`), owned by this address.
+    /// How this address (interpreted as an object ID) was referenced by a specific transaction.
     ///
-    /// Returns `None` when no checkpoint is set in scope (e.g. execution scope).
-    /// If the address does not own any coins of that type, a balance of zero is returned.
+    /// Returns `null` if the object was not referenced, or was present only as a non-object marker variant of unchanged consensus input (e.g. cancelled, stream-ended, per-epoch).
+    ///
+    /// The `transactionDigest` argument may be omitted when the query is scoped under a transaction context (e.g. a parent `Transaction`, `TransactionEffects`, or `Event`); the field then resolves against the in-scope transaction.
+    ///
+    /// Passing an explicit `transactionDigest` other than the in-scope transaction in subscription context is not supported; for arbitrary transaction lookups, use the indexed Query API.
+    pub(crate) async fn as_transaction_object(
+        &self,
+        ctx: &Context<'_>,
+        transaction_digest: Option<Digest>,
+    ) -> Option<Result<TransactionObject, RpcError>> {
+        async {
+            let Some(digest) = transaction_digest
+                .map(Into::into)
+                .or_else(|| self.scope.active_transaction_digest())
+            else {
+                return Ok(None);
+            };
+
+            let contents = EffectsContents::empty(self.scope.clone())
+                .fetch(ctx, digest)
+                .await?;
+
+            let Some(content) = contents.contents.as_ref() else {
+                return Ok(None);
+            };
+
+            let effects = content.effects()?;
+            let address: ObjectID = self.address.into();
+
+            for change in effects.object_changes() {
+                if change.id == address {
+                    return Ok(Some(TransactionObject::Changed(ObjectChange {
+                        scope: self.scope.clone(),
+                        native: change,
+                    })));
+                }
+            }
+
+            let epoch = effects.executed_epoch();
+            for unchanged in effects.unchanged_consensus_objects() {
+                if unchanged.0 == address {
+                    let cons_obj =
+                        UnchangedConsensusObject::from_native(self.scope.clone(), unchanged, epoch);
+                    if let UnchangedConsensusObject::Read(read) = cons_obj {
+                        return Ok(Some(TransactionObject::ConsensusRead(read)));
+                    }
+                    // Address matched as a non-object marker variant; treat as not referenced.
+                    return Ok(None);
+                }
+            }
+
+            Ok(None)
+        }
+        .await
+        .transpose()
+    }
+
+    /// Fetch the balance for `coinType` (e.g. `0x2::sui::SUI`) owned by this address.
+    ///
+    /// The result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator. Returns `null` when no checkpoint is set in scope (e.g. execution scope). If this address has no balance of that type, all three values are zero.
     pub(crate) async fn balance(
         &self,
         ctx: &Context<'_>,
@@ -227,7 +316,9 @@ impl Address {
             .transpose()
     }
 
-    /// Total balance across coins owned by this address, grouped by coin type.
+    /// Balances held by this address, grouped by coin type.
+    ///
+    /// Each result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator.
     pub(crate) async fn balances(
         &self,
         ctx: &Context<'_>,
@@ -255,6 +346,34 @@ impl Address {
         NameRecord::by_address(ctx, self.scope.without_root_bound(), self.address)
             .await
             .transpose()
+    }
+
+    /// Access a derived object using its key.
+    ///
+    /// The object can be bounded by at most one of `version`, `rootVersion`, or `atCheckpoint`, with the same semantics as `Query.object`.
+    ///
+    /// Returns `null` if the derived object has not been claimed, has been deleted, or is not available in the store.
+    pub(crate) async fn derived_object(
+        &self,
+        ctx: &Context<'_>,
+        name: DynamicFieldName,
+        version: Option<UInt53>,
+        root_version: Option<UInt53>,
+        at_checkpoint: Option<UInt53>,
+    ) -> Option<Result<MoveObject, RpcError<dynamic_field::Error>>> {
+        derived_object::by_key(
+            ctx,
+            self.scope.clone(),
+            dynamic_field::NameKey {
+                parent: self.address.into(),
+                name,
+                version,
+                root_version,
+                at_checkpoint,
+            },
+        )
+        .await
+        .transpose()
     }
 
     /// Access a dynamic field on an object using its type and BCS-encoded name.
@@ -318,6 +437,31 @@ impl Address {
         .transpose()
     }
 
+    /// Access derived objects using their keys and optional version bounds.
+    ///
+    /// Each key can specify at most one of `version`, `rootVersion`, or `atCheckpoint`, with the same semantics as `Query.object`. Returns a list that is guaranteed to be the same length as `keys`. If a derived object has not been claimed, has been deleted, or is not available in the store, its corresponding entry is `null`.
+    pub(crate) async fn multi_get_derived_objects(
+        &self,
+        ctx: &Context<'_>,
+        keys: Vec<DerivedObjectKey>,
+    ) -> Result<Vec<Option<MoveObject>>, RpcError<dynamic_field::Error>> {
+        let objects = keys.into_iter().map(|key| {
+            derived_object::by_key(
+                ctx,
+                self.scope.clone(),
+                dynamic_field::NameKey {
+                    parent: self.address.into(),
+                    name: key.name,
+                    version: key.version,
+                    root_version: key.root_version,
+                    at_checkpoint: key.at_checkpoint,
+                },
+            )
+        });
+
+        try_join_all(objects).await
+    }
+
     /// Access dynamic fields on an object using their types and BCS-encoded names.
     ///
     /// Returns a list of dynamic fields that is guaranteed to be the same length as `keys`. If a dynamic field in `keys` could not be found in the store, its corresponding entry in the result will be `null`.
@@ -326,7 +470,7 @@ impl Address {
         ctx: &Context<'_>,
         keys: Vec<DynamicFieldName>,
     ) -> Result<Vec<Option<DynamicField>>, RpcError<dynamic_field::Error>> {
-        try_join_all(keys.into_iter().map(|key| {
+        let fields = keys.into_iter().map(|key| {
             DynamicField::by_name(
                 ctx,
                 self.scope.clone(),
@@ -334,8 +478,9 @@ impl Address {
                 DynamicFieldType::DynamicField,
                 key,
             )
-        }))
-        .await
+        });
+
+        try_join_all(fields).await
     }
 
     /// Access dynamic object fields on an object using their types and BCS-encoded names.
@@ -358,17 +503,20 @@ impl Address {
         .await
     }
 
-    /// Fetch the total balances keyed by coin types (e.g. `0x2::sui::SUI`) owned by this address.
+    /// Fetch balances keyed by coin types (e.g. `0x2::sui::SUI`) owned by this address.
     ///
-    /// Returns `None` when no checkpoint is set in scope (e.g. execution scope).
-    /// If the address does not own any coins of a given type, a balance of zero is returned for that type.
+    /// Each result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator. Returns `null` when no checkpoint is set in scope (e.g. execution scope). If this address has no balance of a given type, all three values are zero for that type.
     pub(crate) async fn multi_get_balances(
         &self,
         ctx: &Context<'_>,
         keys: Vec<TypeInput>,
     ) -> Option<Result<Vec<Balance>, RpcError<balance::Error>>> {
-        let coin_types = keys.into_iter().map(|k| k.into()).collect();
-        Balance::fetch_many(ctx, &self.scope, self.address, coin_types)
+        let keys = keys
+            .into_iter()
+            .map(|coin_type| (self.address, coin_type.into()))
+            .collect();
+
+        Balance::fetch_many(ctx, &self.scope, keys)
             .await
             .transpose()
     }
@@ -425,7 +573,7 @@ impl Address {
         before: Option<CTransaction>,
         relation: Option<AddressTransactionRelationship>,
         #[graphql(validator(custom = "TFValidator"))] filter: Option<TransactionFilter>,
-    ) -> Option<Result<Connection<String, Transaction>, RpcError>> {
+    ) -> Option<Result<StreamConnection<Transaction>, RpcError>> {
         Some(
             async {
                 let pagination: &PaginationConfig = ctx.data()?;
@@ -449,7 +597,7 @@ impl Address {
 
                 // Intersect with user-provided filter
                 let Some(filter) = filter.unwrap_or_default().intersect(address_filter) else {
-                    return Ok(Connection::new(false, false));
+                    return Ok(Connection::new(false, false).into());
                 };
 
                 Transaction::paginate(ctx, self.scope.clone(), page, filter).await

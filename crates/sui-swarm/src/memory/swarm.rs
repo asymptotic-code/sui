@@ -27,6 +27,7 @@ use sui_swarm_config::network_config::NetworkConfig;
 use sui_swarm_config::network_config_builder::{
     CommitteeConfig, ConfigBuilder, FundsWithdrawSchedulerTypeConfig,
     GlobalStateHashV2EnabledConfig, ProtocolVersionsConfig, SupportedProtocolVersionsCallback,
+    ValidatorObserverConfigCallback,
 };
 use sui_swarm_config::node_config_builder::FullnodeConfigBuilder;
 use sui_types::base_types::AuthorityName;
@@ -48,6 +49,7 @@ pub struct SwarmBuilder<R = OsRng> {
     fullnode_rpc_port: Option<u16>,
     fullnode_rpc_addr: Option<SocketAddr>,
     fullnode_rpc_config: Option<sui_config::RpcConfig>,
+    fullnode_config: Option<NodeConfig>,
     supported_protocol_versions_config: ProtocolVersionsConfig,
     // Default to supported_protocol_versions_config, but can be overridden.
     fullnode_supported_protocol_versions_config: Option<ProtocolVersionsConfig>,
@@ -60,14 +62,15 @@ pub struct SwarmBuilder<R = OsRng> {
     fullnode_run_with_range: Option<RunWithRange>,
     fullnode_policy_config: Option<PolicyConfig>,
     fullnode_fw_config: Option<RemoteFirewallConfig>,
-    max_submit_position: Option<usize>,
-    submit_delay_step_override_millis: Option<u64>,
     global_state_hash_v2_enabled_config: GlobalStateHashV2EnabledConfig,
     funds_withdraw_scheduler_type_config: Option<FundsWithdrawSchedulerTypeConfig>,
     disable_fullnode_pruning: bool,
     state_sync_config: Option<sui_config::p2p::StateSyncConfig>,
+    peer_deny_sync_config:
+        Option<sui_swarm_config::network_config_builder::PeerDenySyncConfigCallback>,
     #[cfg(msim)]
     execution_time_observer_config: Option<ExecutionTimeObserverConfig>,
+    validator_observer_config: Option<ValidatorObserverConfigCallback>,
 }
 
 impl SwarmBuilder {
@@ -85,6 +88,7 @@ impl SwarmBuilder {
             fullnode_rpc_port: None,
             fullnode_rpc_addr: None,
             fullnode_rpc_config: None,
+            fullnode_config: None,
             supported_protocol_versions_config: ProtocolVersionsConfig::Default,
             fullnode_supported_protocol_versions_config: None,
             db_checkpoint_config: DBCheckpointConfig::default(),
@@ -96,14 +100,14 @@ impl SwarmBuilder {
             fullnode_run_with_range: None,
             fullnode_policy_config: None,
             fullnode_fw_config: None,
-            max_submit_position: None,
-            submit_delay_step_override_millis: None,
             global_state_hash_v2_enabled_config: GlobalStateHashV2EnabledConfig::Global(true),
             funds_withdraw_scheduler_type_config: None,
             disable_fullnode_pruning: false,
             state_sync_config: None,
+            peer_deny_sync_config: None,
             #[cfg(msim)]
             execution_time_observer_config: None,
+            validator_observer_config: None,
         }
     }
 }
@@ -122,6 +126,7 @@ impl<R> SwarmBuilder<R> {
             fullnode_rpc_port: self.fullnode_rpc_port,
             fullnode_rpc_addr: self.fullnode_rpc_addr,
             fullnode_rpc_config: self.fullnode_rpc_config.clone(),
+            fullnode_config: self.fullnode_config,
             supported_protocol_versions_config: self.supported_protocol_versions_config,
             fullnode_supported_protocol_versions_config: self
                 .fullnode_supported_protocol_versions_config,
@@ -134,14 +139,14 @@ impl<R> SwarmBuilder<R> {
             fullnode_run_with_range: self.fullnode_run_with_range,
             fullnode_policy_config: self.fullnode_policy_config,
             fullnode_fw_config: self.fullnode_fw_config,
-            max_submit_position: self.max_submit_position,
-            submit_delay_step_override_millis: self.submit_delay_step_override_millis,
             global_state_hash_v2_enabled_config: self.global_state_hash_v2_enabled_config,
             funds_withdraw_scheduler_type_config: self.funds_withdraw_scheduler_type_config,
             disable_fullnode_pruning: self.disable_fullnode_pruning,
             state_sync_config: self.state_sync_config,
+            peer_deny_sync_config: self.peer_deny_sync_config,
             #[cfg(msim)]
             execution_time_observer_config: self.execution_time_observer_config,
+            validator_observer_config: self.validator_observer_config,
         }
     }
 
@@ -229,6 +234,11 @@ impl<R> SwarmBuilder<R> {
         self
     }
 
+    pub fn with_fullnode_config(mut self, fullnode_config: NodeConfig) -> Self {
+        self.fullnode_config = Some(fullnode_config);
+        self
+    }
+
     pub fn with_epoch_duration_ms(mut self, epoch_duration_ms: u64) -> Self {
         assert!(
             epoch_duration_ms >= 10000,
@@ -287,6 +297,11 @@ impl<R> SwarmBuilder<R> {
         self
     }
 
+    pub fn with_validator_observer_config(mut self, c: ValidatorObserverConfigCallback) -> Self {
+        self.validator_observer_config = Some(c);
+        self
+    }
+
     pub fn with_fullnode_supported_protocol_versions_config(
         mut self,
         c: ProtocolVersionsConfig,
@@ -327,6 +342,14 @@ impl<R> SwarmBuilder<R> {
         self
     }
 
+    pub fn with_peer_deny_sync_config_per_validator(
+        mut self,
+        f: sui_swarm_config::network_config_builder::PeerDenySyncConfigCallback,
+    ) -> Self {
+        self.peer_deny_sync_config = Some(f);
+        self
+    }
+
     pub fn with_fullnode_run_with_range(mut self, run_with_range: Option<RunWithRange>) -> Self {
         if let Some(run_with_range) = run_with_range {
             self.fullnode_run_with_range = Some(run_with_range);
@@ -352,21 +375,8 @@ impl<R> SwarmBuilder<R> {
         self.genesis_config.as_mut().unwrap()
     }
 
-    pub fn with_max_submit_position(mut self, max_submit_position: usize) -> Self {
-        self.max_submit_position = Some(max_submit_position);
-        self
-    }
-
     pub fn with_disable_fullnode_pruning(mut self) -> Self {
         self.disable_fullnode_pruning = true;
-        self
-    }
-
-    pub fn with_submit_delay_step_override_millis(
-        mut self,
-        submit_delay_step_override_millis: u64,
-    ) -> Self {
-        self.submit_delay_step_override_millis = Some(submit_delay_step_override_millis);
         self
     }
 }
@@ -415,16 +425,6 @@ impl<R: rand::RngCore + rand::CryptoRng> SwarmBuilder<R> {
                 config_builder = config_builder.with_data_ingestion_dir(path);
             }
 
-            if let Some(max_submit_position) = self.max_submit_position {
-                config_builder = config_builder.with_max_submit_position(max_submit_position);
-            }
-
-            if let Some(submit_delay_step_override_millis) = self.submit_delay_step_override_millis
-            {
-                config_builder = config_builder
-                    .with_submit_delay_step_override_millis(submit_delay_step_override_millis);
-            }
-
             #[allow(unused_mut)]
             let mut final_builder = config_builder
                 .committee(self.committee)
@@ -449,10 +449,19 @@ impl<R: rand::RngCore + rand::CryptoRng> SwarmBuilder<R> {
                 final_builder = final_builder.with_state_sync_config(state_sync_config);
             }
 
+            if let Some(cb) = self.peer_deny_sync_config.clone() {
+                final_builder = final_builder.with_peer_deny_sync_config_per_validator(cb);
+            }
+
             #[cfg(msim)]
             if let Some(execution_time_observer_config) = self.execution_time_observer_config {
                 final_builder = final_builder
                     .with_execution_time_observer_config(execution_time_observer_config);
+            }
+
+            if let Some(validator_observer_config) = self.validator_observer_config {
+                final_builder =
+                    final_builder.with_validator_observer_config(validator_observer_config);
             }
 
             final_builder.build()
@@ -499,22 +508,27 @@ impl<R: rand::RngCore + rand::CryptoRng> SwarmBuilder<R> {
         }
 
         if self.fullnode_count > 0 {
+            let mut prebuilt_fullnode_config = self.fullnode_config;
             (0..self.fullnode_count).for_each(|idx| {
-                let mut builder = fullnode_config_builder.clone();
-                if idx == 0 {
-                    // Only the first fullnode is used as the rpc fullnode, we can only use the
-                    // same address once.
-                    if let Some(rpc_addr) = self.fullnode_rpc_addr {
-                        builder = builder.with_rpc_addr(rpc_addr);
+                let config = if idx == 0 && prebuilt_fullnode_config.is_some() {
+                    prebuilt_fullnode_config.take().unwrap()
+                } else {
+                    let mut builder = fullnode_config_builder.clone();
+                    if idx == 0 {
+                        // Only the first fullnode is used as the rpc fullnode, we can only use the
+                        // same address once.
+                        if let Some(rpc_addr) = self.fullnode_rpc_addr {
+                            builder = builder.with_rpc_addr(rpc_addr);
+                        }
+                        if let Some(rpc_port) = self.fullnode_rpc_port {
+                            builder = builder.with_rpc_port(rpc_port);
+                        }
+                        if let Some(rpc_config) = &self.fullnode_rpc_config {
+                            builder = builder.with_rpc_config(rpc_config.clone());
+                        }
                     }
-                    if let Some(rpc_port) = self.fullnode_rpc_port {
-                        builder = builder.with_rpc_port(rpc_port);
-                    }
-                    if let Some(rpc_config) = &self.fullnode_rpc_config {
-                        builder = builder.with_rpc_config(rpc_config.clone());
-                    }
-                }
-                let config = builder.build(&mut OsRng, &network_config);
+                    builder.build(&mut OsRng, &network_config)
+                };
                 info!(
                     "SwarmBuilder configuring full node with name {}",
                     config.protocol_public_key()
@@ -593,12 +607,13 @@ impl Swarm {
     }
 
     /// Return an iterator over shared references of all nodes that are set up as validators.
-    /// This means that they have a consensus config. This however doesn't mean this validator is
-    /// currently active (i.e. it's not necessarily in the validator set at the moment).
+    /// This however doesn't mean this validator is currently active (i.e. it's not necessarily
+    /// in the validator set at the moment). Note that observer fullnodes also carry a consensus
+    /// config, so the intended node role is what distinguishes a validator.
     pub fn validator_nodes(&self) -> impl Iterator<Item = &Node> {
         self.nodes
             .values()
-            .filter(|node| node.config().consensus_config.is_some())
+            .filter(|node| node.config().intended_node_role().is_validator())
     }
 
     pub fn validator_node_handles(&self) -> Vec<SuiNodeHandle> {
@@ -621,7 +636,17 @@ impl Swarm {
     pub fn fullnodes(&self) -> impl Iterator<Item = &Node> {
         self.nodes
             .values()
-            .filter(|node| node.config().consensus_config.is_none())
+            .filter(|node| node.config().intended_node_role().is_fullnode())
+    }
+
+    /// Return an iterator over shared references of all fullnodes that sync as
+    /// consensus observers.
+    pub fn observer_nodes(&self) -> impl Iterator<Item = &Node> {
+        use sui_types::node_role::{FullNodeSyncMode, NodeRole};
+        self.nodes.values().filter(|node| {
+            node.config().intended_node_role()
+                == NodeRole::FullNode(FullNodeSyncMode::ConsensusObserver)
+        })
     }
 
     pub async fn spawn_new_node(&mut self, config: NodeConfig) -> SuiNodeHandle {

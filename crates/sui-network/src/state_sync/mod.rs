@@ -84,7 +84,7 @@ mod tests;
 mod worker;
 
 use self::{metrics::Metrics, server::CheckpointContentsDownloadLimitLayer};
-use crate::state_sync::worker::StateSyncWorker;
+use crate::state_sync::worker::process_archive_checkpoint;
 pub use builder::{Builder, UnstartedStateSync};
 pub use generated::{
     state_sync_client::StateSyncClient,
@@ -93,7 +93,7 @@ pub use generated::{
 pub use server::GetCheckpointAvailabilityResponse;
 pub use server::GetCheckpointSummaryRequest;
 use sui_config::node::ArchiveReaderConfig;
-use sui_data_ingestion_core::{ReaderOptions, setup_single_workflow_with_options};
+use sui_storage::object_store::util::{build_object_store, fetch_checkpoint};
 use sui_storage::verify_checkpoint;
 
 /// A handle to the StateSync subsystem.
@@ -181,7 +181,11 @@ impl PeerScore {
         while self.successes.len() > Self::MAX_SAMPLES {
             self.successes.pop_front();
         }
-        self.failing_since = None;
+        // Note: a single success does NOT clear `failing_since`. Whether the peer is
+        // "consistently failing" is driven by the windowed failure RATE (see
+        // `update_failing_state`), so an occasional success while the rate stays high (e.g.
+        // a brief reconnect during connection churn) must not keep resetting the clock and
+        // prevent the peer from ever being reported.
     }
 
     pub(super) fn record_failure(&mut self) {
@@ -215,8 +219,16 @@ impl PeerScore {
     }
 
     pub(super) fn update_failing_state(&mut self) {
-        if self.is_failing() && self.failing_since.is_none() {
-            self.failing_since = Some(Instant::now());
+        if self.is_failing() {
+            // Start the consistently-failing clock when the windowed failure rate first
+            // crosses the threshold, and let it accumulate while the rate stays high.
+            if self.failing_since.is_none() {
+                self.failing_since = Some(Instant::now());
+            }
+        } else {
+            // The windowed failure rate dropped below the threshold: the peer is no longer
+            // failing, so clear the clock. Only an actual drop in the rate resets it.
+            self.failing_since = None;
         }
     }
 
@@ -1195,7 +1207,7 @@ async fn get_latest_from_peer(
         trace!(?info, "Peer {peer_id} not on same chain as us");
         return;
     }
-    let Some((highest_checkpoint, low_watermark)) =
+    let Ok(Some((highest_checkpoint, low_watermark))) =
         query_peer_for_latest_info(&mut client, timeout).await
     else {
         return;
@@ -1206,11 +1218,18 @@ async fn get_latest_from_peer(
         .update_peer_info(peer_id, highest_checkpoint, low_watermark);
 }
 
-/// Queries a peer for their highest_synced_checkpoint and low checkpoint watermark
+/// Queries a peer for their highest_synced_checkpoint and low checkpoint watermark.
+///
+/// Distinguishes three outcomes so callers can score the peer:
+/// - `Ok(Some(..))`: the peer answered with usable latest-checkpoint info.
+/// - `Ok(None)`: the peer answered but had nothing useful to report (e.g. a pre-upgrade peer
+///   that returns no latest summary). This is not a failure.
+/// - `Err(())`: the request itself failed (timeout / transport error). This is a failure: a
+///   peer that consistently fails these liveness queries is consistently unreachable.
 async fn query_peer_for_latest_info(
     client: &mut StateSyncClient<anemo::Peer>,
     timeout: Duration,
-) -> Option<(Checkpoint, Option<CheckpointSequenceNumber>)> {
+) -> Result<Option<(Checkpoint, Option<CheckpointSequenceNumber>)>, ()> {
     let request = Request::new(()).with_timeout(timeout);
     let response = client
         .get_checkpoint_availability(request)
@@ -1221,13 +1240,16 @@ async fn query_peer_for_latest_info(
             highest_synced_checkpoint,
             lowest_available_checkpoint,
         }) => {
-            return Some((highest_synced_checkpoint, Some(lowest_available_checkpoint)));
+            return Ok(Some((
+                highest_synced_checkpoint,
+                Some(lowest_available_checkpoint),
+            )));
         }
         Err(status) => {
             // If peer hasn't upgraded they would return 404 NotFound error
             if status.status() != anemo::types::response::StatusCode::NotFound {
                 trace!("get_checkpoint_availability request failed: {status:?}");
-                return None;
+                return Err(());
             }
         }
     };
@@ -1240,11 +1262,11 @@ async fn query_peer_for_latest_info(
         .await
         .map(Response::into_inner);
     match response {
-        Ok(Some(checkpoint)) => Some((checkpoint, None)),
-        Ok(None) => None,
+        Ok(Some(checkpoint)) => Ok(Some((checkpoint, None))),
+        Ok(None) => Ok(None),
         Err(status) => {
             trace!("get_checkpoint_summary (latest) request failed: {status:?}");
-            None
+            Err(())
         }
     }
 }
@@ -1268,14 +1290,32 @@ async fn query_peers_for_their_latest_checkpoint(
             let mut client = StateSyncClient::new(peer);
 
             async move {
+                let start = Instant::now();
                 let response = query_peer_for_latest_info(&mut client, timeout).await;
+                let elapsed = start.elapsed();
                 match response {
-                    Some((highest_checkpoint, low_watermark)) => peer_heights
-                        .write()
-                        .unwrap()
-                        .update_peer_info(peer_id, highest_checkpoint.clone(), low_watermark)
-                        .then_some(highest_checkpoint),
-                    None => None,
+                    Ok(Some((highest_checkpoint, low_watermark))) => {
+                        // A peer that answers our periodic liveness/discovery query is healthy;
+                        // record it so its success rate offsets occasional failures.
+                        let size = bcs::serialized_size(&highest_checkpoint).unwrap_or(0) as u64;
+                        let mut peer_heights = peer_heights.write().unwrap();
+                        peer_heights.record_success(peer_id, size, elapsed);
+                        peer_heights
+                            .update_peer_info(peer_id, highest_checkpoint.clone(), low_watermark)
+                            .then_some(highest_checkpoint)
+                    }
+                    // Peer responded but had nothing useful; neutral, do not score.
+                    Ok(None) => None,
+                    // Request failed (timeout / transport). A peer that consistently fails
+                    // these liveness queries is consistently unreachable, so record the
+                    // failure to feed the scorer even when we are not actively syncing from
+                    // it. Without this, an unreachable peer is only scored while there is
+                    // active sync traffic, so it can evade the consistently-failing-peer
+                    // disconnect logic indefinitely.
+                    Err(()) => {
+                        peer_heights.write().unwrap().record_failure(peer_id);
+                        None
+                    }
                 }
             }
         })
@@ -1576,29 +1616,30 @@ async fn sync_checkpoint_contents_from_archive_iteration<S>(
             warn!("{} can't be used as an archival fallback", ingestion_url);
             return;
         }
-        let reader_options = ReaderOptions {
-            batch_size: archive_config.download_concurrency.into(),
-            upper_limit: Some(end),
-            ..Default::default()
-        };
-        let Ok((executor, _exit_sender)) = setup_single_workflow_with_options(
-            StateSyncWorker(store, metrics),
-            ingestion_url.clone(),
+        let obj_store = build_object_store(
+            ingestion_url,
             archive_config.remote_store_options.clone(),
-            start,
-            1,
-            Some(reader_options),
-        )
-        .await
-        else {
-            return;
-        };
-        match executor.await {
-            Ok(_) => info!(
-                "State sync from archive is complete. Checkpoints downloaded = {:?}",
-                end - start
-            ),
-            Err(err) => warn!("State sync from archive failed with error: {:?}", err),
+            archive_config.remote_store_headers.clone(),
+        );
+        let mut checkpoint_stream = futures::stream::iter(start..=end)
+            .map(|seq| {
+                let obj_store = obj_store.clone();
+                async move { (seq, fetch_checkpoint(&obj_store, seq).await) }
+            })
+            .buffered(archive_config.download_concurrency.get());
+
+        while let Some((seq, result)) = checkpoint_stream.next().await {
+            let checkpoint = match result {
+                Ok(checkpoint) => checkpoint,
+                Err(err) => {
+                    warn!("State sync from archive failed fetching checkpoint {seq}: {err}");
+                    return;
+                }
+            };
+            if let Err(err) = process_archive_checkpoint(&store, &checkpoint, &metrics) {
+                warn!("State sync from archive failed processing checkpoint {seq}: {err}");
+                return;
+            }
         }
     }
 }

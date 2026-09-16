@@ -8,8 +8,9 @@ use crate::{
     },
 };
 use indexmap::IndexSet;
-use move_binary_format::file_format::{
-    AbilitySet, CodeOffset, FunctionDefinitionIndex, Visibility,
+use move_binary_format::{
+    CompiledModule,
+    file_format::{AbilitySet, CodeOffset, FunctionDefinitionIndex, Visibility},
 };
 use move_core_types::{
     account_address::AccountAddress,
@@ -17,11 +18,13 @@ use move_core_types::{
     language_storage::{ModuleId, StructTag},
     u256::U256,
 };
-use std::rc::Rc;
+use std::{collections::BTreeSet, rc::Rc};
 use sui_types::{
     Identifier, TypeTag,
     base_types::{ObjectID, ObjectRef, RESOLVED_TX_CONTEXT, SequenceNumber, TxContextKind},
+    object::ObjectPermissions,
 };
+use sui_verifier::INIT_FN_NAME;
 
 //**************************************************************************************************
 // AST Nodes
@@ -31,7 +34,11 @@ use sui_types::{
 pub struct Transaction {
     pub gas_payment: Option<GasPayment>,
     pub inputs: Inputs,
+    /// Original number of commands in the transaction. After typing, Spanned indices in the AST
+    /// should be < `original_command_len`
+    pub original_command_len: usize,
     pub commands: Commands,
+    pub unified_linkage: Option<ExecutableLinkage>,
 }
 
 pub type Inputs = Vec<(InputArg, InputType)>;
@@ -47,30 +54,25 @@ pub enum InputArg {
     FundsWithdrawal(FundsWithdrawalArg),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SharedObjectKind {
-    Legacy,
-    Party,
+#[derive(Debug)]
+#[cfg_attr(debug_assertions, derive(Clone))]
+pub enum ObjectArgKind {
+    ImmObject(ObjectRef),
+    OwnedObject(ObjectRef),
+    ConsensusObject {
+        id: ObjectID,
+        initial_shared_version: SequenceNumber,
+    },
 }
 
 #[derive(Debug)]
 #[cfg_attr(debug_assertions, derive(Clone))]
-pub enum ObjectArg {
-    ImmObject(ObjectRef),
-    OwnedObject(ObjectRef),
-    SharedObject {
-        id: ObjectID,
-        initial_shared_version: SequenceNumber,
-        mutability: ObjectMutability,
-        kind: SharedObjectKind,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ObjectMutability {
-    Mutable,
-    Immutable,
-    NonExclusiveWrite,
+pub struct ObjectArg {
+    pub kind: ObjectArgKind,
+    /// Permissions, potentially refined/limited based on the input argument. For example if a
+    /// shared object is used but marked as read-only, the permissions would be refined to being
+    /// _only_ immutable usage.
+    pub refined_permissions: ObjectPermissions,
 }
 
 #[derive(Debug)]
@@ -78,11 +80,35 @@ pub enum ObjectMutability {
 pub struct FundsWithdrawalArg {
     // if true, it was from a compatibility object input, not a intentional withdrawal argument
     pub from_compatibility_object: bool,
-    /// The full type `sui::funds_accumulator::Withdrawal<T>`
+    /// The full type.
+    /// Either `sui::funds_accumulator::Withdrawal<T>` for a direct source, or
+    /// `sui::allowance::AllowanceWithdrawal<T>` for an allowance source
     pub ty: Type,
-    pub owner: AccountAddress,
+    pub source: WithdrawalSource,
     /// This amount is verified to be <= the max for the type described by the `T` in `ty`
     pub amount: U256,
+}
+
+#[derive(Debug)]
+#[cfg_attr(debug_assertions, derive(Clone))]
+pub enum WithdrawalSource {
+    /// A `sui::funds_accumulator::Withdrawal` from the sender/sponsor
+    Direct { owner: AccountAddress },
+    /// An `sui::allowance::AllowanceWithdrawal` permissioned by the `Allowance` object `id`
+    Allowance {
+        funder: AccountAddress,
+        id: ObjectID,
+    },
+}
+
+impl WithdrawalSource {
+    /// The account the withdrawal debits.
+    pub fn source_account(&self) -> AccountAddress {
+        match self {
+            Self::Direct { owner } => *owner,
+            Self::Allowance { funder, .. } => *funder,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -128,14 +154,72 @@ pub enum Command {
     SplitCoins(Argument, Vec<Argument>),
     MergeCoins(Argument, Vec<Argument>),
     MakeMoveVec(/* T for vector<T> */ Option<Type>, Vec<Argument>),
-    Publish(Vec<Vec<u8>>, Vec<ObjectID>, ResolvedLinkage),
+    Publish(PackagePayload, Vec<ObjectID>, ResolvedLinkage),
     Upgrade(
-        Vec<Vec<u8>>,
+        PackagePayload,
         Vec<ObjectID>,
         ObjectID,
         Argument,
         ResolvedLinkage,
     ),
+}
+
+#[derive(Debug, Clone)]
+pub enum PackagePayload {
+    Serialized(Vec<Vec<u8>>),
+    Deserialized(DeserializedPackage),
+}
+
+// A Deserialized but not yet verified package created as part of loading.
+#[derive(Debug, Clone)]
+pub struct DeserializedPackage {
+    // NB: Modules are deserialized but not yet verified. They _are_ bounds checked though.
+    pub deserialized_modules: Vec<CompiledModule>,
+    // Sum of the sizes of all modules in (serialized) bytes, used for metering
+    pub total_bytes: usize,
+    // The computed digest of the package --
+    // `MovePackage::compute_digest_for_modules_and_deps` with `hash_modules` set to `true`.
+    pub computed_digest: [u8; 32],
+    // Names of the modules in this package that define a function named `init`.
+    pub modules_with_init: BTreeSet<Identifier>,
+}
+
+impl DeserializedPackage {
+    pub fn new(
+        deserialized_modules: Vec<CompiledModule>,
+        total_bytes: usize,
+        computed_digest: [u8; 32],
+    ) -> Self {
+        let modules_with_init = deserialized_modules
+            .iter()
+            .filter(|module| module_has_init(module))
+            .map(|module| module.identifier_at(module.self_handle().name).to_owned())
+            .collect();
+        Self {
+            deserialized_modules,
+            total_bytes,
+            computed_digest,
+            modules_with_init,
+        }
+    }
+
+    /// Returns true if this package defines any modules with function that could be a possible
+    /// `init` function.
+    pub fn has_potential_init(&self) -> bool {
+        !self.modules_with_init.is_empty()
+    }
+}
+
+/// Whether `module` defines a function named `init`.
+///
+/// NB: we presuppose that a function named `init` is the module's initializer. If it does not
+/// conform to the `init` signature requirements the entry points verifier rejects the publish
+/// later, failing the transaction as a whole.
+pub(crate) fn module_has_init(module: &CompiledModule) -> bool {
+    module.function_defs().iter().any(|func_def| {
+        let handle = module.function_handle_at(func_def.function);
+        module.identifier_at(handle.name) == INIT_FN_NAME
+    })
 }
 
 #[derive(Debug)]
@@ -173,17 +257,15 @@ pub use sui_types::transaction::Argument;
 
 impl ObjectArg {
     pub fn id(&self) -> ObjectID {
-        match self {
-            ObjectArg::ImmObject(oref) | ObjectArg::OwnedObject(oref) => oref.0,
-            ObjectArg::SharedObject { id, .. } => *id,
-        }
+        self.kind.id()
     }
+}
 
-    pub fn mutability(&self) -> ObjectMutability {
+impl ObjectArgKind {
+    pub fn id(&self) -> ObjectID {
         match self {
-            ObjectArg::ImmObject(_) => ObjectMutability::Immutable,
-            ObjectArg::OwnedObject(_) => ObjectMutability::Mutable,
-            ObjectArg::SharedObject { mutability, .. } => *mutability,
+            Self::ImmObject(oref) | Self::OwnedObject(oref) => oref.0,
+            Self::ConsensusObject { id, .. } => *id,
         }
     }
 }
@@ -224,6 +306,12 @@ impl Type {
             TxContextKind::None
         }
     }
+
+    /// Is this the `TxContext` datatype itself, not behind a reference?
+    pub fn is_tx_context_by_value(&self) -> bool {
+        matches!(self, Type::Datatype(dt) if dt.qualified_ident() == RESOLVED_TX_CONTEXT)
+    }
+
     pub fn all_addresses(&self) -> IndexSet<AccountAddress> {
         match self {
             Type::Bool
@@ -384,13 +472,4 @@ impl TryFrom<&Datatype> for StructTag {
                 .collect::<Result<Vec<TypeTag>, _>>()?,
         })
     }
-}
-
-//**************************************************************************************************
-// Tests
-//**************************************************************************************************
-
-#[test]
-fn enum_size() {
-    assert_eq!(std::mem::size_of::<Type>(), 16);
 }

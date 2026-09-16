@@ -176,6 +176,9 @@ impl<'a> ParsingAnalysisContext<'a> {
             | A::Allow { .. }
             | A::Spec { .. }
             | A::SpecOnly { .. }
+            | A::Deny { .. }
+            | A::Expect { .. }
+            | A::Warn { .. }
             | A::LintAllow { .. } => (),
             A::External { attrs } => {
                 // attrs: Spanned<Vec<ParsedAttribute>>
@@ -298,12 +301,6 @@ impl<'a> ParsingAnalysisContext<'a> {
                         self.type_symbols(t)
                     }
 
-                    if fun.macro_.is_some() {
-                        // we currently do not process macro function bodies
-                        // in the parsing symbolicator (and do very limited
-                        // processing in typing symbolicator)
-                        continue;
-                    }
                     if let P::FunctionBody_::Defined(seq) = &fun.body.value {
                         self.seq_symbols(seq);
                     };

@@ -8,6 +8,9 @@ authors = ["Mysten Labs <build@mystenlabs.com>"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lints]
+workspace = true
+
 [dependencies]
 integer-encoding.workspace = true
 indicatif.workspace = true
@@ -30,7 +33,6 @@ sui-storage.workspace = true
 sui-protocol-config.workspace = true
 fastcrypto = { workspace = true, features = ["copy_key"] }
 tokio = { workspace = true, features = ["full"] }
-serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

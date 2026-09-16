@@ -15,19 +15,19 @@ error[E01002]: unexpected token
    │     Unexpected 'spec'
    │     Expected a module member: 'use', 'friend', 'const', 'fun', or 'struct'
 
-error[E03011]: invalid use of reserved name
+error[EC03011]: invalid use of reserved name
    ┌─ tests/move_check/expansion/use_inner_scope_invalid.move:17:23
    │
 17 │         use 0x2::M as Self;
    │                       ^^^^ Invalid module alias name 'Self'. 'Self' is restricted and cannot be used to name a module alias
 
-error[E02010]: invalid name
+error[EC02010]: invalid declaration name
    ┌─ tests/move_check/expansion/use_inner_scope_invalid.move:18:28
    │
 18 │         use 0x2::M::{S1 as s1, Foo as foo};
    │                            ^^ Invalid struct alias name 's1'. Struct alias names must start with 'A'..'Z'
 
-error[E03003]: unbound module member
+error[EC03003]: unbound module member
    ┌─ tests/move_check/expansion/use_inner_scope_invalid.move:18:32
    │
  2 │ module M {

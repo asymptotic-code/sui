@@ -17,10 +17,6 @@ use tracing::info;
 /// Delete a party object as the object owner.
 #[sim_test]
 async fn party_object_deletion() {
-    if sui_simulator::has_mainnet_protocol_config_override() {
-        return;
-    }
-
     telemetry_subscribers::init_for_testing();
     let test_cluster = TestClusterBuilder::new().build().await;
 
@@ -49,7 +45,7 @@ async fn party_object_deletion() {
         .effects;
 
     assert_eq!(effects.deleted().len(), 1);
-    assert_eq!(effects.input_consensus_objects().len(), 1);
+    assert_eq!(effects.accessed_consensus_objects().len(), 1);
 
     // assert the shared object was deleted
     let deleted_obj_id = effects.deleted()[0].0;
@@ -58,10 +54,6 @@ async fn party_object_deletion() {
 
 #[sim_test]
 async fn party_object_deletion_multiple_times() {
-    if sui_simulator::has_mainnet_protocol_config_override() {
-        return;
-    }
-
     telemetry_subscribers::init_for_testing();
 
     let num_deletions = 20;
@@ -129,10 +121,6 @@ async fn party_object_deletion_multiple_times() {
 
 #[sim_test]
 async fn party_object_deletion_multiple_times_cert_racing() {
-    if sui_simulator::has_mainnet_protocol_config_override() {
-        return;
-    }
-
     telemetry_subscribers::init_for_testing();
 
     let num_deletions = 10;
@@ -201,10 +189,6 @@ async fn party_object_deletion_multiple_times_cert_racing() {
 /// Transfer a party object as the object owner.
 #[sim_test]
 async fn party_object_transfer() {
-    if sui_simulator::has_mainnet_protocol_config_override() {
-        return;
-    }
-
     telemetry_subscribers::init_for_testing();
     let test_cluster = TestClusterBuilder::new().build().await;
 
@@ -233,7 +217,7 @@ async fn party_object_transfer() {
         .await
         .effects;
 
-    assert_eq!(effects.input_consensus_objects().len(), 1);
+    assert_eq!(effects.accessed_consensus_objects().len(), 1);
     let mutated_party = effects
         .mutated()
         .into_iter()
@@ -252,10 +236,6 @@ async fn party_object_transfer() {
 
 #[sim_test]
 async fn party_object_transfer_multiple_times() {
-    if sui_simulator::has_mainnet_protocol_config_override() {
-        return;
-    }
-
     telemetry_subscribers::init_for_testing();
 
     let num_transfers = 20;
@@ -331,10 +311,6 @@ async fn party_object_transfer_multiple_times() {
 /// 4. Execute the remaining two.
 #[sim_test]
 async fn party_object_transfer_multi_certs() {
-    if sui_simulator::has_mainnet_protocol_config_override() {
-        return;
-    }
-
     telemetry_subscribers::init_for_testing();
 
     // cause random delay just before tx is executed (to explore all orders)
@@ -448,10 +424,6 @@ async fn party_object_transfer_multi_certs() {
 /// Use a party object immutably.
 #[sim_test]
 async fn party_object_read() {
-    if sui_simulator::has_mainnet_protocol_config_override() {
-        return;
-    }
-
     telemetry_subscribers::init_for_testing();
 
     // Create a test cluster with enough gas coins for the below.
@@ -529,13 +501,8 @@ async fn party_object_read() {
         .build();
     let signed_transfer = test_cluster.sign_transaction(&transfer_transaction).await;
     let client_ip = SocketAddr::new([127, 0, 0, 1].into(), 0);
-    test_cluster
-        .submit_and_execute(signed_transfer.clone(), Some(client_ip))
-        .await
-        .unwrap();
-
     let (transfer_effects, _) = test_cluster
-        .submit_and_execute(signed_transfer.clone(), None)
+        .submit_and_execute(signed_transfer.clone(), Some(client_ip))
         .await
         .unwrap();
     all_digests.push(*signed_transfer.digest());
@@ -547,6 +514,13 @@ async fn party_object_read() {
         .find(|obj| matches!(obj.1, Owner::ConsensusAddressOwner { .. }))
         .expect("Party object should be mutated");
     object_initial_shared_version = mutated_party.1.start_version().unwrap();
+
+    // Wait for the transfer to settle across the cluster before issuing reads with the
+    // new initial_shared_version. Without this, submit_and_execute may route the next
+    // read to a validator that hasn't executed the transfer yet, causing ObjectNotFound.
+    test_cluster
+        .wait_for_tx_settlement(&[*signed_transfer.digest()])
+        .await;
 
     // Make some more transactions that read the party object from the new owner.
     for gas_coin in gas_coins_account2.iter().take(num_reads / 2) {
@@ -598,10 +572,6 @@ async fn party_object_grpc() {
     use sui_rpc::proto::sui::rpc::v2::ledger_service_client::LedgerServiceClient;
     use sui_rpc::proto::sui::rpc::v2::owner::OwnerKind;
     use sui_rpc::proto::sui::rpc::v2::state_service_client::StateServiceClient;
-
-    if sui_simulator::has_mainnet_protocol_config_override() {
-        return;
-    }
 
     let test_cluster = TestClusterBuilder::new().build().await;
 
@@ -752,10 +722,6 @@ async fn party_coin_grpc() {
     use sui_types::Identifier;
     use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
     use sui_types::transaction::{CallArg, ObjectArg, TransactionData};
-
-    if sui_simulator::has_mainnet_protocol_config_override() {
-        return;
-    }
 
     let cluster = TestClusterBuilder::new().build().await;
     let channel = tonic::transport::Channel::from_shared(cluster.rpc_url().to_owned())
@@ -927,10 +893,6 @@ async fn party_coin_grpc() {
 /// indexes
 #[sim_test]
 async fn party_object_jsonrpc() {
-    if sui_simulator::has_mainnet_protocol_config_override() {
-        return;
-    }
-
     let test_cluster = TestClusterBuilder::new().build().await;
 
     let (package, object) =

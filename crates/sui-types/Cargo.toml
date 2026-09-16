@@ -22,7 +22,7 @@ chrono.workspace = true
 consensus-config.workspace = true
 consensus-types.workspace = true
 num_enum.workspace = true
-im.workspace = true
+imbl.workspace = true
 itertools.workspace = true
 nonempty.workspace = true
 once_cell.workspace = true
@@ -118,5 +118,6 @@ harness = false
 
 [features]
 default = []
+testing = []
 tracing = ["move-vm-profiler/tracing"]
 fuzzing = ["move-core-types/fuzzing"]

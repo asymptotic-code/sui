@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::authority::AuthorityState;
+use crate::authority::authority_store::ObjectLockStatus;
 use crate::authority::test_authority_builder::TestAuthorityBuilder;
 use fastcrypto::{ed25519::Ed25519KeyPair, traits::KeyPair};
 use fastcrypto_zkp::bn254::zk_login::{OIDCProvider, ZkLoginInputs, parse_jwks};
@@ -480,12 +481,12 @@ async fn do_transaction_test_impl(
         })
         .collect();
     let authority_state = init_state_with_ids(init_state_input).await;
-    authority_state.insert_genesis_object(input_object).await;
+    authority_state.insert_genesis_object(input_object);
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
-    let object = authority_state.get_object(&input_object_id).await.unwrap();
+    let object = authority_state.get_object(&input_object_id).unwrap();
     let mut gas_objects = Vec::new();
     for id in gas_object_ids {
-        gas_objects.push(authority_state.get_object(&id).await.unwrap());
+        gas_objects.push(authority_state.get_object(&id).unwrap());
     }
 
     // Execute the test with two transactions, one transfer and one move call.
@@ -917,16 +918,16 @@ async fn do_zklogin_transaction_test(
 
 async fn check_locks(authority_state: Arc<AuthorityState>, object_ids: Vec<ObjectID>) {
     for object_id in object_ids {
-        let object = authority_state.get_object(&object_id).await.unwrap();
-        assert!(
+        let object = authority_state.get_object(&object_id).unwrap();
+        assert_eq!(
             authority_state
-                .get_transaction_lock(
-                    &object.compute_object_reference(),
+                .get_object_cache_reader()
+                .get_lock(
+                    object.compute_object_reference(),
                     &authority_state.epoch_store_for_testing()
                 )
-                .await
-                .unwrap()
-                .is_none()
+                .unwrap(),
+            ObjectLockStatus::Initialized
         );
     }
 }
@@ -1052,8 +1053,8 @@ async fn init_zklogin_transfer(
     zklogin: &ZkLoginInputs,
 ) -> sui_types::message_envelope::Envelope<SenderSignedData, sui_types::crypto::EmptySignInfo> {
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
     let full_object_ref = object.compute_full_object_reference();
     let gas_object_ref = gas_object.compute_object_reference();
     let gas_budget = rgp * TEST_ONLY_GAS_UNIT_FOR_TRANSFER;
@@ -1094,8 +1095,8 @@ async fn sign_with_zklogin_inside_multisig(
     multisig_pk: MultiSigPublicKey,
 ) -> sui_types::message_envelope::Envelope<SenderSignedData, sui_types::crypto::EmptySignInfo> {
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
     let full_object_ref = object.compute_full_object_reference();
     let gas_object_ref = gas_object.compute_object_reference();
     let gas_budget = rgp * TEST_ONLY_GAS_UNIT_FOR_TRANSFER;
@@ -1238,8 +1239,8 @@ async fn zk_multisig_test() {
     });
 
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
 
     let data = TransactionData::new_transfer(
         recipient,
@@ -1392,7 +1393,7 @@ async fn test_shared_object_v2_denied() {
         .await;
 
     // Insert genesis objects
-    authority.insert_genesis_objects(&gas_objects).await;
+    authority.insert_genesis_objects(&gas_objects);
 
     // Publish the object_basics package
     let (authority, package) = publish_object_basics(authority).await;
@@ -1410,14 +1411,13 @@ async fn test_shared_object_v2_denied() {
             "share",
             vec![],
             vec![],
-            true,
         )
         .await
         .unwrap();
 
         effects.status().unwrap();
         let shared_object_id = effects.created()[0].0.0;
-        authority.get_object(&shared_object_id).await.unwrap()
+        authority.get_object(&shared_object_id).unwrap()
     };
 
     let initial_shared_version = shared_object.version();
@@ -1538,4 +1538,305 @@ async fn test_shared_object_v2_denied() {
 
     // Clean up
     drop(server_handle);
+}
+
+// ============================================================================
+// Gasless transaction input validation tests
+// ============================================================================
+
+mod gasless_input_tests {
+    use super::*;
+    use move_core_types::account_address::AccountAddress;
+    use move_core_types::language_storage::TypeTag;
+    use sui_types::SUI_FRAMEWORK_PACKAGE_ID;
+    use sui_types::base_types::{ObjectDigest, SequenceNumber};
+    use sui_types::digests::ChainIdentifier;
+    use sui_types::transaction::{
+        FundsWithdrawalArg, GasData, ProgrammableMoveCall, TransactionDataV1, TransactionExpiration,
+    };
+    use sui_types::type_input::TypeInput;
+
+    fn test_token() -> TypeTag {
+        TypeTag::Struct(Box::new(move_core_types::language_storage::StructTag {
+            address: AccountAddress::from_hex_literal("0xabc").unwrap(),
+            module: Identifier::new("usdc").unwrap(),
+            name: Identifier::new("USDC").unwrap(),
+            type_params: vec![],
+        }))
+    }
+
+    fn send_funds_call(type_arg: TypeTag) -> Command {
+        Command::MoveCall(Box::new(ProgrammableMoveCall {
+            package: SUI_FRAMEWORK_PACKAGE_ID,
+            module: "balance".to_string(),
+            function: "send_funds".to_string(),
+            type_arguments: vec![TypeInput::from(type_arg)],
+            arguments: vec![Argument::Input(0), Argument::Input(1)],
+        }))
+    }
+
+    fn build_gasless_transaction(
+        sender: SuiAddress,
+        pt: ProgrammableTransaction,
+        chain: ChainIdentifier,
+    ) -> TransactionData {
+        TransactionData::V1(TransactionDataV1 {
+            kind: TransactionKind::ProgrammableTransaction(pt),
+            sender,
+            gas_data: GasData {
+                payment: vec![],
+                owner: sender,
+                price: 0,
+                budget: 0,
+            },
+            expiration: TransactionExpiration::ValidDuring {
+                min_epoch: Some(0),
+                max_epoch: Some(0),
+                min_timestamp: None,
+                max_timestamp: None,
+                chain,
+                nonce: 0,
+            },
+        })
+    }
+
+    fn build_pt_with_inputs(
+        inputs: Vec<CallArg>,
+        commands: Vec<Command>,
+    ) -> ProgrammableTransaction {
+        ProgrammableTransaction { inputs, commands }
+    }
+
+    async fn setup_gasless_authority(
+        config_cb: impl Fn(&mut ProtocolConfig),
+    ) -> (
+        Arc<AuthorityState>,
+        SuiAddress,
+        AccountKeyPair,
+        ChainIdentifier,
+    ) {
+        let (sender, keypair): (_, AccountKeyPair) = get_key_pair();
+        let mut config = ProtocolConfig::get_for_max_version_UNSAFE();
+        config.enable_gasless_for_testing();
+        config.set_gasless_allowed_token_types_for_testing(vec![(
+            "0x0000000000000000000000000000000000000000000000000000000000000abc::usdc::USDC"
+                .to_string(),
+            0,
+        )]);
+        config_cb(&mut config);
+
+        let authority = TestAuthorityBuilder::new()
+            .with_protocol_config(config)
+            .build()
+            .await;
+        let chain = authority.epoch_store_for_testing().get_chain_identifier();
+        (authority, sender, keypair, chain)
+    }
+
+    #[sim_test]
+    async fn test_gasless_unused_object_input_rejected() {
+        let (authority, sender, keypair, chain) = setup_gasless_authority(|_| {}).await;
+
+        let inputs = vec![
+            CallArg::Pure(bcs::to_bytes(&100u64).unwrap()),
+            CallArg::Pure(bcs::to_bytes(&SuiAddress::ZERO).unwrap()),
+            CallArg::Object(ObjectArg::ImmOrOwnedObject((
+                ObjectID::ZERO,
+                SequenceNumber::new(),
+                ObjectDigest::MIN,
+            ))),
+        ];
+        let pt = build_pt_with_inputs(inputs, vec![send_funds_call(test_token())]);
+        let tx_data = build_gasless_transaction(sender, pt, chain);
+        let tx = to_sender_signed_transaction(tx_data, &keypair);
+
+        let epoch_store = authority.load_epoch_store_one_call_per_task();
+        let result = tx.validity_check(&epoch_store.tx_validity_check_context());
+
+        assert!(result.is_err(), "Expected error for unused Object input");
+        let err = result.unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("unused") || err_str.contains("Object"),
+            "Expected error about unused Object, got: {err_str}"
+        );
+    }
+
+    #[sim_test]
+    async fn test_gasless_unused_funds_withdrawal_input_rejected() {
+        let (authority, sender, keypair, chain) = setup_gasless_authority(|_| {}).await;
+
+        let inputs = vec![
+            CallArg::Pure(bcs::to_bytes(&100u64).unwrap()),
+            CallArg::Pure(bcs::to_bytes(&SuiAddress::ZERO).unwrap()),
+            CallArg::FundsWithdrawal(FundsWithdrawalArg::balance_from_sender(100, test_token())),
+        ];
+        let pt = build_pt_with_inputs(inputs, vec![send_funds_call(test_token())]);
+        let tx_data = build_gasless_transaction(sender, pt, chain);
+        let tx = to_sender_signed_transaction(tx_data, &keypair);
+
+        let epoch_store = authority.load_epoch_store_one_call_per_task();
+        let result = tx.validity_check(&epoch_store.tx_validity_check_context());
+
+        assert!(
+            result.is_err(),
+            "Expected error for unused FundsWithdrawal input"
+        );
+        let err = result.unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("unused") || err_str.contains("FundsWithdrawal"),
+            "Expected error about unused FundsWithdrawal, got: {err_str}"
+        );
+    }
+
+    #[sim_test]
+    async fn test_gasless_too_many_unused_pure_inputs_rejected() {
+        let (authority, sender, keypair, chain) = setup_gasless_authority(|config| {
+            config.set_gasless_max_unused_inputs_for_testing(1);
+        })
+        .await;
+
+        let inputs = vec![
+            CallArg::Pure(bcs::to_bytes(&100u64).unwrap()),
+            CallArg::Pure(bcs::to_bytes(&SuiAddress::ZERO).unwrap()),
+            CallArg::Pure(bcs::to_bytes(&42u64).unwrap()),
+            CallArg::Pure(bcs::to_bytes(&43u64).unwrap()),
+        ];
+        let pt = build_pt_with_inputs(inputs, vec![send_funds_call(test_token())]);
+        let tx_data = build_gasless_transaction(sender, pt, chain);
+        let tx = to_sender_signed_transaction(tx_data, &keypair);
+
+        let epoch_store = authority.load_epoch_store_one_call_per_task();
+        let result = tx.validity_check(&epoch_store.tx_validity_check_context());
+
+        assert!(
+            result.is_err(),
+            "Expected error for too many unused Pure inputs"
+        );
+        let err = result.unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("unused") && err_str.contains("Pure"),
+            "Expected error about unused Pure inputs, got: {err_str}"
+        );
+    }
+
+    #[sim_test]
+    async fn test_gasless_pure_input_too_large_rejected() {
+        let (authority, sender, keypair, chain) = setup_gasless_authority(|config| {
+            config.set_gasless_max_pure_input_bytes_for_testing(10);
+        })
+        .await;
+
+        let large_bytes = vec![0u8; 20];
+        let inputs = vec![
+            CallArg::Pure(bcs::to_bytes(&100u64).unwrap()),
+            CallArg::Pure(bcs::to_bytes(&SuiAddress::ZERO).unwrap()),
+            CallArg::Pure(large_bytes),
+        ];
+        let pt = build_pt_with_inputs(inputs, vec![send_funds_call(test_token())]);
+        let tx_data = build_gasless_transaction(sender, pt, chain);
+        let tx = to_sender_signed_transaction(tx_data, &keypair);
+
+        let epoch_store = authority.load_epoch_store_one_call_per_task();
+        let result = tx.validity_check(&epoch_store.tx_validity_check_context());
+
+        assert!(result.is_err(), "Expected error for Pure input too large");
+        let err = result.unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("bytes"),
+            "Expected error about input size, got: {err_str}"
+        );
+    }
+
+    #[sim_test]
+    async fn test_gasless_unused_pure_inputs_within_limit_succeeds() {
+        let (authority, sender, keypair, chain) = setup_gasless_authority(|config| {
+            config.set_gasless_max_unused_inputs_for_testing(2);
+        })
+        .await;
+
+        let inputs = vec![
+            CallArg::Pure(bcs::to_bytes(&100u64).unwrap()),
+            CallArg::Pure(bcs::to_bytes(&SuiAddress::ZERO).unwrap()),
+            CallArg::Pure(bcs::to_bytes(&42u64).unwrap()),
+            CallArg::Pure(bcs::to_bytes(&43u64).unwrap()),
+        ];
+        let pt = build_pt_with_inputs(inputs, vec![send_funds_call(test_token())]);
+        let tx_data = build_gasless_transaction(sender, pt, chain);
+        let tx = to_sender_signed_transaction(tx_data, &keypair);
+
+        let epoch_store = authority.load_epoch_store_one_call_per_task();
+        let result = tx.validity_check(&epoch_store.tx_validity_check_context());
+
+        assert!(
+            result.is_ok(),
+            "Expected success with unused inputs within limit, got: {:?}",
+            result
+        );
+    }
+
+    #[sim_test]
+    async fn test_gasless_tx_within_size_limit_succeeds() {
+        let (authority, sender, keypair, chain) = setup_gasless_authority(|_| {}).await;
+
+        let inputs = vec![
+            CallArg::Pure(bcs::to_bytes(&100u64).unwrap()),
+            CallArg::Pure(bcs::to_bytes(&SuiAddress::ZERO).unwrap()),
+        ];
+        let pt = build_pt_with_inputs(inputs, vec![send_funds_call(test_token())]);
+        let tx_data = build_gasless_transaction(sender, pt, chain);
+        let tx = to_sender_signed_transaction(tx_data, &keypair);
+
+        let epoch_store = authority.load_epoch_store_one_call_per_task();
+        let result = tx.validity_check(&epoch_store.tx_validity_check_context());
+
+        assert!(
+            result.is_ok(),
+            "Small gasless tx should pass size check, got: {:?}",
+            result
+        );
+    }
+
+    #[sim_test]
+    async fn test_gasless_tx_exceeding_size_limit_rejected() {
+        let (authority, sender, keypair, chain) = setup_gasless_authority(|_| {}).await;
+
+        // Build a valid gasless tx that exceeds 16 KiB: ~110 send_funds calls
+        // (each ~150 bytes serialized) pushes past the limit.
+        let num_sends = 110;
+        let token = test_token();
+        let mut inputs: Vec<CallArg> = Vec::new();
+        let mut commands: Vec<Command> = Vec::new();
+
+        for i in 0..num_sends {
+            let amount_idx = (i * 2) as u16;
+            let recipient_idx = (i * 2 + 1) as u16;
+            inputs.push(CallArg::Pure(bcs::to_bytes(&100u64).unwrap()));
+            inputs.push(CallArg::Pure(bcs::to_bytes(&SuiAddress::ZERO).unwrap()));
+            commands.push(Command::MoveCall(Box::new(ProgrammableMoveCall {
+                package: SUI_FRAMEWORK_PACKAGE_ID,
+                module: "balance".to_string(),
+                function: "send_funds".to_string(),
+                type_arguments: vec![TypeInput::from(token.clone())],
+                arguments: vec![Argument::Input(amount_idx), Argument::Input(recipient_idx)],
+            })));
+        }
+
+        let pt = build_pt_with_inputs(inputs, commands);
+        let tx_data = build_gasless_transaction(sender, pt, chain);
+        let tx = to_sender_signed_transaction(tx_data, &keypair);
+
+        let epoch_store = authority.load_epoch_store_one_call_per_task();
+        let result = tx.validity_check(&epoch_store.tx_validity_check_context());
+
+        assert!(result.is_err(), "Oversized gasless tx should be rejected");
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("gasless transaction size exceeded"),
+            "Expected gasless size limit error, got: {err_str}"
+        );
+    }
 }

@@ -16,7 +16,8 @@ use serde_json::json;
 use sui_indexer_alt::config::IndexerConfig;
 use sui_indexer_alt_framework::ingestion::ClientArgs;
 use sui_indexer_alt_framework::ingestion::ingestion_client::IngestionClientArgs;
-use sui_transactional_test_runner::create_adapter;
+use sui_indexer_alt_jsonrpc::NodeArgs;
+use sui_transactional_test_runner::create_adapter_and_taskify;
 use sui_transactional_test_runner::offchain_state::OffchainStateReader;
 use sui_transactional_test_runner::offchain_state::TestResponse;
 use sui_transactional_test_runner::run_tasks_with_adapter;
@@ -33,8 +34,6 @@ struct OffchainReader {
     client: Client,
     queries: AtomicUsize,
 }
-
-datatest_stable::harness!(run_test, "tests", r".*\.move$");
 
 impl OffchainReader {
     fn new(cluster: Arc<OffchainCluster>) -> Self {
@@ -149,6 +148,10 @@ async fn cluster(config: &OffChainConfig) -> Arc<OffchainCluster> {
             client_args,
             OffchainClusterConfig {
                 indexer_config,
+                // TODO: dummy value until simulacrum exposes grpc
+                jsonrpc_node_args: NodeArgs {
+                    fullnode_grpc_url: Some("http://127.0.0.1:1".into()),
+                },
                 ..Default::default()
             },
             &prometheus::Registry::new(),
@@ -161,21 +164,31 @@ async fn cluster(config: &OffChainConfig) -> Arc<OffchainCluster> {
 #[cfg_attr(not(msim), tokio::main)]
 #[cfg_attr(msim, msim::main)]
 async fn run_test(path: &Path) -> Result<(), Box<dyn Error>> {
-    if cfg!(msim) {
-        return Ok(());
-    }
-
     telemetry_subscribers::init_for_testing();
 
     // start the adapter first to start the executor (simulacrum)
-    let (output, mut adapter) =
-        create_adapter::<SuiTestAdapter>(path, Some(Arc::new(PRE_COMPILED.clone()))).await?;
+    let (output, mut adapter, tasks) =
+        create_adapter_and_taskify::<SuiTestAdapter>(path, Some(Arc::new(PRE_COMPILED.clone())))
+            .await?;
 
     // configure access to the off-chain reader
     let c = cluster(adapter.offchain_config.as_ref().unwrap()).await;
     adapter.with_offchain_reader(Box::new(OffchainReader::new(c.clone())));
 
     // run the tasks in the test
-    run_tasks_with_adapter(path, adapter, output, None).await?;
+    run_tasks_with_adapter(path, adapter, output, tasks, None).await?;
     Ok(())
+}
+
+#[cfg(not(msim))]
+datatest_stable::harness!(run_test, "tests", r".*\.move$");
+
+// The off-chain cluster these tests stand up is not exercised by the simulator,
+// so running them under msim only costs time. Expose an empty harness so nextest
+// still sees a well-formed binary.
+#[cfg(msim)]
+fn main() {
+    // Referenced so the otherwise-unused test fn does not trip dead-code warnings.
+    let _ = run_test;
+    datatest_stable::runner(&[]);
 }

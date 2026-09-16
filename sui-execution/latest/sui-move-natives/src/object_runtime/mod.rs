@@ -4,6 +4,8 @@
 pub(crate) mod accumulator;
 mod fingerprint;
 pub(crate) mod object_store;
+#[cfg(test)]
+mod unit_tests;
 
 use crate::object_runtime::object_store::{CacheMetadata, ChildObjectEffect};
 
@@ -19,6 +21,7 @@ use move_core_types::{
     annotated_visitor as AV,
     language_storage::StructTag,
     runtime_value as R,
+    u256::U256,
     vm_status::StatusCode,
 };
 use move_vm_runtime::execution::values::{GlobalValue, Value};
@@ -33,16 +36,18 @@ use sui_types::{
     SUI_ACCUMULATOR_ROOT_OBJECT_ID, SUI_ADDRESS_ALIAS_STATE_OBJECT_ID,
     SUI_AUTHENTICATOR_STATE_OBJECT_ID, SUI_BRIDGE_OBJECT_ID, SUI_CLOCK_OBJECT_ID,
     SUI_COIN_REGISTRY_OBJECT_ID, SUI_DENY_LIST_OBJECT_ID, SUI_DISPLAY_REGISTRY_OBJECT_ID,
-    SUI_RANDOMNESS_STATE_OBJECT_ID, SUI_SYSTEM_STATE_OBJECT_ID, TypeTag,
+    SUI_FORWARDING_ADDRESS_REGISTRY_OBJECT_ID, SUI_RANDOMNESS_STATE_OBJECT_ID,
+    SUI_SYSTEM_STATE_OBJECT_ID, TypeTag,
     base_types::{MoveObjectType, ObjectID, SequenceNumber, SuiAddress},
     committee::EpochId,
     error::{ExecutionError, VMMemoryLimitExceededSubStatusCode},
     execution::DynamicallyLoadedObjectMetadata,
     execution_status::ExecutionErrorKind,
     id::UID,
-    metrics::LimitsMetrics,
+    metrics::ExecutionMetrics,
+    move_package::MovePackage,
     object::{MoveObject, Owner},
-    storage::ChildObjectResolver,
+    storage::{ObjectFundsResolver, ObjectFundsSufficiency, RuntimeObjectResolver},
 };
 use tracing::error;
 
@@ -90,6 +95,16 @@ pub struct RuntimeResults {
     pub settlement_output_sui: u64,
 }
 
+#[derive(Clone, Copy)]
+struct ObjectFundsAvailable {
+    /// Current known available balance.
+    /// Keeps a running total available based on sends/redeems in this transaction.
+    /// The first time an insufficient balance is reached, we must then query the object store.
+    available: U256,
+    /// Whether a query to the store has been made.
+    queried: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct ObjectRuntimeState {
     pub(crate) input_objects: BTreeMap<ObjectID, Owner>,
@@ -106,6 +121,7 @@ pub(crate) struct ObjectRuntimeState {
     accumulator_events: Vec<MoveAccumulatorEvent>,
     // total size of events emitted so far
     total_events_size: u64,
+    total_events_emitted: u64,
     received: IndexMap<ObjectID, DynamicallyLoadedObjectMetadata>,
     // Used to track SUI conservation in settlement transactions. Settlement transactions
     // gather up withdraws and deposits from other transactions, and record them to accumulator
@@ -116,11 +132,13 @@ pub(crate) struct ObjectRuntimeState {
     settlement_output_sui: u64,
     accumulator_merge_totals: BTreeMap<(AccountAddress, TypeTag), u128>,
     accumulator_split_totals: BTreeMap<(AccountAddress, TypeTag), u128>,
+    object_funds_available: BTreeMap<(AccountAddress, TypeTag), ObjectFundsAvailable>,
 }
 
 #[derive(Tid)]
 pub struct ObjectRuntime<'a> {
     child_object_store: ChildObjectStore<'a>,
+    object_funds_resolver: &'a dyn ObjectFundsResolver,
     // inventories for test scenario
     pub(crate) test_inventories: TestInventories,
     // the internal state
@@ -129,7 +147,7 @@ pub struct ObjectRuntime<'a> {
     is_metered: bool,
 
     pub(crate) protocol_config: &'a ProtocolConfig,
-    pub(crate) metrics: Arc<LimitsMetrics>,
+    pub(crate) metrics: Arc<ExecutionMetrics>,
 }
 
 impl<'a> NativeExtensionMarker<'a> for ObjectRuntime<'a> {}
@@ -152,13 +170,28 @@ impl TestInventories {
     }
 }
 
+impl ObjectFundsAvailable {
+    /// Initially, the available balance is 0 and no store query has been made.
+    fn init() -> Self {
+        Self {
+            available: U256::from(0u64),
+            queried: false,
+        }
+    }
+
+    fn needs_store_read(&self, amount: U256) -> bool {
+        self.available < amount && !self.queried
+    }
+}
+
 impl<'a> ObjectRuntime<'a> {
     pub fn new(
-        object_resolver: &'a dyn ChildObjectResolver,
+        object_resolver: &'a dyn RuntimeObjectResolver,
+        object_funds_resolver: &'a dyn ObjectFundsResolver,
         input_objects: BTreeMap<ObjectID, InputObject>,
         is_metered: bool,
         protocol_config: &'a ProtocolConfig,
-        metrics: Arc<LimitsMetrics>,
+        metrics: Arc<ExecutionMetrics>,
         epoch_id: EpochId,
     ) -> Self {
         let mut input_object_owners = BTreeMap::new();
@@ -190,6 +223,7 @@ impl<'a> ObjectRuntime<'a> {
                 metrics.clone(),
                 epoch_id,
             ),
+            object_funds_resolver,
             test_inventories: TestInventories::new(),
             state: ObjectRuntimeState {
                 input_objects: input_object_owners,
@@ -200,16 +234,68 @@ impl<'a> ObjectRuntime<'a> {
                 events: vec![],
                 accumulator_events: vec![],
                 total_events_size: 0,
+                total_events_emitted: 0,
                 received: IndexMap::new(),
                 settlement_input_sui: 0,
                 settlement_output_sui: 0,
                 accumulator_merge_totals: BTreeMap::new(),
                 accumulator_split_totals: BTreeMap::new(),
+                object_funds_available: BTreeMap::new(),
             },
             is_metered,
             protocol_config,
             metrics,
         }
+    }
+
+    pub fn check_object_funds_sufficiency(
+        &mut self,
+        owner: SuiAddress,
+        type_: &TypeTag,
+        amount: U256,
+    ) -> ObjectFundsSufficiency {
+        let key = (owner.into(), type_.clone());
+        let entry = self
+            .state
+            .object_funds_available
+            .entry(key)
+            .or_insert_with(ObjectFundsAvailable::init);
+        if entry.needs_store_read(amount) {
+            let settled_available = match self
+                .object_funds_resolver
+                .object_available_balance(owner, type_)
+            {
+                Ok(balance) => balance,
+                Err(e) => {
+                    return ObjectFundsSufficiency::LoadError(e.to_string());
+                }
+            };
+            let Some(available) = entry.available.checked_add(U256::from(settled_available)) else {
+                return ObjectFundsSufficiency::Overflow;
+            };
+            entry.available = available;
+            entry.queried = true;
+        }
+        if entry.available >= amount {
+            entry.available -= amount;
+            ObjectFundsSufficiency::Sufficient
+        } else {
+            ObjectFundsSufficiency::Insufficient
+        }
+    }
+
+    pub(crate) fn object_funds_sufficiency_needs_store_read(
+        &self,
+        owner: SuiAddress,
+        type_: &TypeTag,
+        amount: U256,
+    ) -> bool {
+        self.state
+            .object_funds_available
+            .get(&(owner.into(), type_.clone()))
+            .copied()
+            .unwrap_or_else(ObjectFundsAvailable::init)
+            .needs_store_read(amount)
     }
 
     pub fn new_id(&mut self, id: ObjectID) -> PartialVMResult<()> {
@@ -220,7 +306,7 @@ impl<'a> ObjectRuntime<'a> {
             self.state.new_ids.len(),
             self.protocol_config.max_num_new_move_object_ids(),
             self.protocol_config.max_num_new_move_object_ids_system_tx(),
-            self.metrics.excessive_new_move_object_ids
+            self.metrics.limits_metrics.excessive_new_move_object_ids
         ) {
             return Err(PartialVMError::new(StatusCode::MEMORY_LIMIT_EXCEEDED)
                 .with_message(format!("Creating more than {} IDs is not allowed", lim))
@@ -241,6 +327,16 @@ impl<'a> ObjectRuntime<'a> {
         Ok(())
     }
 
+    /// Marks `id` as new via `new_id` and, when `parent` has a tracked root version, records the
+    /// same root version for `id`. When `parent` is untracked it must itself be newly created in
+    /// this transaction (and transitively to its root), so no root version is recorded.
+    pub fn new_id_from_hash(&mut self, parent: ObjectID, id: ObjectID) -> PartialVMResult<()> {
+        self.new_id(id)?;
+        self.child_object_store
+            .inherit_root_version_from_parent(parent, id)?;
+        Ok(())
+    }
+
     pub fn delete_id(&mut self, id: ObjectID) -> PartialVMResult<()> {
         // This is defensive because `self.state.deleted_ids` may not indeed
         // be called based on the `was_new` flag
@@ -252,7 +348,9 @@ impl<'a> ObjectRuntime<'a> {
             self.protocol_config.max_num_deleted_move_object_ids(),
             self.protocol_config
                 .max_num_deleted_move_object_ids_system_tx(),
-            self.metrics.excessive_deleted_move_object_ids
+            self.metrics
+                .limits_metrics
+                .excessive_deleted_move_object_ids
         ) {
             return Err(PartialVMError::new(StatusCode::MEMORY_LIMIT_EXCEEDED)
                 .with_message(format!("Deleting more than {} IDs is not allowed", lim))
@@ -296,13 +394,14 @@ impl<'a> ObjectRuntime<'a> {
             SUI_COIN_REGISTRY_OBJECT_ID,
             SUI_DISPLAY_REGISTRY_OBJECT_ID,
             SUI_ADDRESS_ALIAS_STATE_OBJECT_ID,
+            SUI_FORWARDING_ADDRESS_REGISTRY_OBJECT_ID,
         ]
         .contains(&id);
         let transfer_result = if self.state.new_ids.contains(&id) {
             TransferResult::New
         } else if let Some(prev_owner) = self.state.input_objects.get(&id) {
             match (&owner, prev_owner) {
-                // don't use == for dummy values in Shared or ConsensusAddressOwner
+                // don't use == for dummy values in Shared, ConsensusAddressOwner, or Party
                 (Owner::Shared { .. }, Owner::Shared { .. }) => TransferResult::SameOwner,
                 (
                     Owner::ConsensusAddressOwner {
@@ -312,7 +411,23 @@ impl<'a> ObjectRuntime<'a> {
                         owner: old_owner, ..
                     },
                 ) if new_owner == old_owner => TransferResult::SameOwner,
-                (new, old) if new == old => TransferResult::SameOwner,
+                (
+                    Owner::Party {
+                        permissions: new_permissions,
+                        ..
+                    },
+                    Owner::Party {
+                        permissions: old_permissions,
+                        ..
+                    },
+                ) if new_permissions == old_permissions => TransferResult::SameOwner,
+                (new @ Owner::AddressOwner(_), old)
+                | (new @ Owner::ObjectOwner(_), old)
+                | (new @ Owner::Immutable, old)
+                    if new == old =>
+                {
+                    TransferResult::SameOwner
+                }
                 _ => TransferResult::OwnerChanged,
             }
         } else if is_framework_obj {
@@ -353,7 +468,9 @@ impl<'a> ObjectRuntime<'a> {
             self.protocol_config.max_num_transferred_move_object_ids(),
             self.protocol_config
                 .max_num_transferred_move_object_ids_system_tx(),
-            self.metrics.excessive_transferred_move_object_ids
+            self.metrics
+                .limits_metrics
+                .excessive_transferred_move_object_ids
         ) {
             return Err(PartialVMError::new(StatusCode::MEMORY_LIMIT_EXCEEDED)
                 .with_message(format!("Transferring more than {} IDs is not allowed", lim))
@@ -371,6 +488,7 @@ impl<'a> ObjectRuntime<'a> {
             return Err(max_event_error(self.protocol_config.max_num_event_emit()));
         }
         self.state.events.push((tag, event));
+        self.state.total_events_emitted += 1;
         Ok(())
     }
 
@@ -378,6 +496,8 @@ impl<'a> ObjectRuntime<'a> {
         std::mem::take(&mut self.state.events)
     }
 
+    // TODO: Eventually we may want to allow larger types for accumulators,
+    // and the errors will need to be native error instead of partial VM error.
     pub fn emit_accumulator_event(
         &mut self,
         accumulator_id: ObjectID,
@@ -406,6 +526,23 @@ impl<'a> ObjectRuntime<'a> {
                             )));
                     }
                     self.state.accumulator_merge_totals.insert(key, new_total);
+                    if self
+                        .protocol_config
+                        .check_object_funds_withdraw_in_execution()
+                    {
+                        let entry = self
+                            .state
+                            .object_funds_available
+                            .entry((target_addr, target_ty.clone()))
+                            .or_insert_with(ObjectFundsAvailable::init);
+                        entry.available = entry
+                            .available
+                            .checked_add(U256::from(amount as u128))
+                            .ok_or_else(|| {
+                            PartialVMError::new(StatusCode::ARITHMETIC_ERROR)
+                                .with_message("object funds available balance overflow".to_string())
+                        })?;
+                    }
                 }
                 MoveAccumulatorAction::Split => {
                     let current = self
@@ -476,6 +613,18 @@ impl<'a> ObjectRuntime<'a> {
         else {
             return Ok(None);
         };
+
+        if self
+            .protocol_config
+            .early_return_receive_object_mismatched_type()
+            && let ObjectResult::MismatchedType = &value
+            && self.state.received.contains_key(&child)
+        {
+            // New case due to the new adapter and being able to re-use receiving values at
+            // different types
+            return Ok(Some(ObjectResult::MismatchedType));
+        }
+
         // NB: It is important that the object only be added to the received set after it has been
         // fully authenticated and loaded.
         if self.state.received.insert(child, obj_meta).is_some() {
@@ -566,6 +715,15 @@ impl<'a> ObjectRuntime<'a> {
             setting_value_object_type,
             value,
         )
+    }
+
+    pub fn get_package_at_version(
+        &self,
+        package_id: ObjectID,
+        version: SequenceNumber,
+    ) -> Option<MovePackage> {
+        self.child_object_store
+            .get_package_at_version(package_id, version)
     }
 
     // returns None if a child object is still borrowed
@@ -699,6 +857,8 @@ impl ObjectRuntimeState {
             settlement_output_sui,
             accumulator_merge_totals: _,
             accumulator_split_totals: _,
+            object_funds_available: _,
+            total_events_emitted: _,
         } = self;
 
         // The set of new ids is a subset of the generated ids.
@@ -762,6 +922,10 @@ impl ObjectRuntimeState {
 
     pub fn events(&self) -> &[(StructTag, Value)] {
         &self.events
+    }
+
+    pub fn total_events_emitted(&self) -> u64 {
+        self.total_events_emitted
     }
 
     pub fn total_events_size(&self) -> u64 {
@@ -875,7 +1039,8 @@ fn check_circular_ownership(
             Owner::AddressOwner(_)
             | Owner::Shared { .. }
             | Owner::Immutable
-            | Owner::ConsensusAddressOwner { .. } => (),
+            | Owner::ConsensusAddressOwner { .. }
+            | Owner::Party { .. } => (),
             Owner::ObjectOwner(new_owner) => {
                 let new_owner: ObjectID = new_owner.into();
                 let mut cur = new_owner;

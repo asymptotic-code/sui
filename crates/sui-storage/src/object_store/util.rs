@@ -5,22 +5,36 @@ use crate::object_store::{
     ObjectStoreDeleteExt, ObjectStoreGetExt, ObjectStoreListExt, ObjectStorePutExt,
 };
 use anyhow::{Context, Result, anyhow};
+use backoff::ExponentialBackoff;
 use backoff::future::retry;
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use indicatif::ProgressBar;
 use itertools::Itertools;
+use mysten_common::ZipDebugEqIteratorExt;
+use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
+use object_store::gcp::{GoogleCloudStorageBuilder, GoogleConfigKey};
+use object_store::http::HttpBuilder;
+use object_store::local::LocalFileSystem;
 use object_store::path::Path;
-use object_store::{DynObjectStore, Error, ObjectStore, ObjectStoreExt};
+use object_store::{
+    ClientOptions, DynObjectStore, Error, ObjectStore, ObjectStoreExt, RetryConfig,
+};
+use prost::Message;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::Instant;
+use sui_rpc::proto::sui::rpc::v2 as proto;
+use sui_types::full_checkpoint_content::Checkpoint;
+use sui_types::messages_checkpoint::CheckpointSequenceNumber;
 use tracing::{error, warn};
 use url::Url;
 
@@ -131,25 +145,24 @@ pub async fn copy_files<S: ObjectStoreGetExt, D: ObjectStorePutExt>(
     concurrency: NonZeroUsize,
     progress_bar: Option<ProgressBar>,
 ) -> Result<Vec<()>> {
-    let mut instant = Instant::now();
-    let progress_bar_clone = progress_bar.clone();
-    let results = futures::stream::iter(src.iter().zip(dest.iter()))
-        .map(|(path_in, path_out)| async move {
-            let ret = copy_file(path_in, path_out, src_store, dest_store).await;
-            Ok((path_out.clone(), ret))
+    futures::stream::iter(src.iter().zip_debug_eq(dest.iter()))
+        .map(|(path_in, path_out)| {
+            let progress_bar = progress_bar.clone();
+            async move {
+                copy_file(path_in, path_out, src_store, dest_store)
+                    .await
+                    .with_context(|| format!("Failed to copy {path_in} to {path_out}"))?;
+                if let Some(progress_bar) = progress_bar {
+                    progress_bar.inc(1);
+                    progress_bar.set_message(format!("file: {path_out}"));
+                }
+                Ok(())
+            }
         })
         .boxed()
         .buffer_unordered(concurrency.get())
-        .try_for_each(|(path, ret)| {
-            if let Some(progress_bar_clone) = &progress_bar_clone {
-                progress_bar_clone.inc(1);
-                progress_bar_clone.set_message(format!("file: {}", path));
-                instant = Instant::now();
-            }
-            futures::future::ready(ret)
-        })
-        .await;
-    Ok(results.into_iter().collect())
+        .try_collect()
+        .await
 }
 
 pub async fn copy_recursively<S: ObjectStoreGetExt + ObjectStoreListExt, D: ObjectStorePutExt>(
@@ -424,6 +437,125 @@ pub async fn write_snapshot_manifest<S: ObjectStoreListExt + ObjectStorePutExt>(
     .await?;
 
     Ok(())
+}
+
+pub fn build_object_store(
+    ingestion_url: &str,
+    remote_store_options: Vec<(String, String)>,
+    remote_store_headers: Vec<(String, String)>,
+) -> Arc<dyn ObjectStore> {
+    let timeout_secs = 5;
+    let mut client_options = ClientOptions::new()
+        .with_timeout(Duration::from_secs(timeout_secs))
+        .with_allow_http(true);
+    if !remote_store_headers.is_empty() {
+        let mut headers = HeaderMap::new();
+        for (name, value) in &remote_store_headers {
+            headers.insert(
+                HeaderName::from_bytes(name.as_bytes()).expect("invalid remote store header name"),
+                HeaderValue::from_str(value).expect("invalid remote store header value"),
+            );
+        }
+        client_options = client_options.with_default_headers(headers);
+    }
+    let retry_config = RetryConfig {
+        max_retries: 10,
+        retry_timeout: Duration::from_secs(timeout_secs + 1),
+        ..Default::default()
+    };
+    let url = ingestion_url
+        .parse::<Url>()
+        .expect("archival ingestion url must be valid");
+    if url.scheme() == "file" {
+        Arc::new(
+            LocalFileSystem::new_with_prefix(
+                url.to_file_path()
+                    .expect("archival ingestion url must have a valid file path"),
+            )
+            .expect("failed to create local file system store"),
+        )
+    } else if url.scheme() == "gs" {
+        let mut builder = GoogleCloudStorageBuilder::new()
+            .with_client_options(client_options)
+            .with_retry(retry_config)
+            .with_url(ingestion_url);
+        for (key, value) in &remote_store_options {
+            builder = builder.with_config(
+                GoogleConfigKey::from_str(key).expect("invalid GCS config key"),
+                value.clone(),
+            );
+        }
+        Arc::new(builder.build().expect("failed to build GCS store"))
+    } else if url.host_str().unwrap_or_default().starts_with("s3") {
+        let mut builder = AmazonS3Builder::new()
+            .with_client_options(client_options)
+            .with_retry(retry_config)
+            .with_imdsv1_fallback()
+            .with_url(ingestion_url);
+        for (key, value) in &remote_store_options {
+            builder = builder.with_config(
+                AmazonS3ConfigKey::from_str(key).expect("invalid S3 config key"),
+                value.clone(),
+            );
+        }
+        Arc::new(builder.build().expect("failed to build S3 store"))
+    } else {
+        Arc::new(
+            HttpBuilder::new()
+                .with_url(url.to_string())
+                .with_client_options(client_options)
+                .with_retry(retry_config)
+                .build()
+                .expect("failed to build HTTP store"),
+        )
+    }
+}
+
+pub async fn fetch_checkpoint(
+    store: &Arc<dyn ObjectStore>,
+    seq: u64,
+) -> anyhow::Result<Checkpoint> {
+    let store = store.clone();
+    let request = move || {
+        let store = store.clone();
+        async move {
+            use backoff::Error as BE;
+            let path = Path::from(format!("{seq}.binpb.zst"));
+            let bytes = store
+                .get(&path)
+                .await
+                .map_err(|e| match e {
+                    object_store::Error::NotFound { .. } => {
+                        BE::permanent(anyhow!("Checkpoint {seq} not found in archive"))
+                    }
+                    e => BE::transient(anyhow::Error::from(e)),
+                })?
+                .bytes()
+                .await
+                .map_err(|e| BE::transient(anyhow::Error::from(e)))?;
+            let decompressed =
+                zstd::decode_all(&bytes[..]).map_err(|e| BE::transient(anyhow::Error::from(e)))?;
+            let proto_checkpoint = proto::Checkpoint::decode(&decompressed[..])
+                .map_err(|e| BE::transient(anyhow::Error::from(e)))?;
+            Checkpoint::try_from(&proto_checkpoint).map_err(|e| BE::transient(anyhow!(e)))
+        }
+    };
+    let backoff = ExponentialBackoff {
+        max_elapsed_time: Some(Duration::from_secs(60)),
+        multiplier: 1.0,
+        ..Default::default()
+    };
+    backoff::future::retry(backoff, request).await
+}
+
+pub async fn end_of_epoch_data(
+    url: &str,
+    remote_store_options: Vec<(String, String)>,
+) -> anyhow::Result<Vec<CheckpointSequenceNumber>> {
+    let store = build_object_store(url, remote_store_options, vec![]);
+    let response = store.get(&Path::from("epochs.json")).await?;
+    let bytes = response.bytes().await?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 #[cfg(test)]

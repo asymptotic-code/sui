@@ -28,7 +28,7 @@ use sui_types::{
     },
     object::{Object, Owner},
     storage::{
-        BackingPackageStore, ChildObjectResolver, ObjectStore, PackageObject, ParentSync,
+        BackingPackageStore, ObjectStore, PackageObject, ParentSync, RuntimeObjectResolver,
         load_package_object_from_object_store,
     },
     transaction::VerifiedTransaction,
@@ -401,7 +401,7 @@ impl BackingPackageStore for PersistedStore {
     }
 }
 
-impl ChildObjectResolver for PersistedStore {
+impl RuntimeObjectResolver for PersistedStore {
     fn read_child_object(
         &self,
         parent: &ObjectID,
@@ -673,6 +673,63 @@ impl ReadStore for PersistedStoreInnerReadOnlyWrapper {
     }
 }
 
+impl BackingPackageStore for PersistedStoreInnerReadOnlyWrapper {
+    fn get_package_object(
+        &self,
+        package_id: &ObjectID,
+    ) -> sui_types::error::SuiResult<Option<PackageObject>> {
+        load_package_object_from_object_store(self, package_id)
+    }
+}
+
+impl RuntimeObjectResolver for PersistedStoreInnerReadOnlyWrapper {
+    fn read_child_object(
+        &self,
+        parent: &ObjectID,
+        child: &ObjectID,
+        child_version_upper_bound: SequenceNumber,
+    ) -> sui_types::error::SuiResult<Option<Object>> {
+        let child_object = match ObjectStore::get_object(self, child) {
+            None => return Ok(None),
+            Some(obj) => obj,
+        };
+
+        let parent = *parent;
+        if child_object.owner != Owner::ObjectOwner(parent.into()) {
+            return Err(SuiErrorKind::InvalidChildObjectAccess {
+                object: *child,
+                given_parent: parent,
+                actual_owner: child_object.owner.clone(),
+            }
+            .into());
+        }
+
+        if child_object.version() > child_version_upper_bound {
+            return Err(SuiErrorKind::UnsupportedFeatureError {
+                error: "PersistedStoreInnerReadOnlyWrapper::read_child_object does not support bounded reads"
+                    .to_owned(),
+            }
+            .into());
+        }
+
+        Ok(Some(child_object))
+    }
+
+    fn get_object_received_at_version(
+        &self,
+        _owner: &ObjectID,
+        _receiving_object_id: &ObjectID,
+        _receive_object_at_version: SequenceNumber,
+        _epoch_id: EpochId,
+    ) -> sui_types::error::SuiResult<Option<Object>> {
+        Err(SuiErrorKind::UnsupportedFeatureError {
+            error: "PersistedStoreInnerReadOnlyWrapper does not support receiving objects"
+                .to_string(),
+        }
+        .into())
+    }
+}
+
 impl RpcStateReader for PersistedStoreInnerReadOnlyWrapper {
     fn get_lowest_available_checkpoint_objects(
         &self,
@@ -727,6 +784,7 @@ impl Clone for PersistedStoreInnerReadOnlyWrapper {
 mod tests {
     use super::*;
     use rand::{SeedableRng, rngs::StdRng};
+    use sui_types::SUI_FRAMEWORK_PACKAGE_ID;
 
     #[tokio::test]
     async fn deterministic_genesis() {
@@ -774,6 +832,49 @@ mod tests {
         assert_ne!(
             chain1.store().get_committee_by_epoch(0),
             chain3.store().get_committee_by_epoch(0),
+        );
+    }
+
+    #[tokio::test]
+    async fn read_replica_resolves_package_at_exact_version() {
+        let protocol_config = ProtocolConfig::get_for_max_version_UNSAFE();
+        let (_, read_replica) = PersistedStore::new_sim_replica_with_protocol_version_and_accounts(
+            StdRng::from_seed([9; 32]),
+            0,
+            &protocol_config,
+            vec![],
+            vec![],
+            None,
+            None,
+        );
+
+        let package = read_replica
+            .get_package_object(&SUI_FRAMEWORK_PACKAGE_ID)
+            .unwrap()
+            .expect("Sui framework package exists in genesis");
+        let version = package.move_package().version();
+
+        let package = read_replica
+            .get_package_at_version(&SUI_FRAMEWORK_PACKAGE_ID, version)
+            .expect("package exists at its stored version");
+        assert_eq!(package.id(), SUI_FRAMEWORK_PACKAGE_ID);
+        assert_eq!(package.version(), version);
+
+        assert_ne!(version, SequenceNumber::MIN);
+        let mut previous_version = version;
+        previous_version.decrement();
+        assert!(
+            read_replica
+                .get_package_at_version(&SUI_FRAMEWORK_PACKAGE_ID, previous_version)
+                .is_none()
+        );
+
+        let mut next_version = version;
+        next_version.increment();
+        assert!(
+            read_replica
+                .get_package_at_version(&SUI_FRAMEWORK_PACKAGE_ID, next_version)
+                .is_none()
         );
     }
 }

@@ -21,7 +21,7 @@ use sui_indexer_alt_framework::types::object::Owner;
 /// Key for the index that supports fetching an owner's objects, optionally filtering by object
 /// type.
 #[derive(Encode, Decode, PartialEq, Eq)]
-pub(crate) struct Key {
+pub struct Key {
     pub(crate) kind: OwnerKind,
 
     /// The object's type (only MoveObjects are indexed)
@@ -39,7 +39,7 @@ pub(crate) struct Key {
 }
 
 #[derive(PartialEq, Eq, Debug)]
-pub(crate) enum OwnerKind {
+pub enum OwnerKind {
     /// Both AddressOwner and ConsensusAddressOwner map to this OwnerKind.
     AddressOwner(SuiAddress),
     ObjectOwner(SuiAddress),
@@ -56,6 +56,24 @@ impl Key {
             object_id: obj.id(),
         })
     }
+
+    pub fn from_coin_parts(
+        owner: &Owner,
+        type_: StructTag,
+        balance: u64,
+        object_id: ObjectID,
+    ) -> Key {
+        Key {
+            kind: OwnerKind::from_owner(owner),
+            type_,
+            balance: Some(!balance),
+            object_id,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        crate::db::key::encode(self)
+    }
 }
 
 impl OwnerKind {
@@ -66,6 +84,8 @@ impl OwnerKind {
             Owner::Shared { .. } => OwnerKind::Shared,
             Owner::Immutable => OwnerKind::Immutable,
             Owner::ConsensusAddressOwner { owner, .. } => OwnerKind::AddressOwner(*owner),
+            // TODO(Party WIP)
+            Owner::Party { .. } => todo!("Party WIP"),
         }
     }
 }

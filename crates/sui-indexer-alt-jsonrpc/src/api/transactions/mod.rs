@@ -4,6 +4,7 @@
 use futures::future;
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
+use mysten_common::ZipDebugEqIteratorExt;
 use sui_json_rpc_types::Page;
 use sui_json_rpc_types::SuiTransactionBlockResponse;
 use sui_json_rpc_types::SuiTransactionBlockResponseOptions;
@@ -117,11 +118,8 @@ impl QueryTransactionsApiServer for QueryTransactions {
                 let mut retries = 0;
                 for _ in 0..config.tx_retry_count {
                     // Retry only if the error is an invalid params error, which can only be due to
-                    // the transaction not being found in the kv store or tx balance changes table.
-                    if let Err(RpcError::InvalidParams(
-                        _e @ (Error::BalanceChangesNotFound(_) | Error::NotFound(_)),
-                    )) = tx
-                    {
+                    // the transaction not being found in the kv store.
+                    if let Err(RpcError::InvalidParams(_e @ Error::NotFound(_))) = tx {
                         interval.tick().await;
                         retries += 1;
                         tx = response::transaction(ctx, *d, &options).await;
@@ -145,7 +143,7 @@ impl QueryTransactionsApiServer for QueryTransactions {
         let data = future::join_all(tx_futures)
             .await
             .into_iter()
-            .zip(digests)
+            .zip_debug_eq(digests)
             .map(|(r, d)| {
                 if let Err(RpcError::InvalidParams(e @ Error::NotFound(_))) = r {
                     rpc_bail!(e)

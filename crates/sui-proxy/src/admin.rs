@@ -10,7 +10,9 @@ use crate::peers::{AllowedPeer, SuiNodeProvider};
 use crate::var;
 use anyhow::Error;
 use anyhow::Result;
-use axum::{Extension, Router, extract::DefaultBodyLimit, middleware, routing::post};
+use axum::{
+    Extension, Router, extract::DefaultBodyLimit, http::StatusCode, middleware, routing::post,
+};
 use fastcrypto::ed25519::{Ed25519KeyPair, Ed25519PublicKey};
 use fastcrypto::traits::{KeyPair, ToFromBytes};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
@@ -116,9 +118,10 @@ pub fn app(
         // Enforce on all routes.
         // If the request does not complete within the specified timeout it will be aborted
         // and a 408 Request Timeout response will be sent.
-        .layer(TimeoutLayer::new(Duration::from_secs(
-            timeout_secs.unwrap_or(20),
-        )))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(timeout_secs.unwrap_or(20)),
+        ))
         .layer(Extension(relay))
         .layer(Extension(labels))
         .layer(Extension(client))
@@ -243,6 +246,11 @@ pub fn create_server_cert_enforce_peer(
     dynamic_peers: DynamicPeerValidationConfig,
     static_peers: Option<StaticPeerValidationConfig>,
 ) -> Result<(ServerConfig, Option<SuiNodeProvider>), sui_tls::rustls::Error> {
+    // Capture before the cert/key destructure moves out the rest of the struct.
+    let hashi_object_id = dynamic_peers.hashi_object_id.clone();
+    let rpc_url = dynamic_peers.url.clone();
+    let poll_interval = dynamic_peers.interval;
+
     let (Some(certificate_path), Some(private_key_path)) =
         (dynamic_peers.certificate_file, dynamic_peers.private_key)
     else {
@@ -253,7 +261,7 @@ pub fn create_server_cert_enforce_peer(
     let static_peers = load_static_peers(static_peers).map_err(|e| {
         sui_tls::rustls::Error::General(format!("unable to load static pub keys: {}", e))
     })?;
-    let allower = SuiNodeProvider::new(dynamic_peers.url, dynamic_peers.interval, static_peers);
+    let allower = SuiNodeProvider::new(rpc_url, poll_interval, static_peers, hashi_object_id);
     allower.poll_peer_list();
     let c = ClientCertVerifier::new(allower.clone(), SUI_VALIDATOR_SERVER_NAME.to_string())
         .rustls_server_config(

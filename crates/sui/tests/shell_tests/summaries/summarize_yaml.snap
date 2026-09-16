@@ -37,6 +37,7 @@ accumulator_metadata.yaml
 accumulator_settlement.yaml
 address.yaml
 address_alias.yaml
+allowance.yaml
 authenticator_state.yaml
 bag.yaml
 balance.yaml
@@ -58,6 +59,7 @@ ecdsa_r1.yaml
 ecvrf.yaml
 ed25519.yaml
 event.yaml
+forwarding_address.yaml
 funds_accumulator.yaml
 groth16.yaml
 group_ops.yaml
@@ -80,7 +82,9 @@ priority_queue.yaml
 protocol_config.yaml
 prover.yaml
 random.yaml
+rangeproofs.yaml
 ristretto255.yaml
+scratch.yaml
 sui.yaml
 table.yaml
 table_vec.yaml

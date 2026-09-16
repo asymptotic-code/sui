@@ -39,6 +39,7 @@ accumulator_metadata.json
 accumulator_settlement.json
 address.json
 address_alias.json
+allowance.json
 authenticator_state.json
 bag.json
 balance.json
@@ -60,6 +61,7 @@ ecdsa_r1.json
 ecvrf.json
 ed25519.json
 event.json
+forwarding_address.json
 funds_accumulator.json
 groth16.json
 group_ops.json
@@ -82,7 +84,9 @@ priority_queue.json
 protocol_config.json
 prover.json
 random.json
+rangeproofs.json
 ristretto255.json
+scratch.json
 sui.json
 table.json
 table_vec.json

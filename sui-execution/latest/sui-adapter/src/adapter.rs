@@ -27,14 +27,16 @@ mod checked {
     use sui_verifier::check_for_verifier_timeout;
     use tracing::instrument;
 
-    use sui_move_natives::{NativesCostTable, object_runtime::ObjectRuntime};
+    use sui_move_natives::{
+        NativesCostTable, object_runtime::ObjectRuntime, scratch::ScratchRuntime,
+    };
     use sui_protocol_config::ProtocolConfig;
     use sui_types::{
         base_types::*,
         error::{ExecutionError, SuiError},
         execution_status::ExecutionErrorKind,
-        metrics::LimitsMetrics,
-        storage::ChildObjectResolver,
+        metrics::ExecutionMetrics,
+        storage::RuntimeObjectResolver,
     };
     use sui_verifier::verifier::sui_verify_module_metered_check_timeout_only;
 
@@ -58,6 +60,7 @@ mod checked {
                 vector_len_max: protocol_config.max_move_vector_len(),
                 max_value_nest_depth: protocol_config.max_move_value_depth_as_option(),
                 hardened_otw_check: protocol_config.hardened_otw_check(),
+                package_arena_size: protocol_config.package_arena_size_in_bytes_as_option(),
             },
             enable_invariant_violation_check_in_swap_loc: !protocol_config
                 .disable_invariant_violation_check_in_swap_loc(),
@@ -73,15 +76,17 @@ mod checked {
             deprecate_global_storage_ops_during_deserialization: protocol_config
                 .deprecate_global_storage_ops_during_deserialization(),
             normalize_depth_formula: protocol_config.normalize_depth_formula(),
+            charge_ld_const_abstract_size: protocol_config.charge_ld_const_abstract_size(),
         }
     }
 
     pub fn new_native_extensions<'r>(
-        child_resolver: &'r dyn ChildObjectResolver,
+        child_resolver: &'r dyn RuntimeObjectResolver,
+        object_funds_resolver: &'r dyn sui_types::storage::ObjectFundsResolver,
         input_objects: BTreeMap<ObjectID, object_runtime::InputObject>,
         is_metered: bool,
         protocol_config: &'r ProtocolConfig,
-        metrics: Arc<LimitsMetrics>,
+        metrics: Arc<ExecutionMetrics>,
         tx_context: Rc<RefCell<TxContext>>,
     ) -> Result<NativeExtensions<'r>, ExecutionError> {
         let current_epoch_id: EpochId = tx_context.borrow().epoch();
@@ -93,6 +98,7 @@ mod checked {
         })?;
         exts.add(ObjectRuntime::new(
             child_resolver,
+            object_funds_resolver,
             input_objects,
             is_metered,
             protocol_config,
@@ -100,6 +106,7 @@ mod checked {
             current_epoch_id,
         ));
         exts.add(NativesCostTable::from_protocol_config(protocol_config));
+        exts.add(ScratchRuntime::new(protocol_config));
         exts.add(TransactionContext::new(tx_context));
         drop(exts);
         Ok(extensions)

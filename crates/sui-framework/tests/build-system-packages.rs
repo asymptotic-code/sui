@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use sui_move_build::BuildConfig;
-use sui_package_alt::mainnet_environment;
+use sui_package_alt::{SuiFlavor, mainnet_environment};
 
 const CRATE_ROOT: &str = env!("CARGO_MANIFEST_DIR");
 const COMPILED_PACKAGES_DIR: &str = "packages_compiled";
@@ -24,15 +24,7 @@ const PUBLISHED_API_FILE: &str = "published_api.txt";
 #[tokio::test]
 async fn build_system_packages() {
     let tempdir = tempfile::tempdir().unwrap();
-    let out_dir = if std::env::var_os("UPDATE").is_some() {
-        let crate_root = Path::new(CRATE_ROOT);
-        let _ = std::fs::remove_dir_all(crate_root.join(COMPILED_PACKAGES_DIR));
-        let _ = std::fs::remove_dir_all(crate_root.join(DOCS_DIR));
-        let _ = std::fs::remove_file(crate_root.join(PUBLISHED_API_FILE));
-        crate_root
-    } else {
-        tempdir.path()
-    };
+    let out_dir = tempdir.path();
 
     std::fs::create_dir_all(out_dir.join(COMPILED_PACKAGES_DIR)).unwrap();
     std::fs::create_dir_all(out_dir.join(DOCS_DIR)).unwrap();
@@ -62,7 +54,29 @@ async fn build_system_packages() {
         out_dir,
     )
     .await;
-    check_diff(Path::new(CRATE_ROOT), out_dir)
+
+    let crate_root = Path::new(CRATE_ROOT);
+    if std::env::var_os("UPDATE").is_some() {
+        for dir in [COMPILED_PACKAGES_DIR, DOCS_DIR] {
+            let p = crate_root.join(dir);
+            if p.exists() {
+                std::fs::remove_dir_all(&p).unwrap();
+            }
+        }
+        let api_file = crate_root.join(PUBLISHED_API_FILE);
+        if api_file.exists() {
+            std::fs::remove_file(&api_file).unwrap();
+        }
+        let copy_opts = CopyOptions::new().overwrite(true);
+        fs_extra::dir::copy(out_dir.join(COMPILED_PACKAGES_DIR), crate_root, &copy_opts).unwrap();
+        fs_extra::dir::copy(out_dir.join(DOCS_DIR), crate_root, &copy_opts).unwrap();
+        std::fs::copy(
+            out_dir.join(PUBLISHED_API_FILE),
+            crate_root.join(PUBLISHED_API_FILE),
+        )
+        .unwrap();
+    }
+    check_diff(crate_root, out_dir)
 }
 
 // Verify that checked-in values are the same as the generated ones
@@ -142,6 +156,7 @@ async fn build_packages_with_move_config(
         run_bytecode_verifier: true,
         print_diags_to_stderr: false,
         environment: mainnet_environment(), // Framework pkg addr is agnostic to chain, resolves from Move.toml
+        flavor: SuiFlavor::new(),
     }
     .build_async(stdlib_path)
     .await
@@ -151,6 +166,7 @@ async fn build_packages_with_move_config(
         run_bytecode_verifier: true,
         print_diags_to_stderr: false,
         environment: mainnet_environment(), // Framework pkg addr is agnostic to chain, resolves from Move.toml
+        flavor: SuiFlavor::new(),
     }
     .build_async(sui_framework_path)
     .await
@@ -160,6 +176,7 @@ async fn build_packages_with_move_config(
         run_bytecode_verifier: true,
         print_diags_to_stderr: false,
         environment: mainnet_environment(), // Framework pkg addr is agnostic to chain, resolves from Move.toml
+        flavor: SuiFlavor::new(),
     }
     .build_async(sui_system_path)
     .await
@@ -169,6 +186,7 @@ async fn build_packages_with_move_config(
         run_bytecode_verifier: true,
         print_diags_to_stderr: false,
         environment: mainnet_environment(), // Framework pkg addr is agnostic to chain, resolves from Move.toml
+        flavor: SuiFlavor::new(),
     }
     .build_async(deepbook_path)
     .await
@@ -178,6 +196,7 @@ async fn build_packages_with_move_config(
         run_bytecode_verifier: true,
         print_diags_to_stderr: false,
         environment: mainnet_environment(), // Framework pkg addr is agnostic to chain, resolves from Move.toml
+        flavor: SuiFlavor::new(),
     }
     .build_async(bridge_path)
     .await
@@ -287,9 +306,10 @@ fn serialize_modules_to_file<'a>(
     file: &Path,
 ) -> Result<Vec<String>> {
     let mut serialized_modules = Vec::new();
-    let mut members = vec![];
+    let mut members = BTreeMap::new();
     for module in modules {
         let module_name = module.self_id().short_str_lossless();
+        let members = members.entry(module_name.clone()).or_insert_with(Vec::new);
         for def in module.struct_defs() {
             let sh = module.datatype_handle_at(def.struct_handle);
             let sn = module.identifier_at(sh.name);
@@ -310,6 +330,13 @@ fn serialize_modules_to_file<'a>(
                 Visibility::Friend => "public(package) ",
                 Visibility::Private => "",
             };
+
+            // Disallow init functions in system packages
+            if def.visibility == Visibility::Private && fn_.as_str() == "init" {
+                anyhow::bail!(
+                    "Module {module_name} has a private init function. This is not allowed in system pacakges."
+                );
+            }
             let entry = if def.is_entry { "entry " } else { "" };
             members.push(format!("{fn_}\n\t{viz}{entry}fun\n\t{module_name}"));
         }
@@ -327,5 +354,5 @@ fn serialize_modules_to_file<'a>(
 
     fs::write(file, binary)?;
 
-    Ok(members)
+    Ok(members.into_values().flatten().collect())
 }

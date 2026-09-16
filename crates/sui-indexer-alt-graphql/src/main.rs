@@ -28,6 +28,10 @@ static VERSION: &str = const_str::concat!(
     GIT_REVISION
 );
 
+#[cfg(all(not(target_env = "msvc"), feature = "jemalloc"))]
+#[global_allocator]
+static JEMALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -56,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
             metrics_args,
             config,
             indexer_config,
+            subscription_args,
         } => {
             let rpc_config = if let Some(path) = config {
                 let contents = fs::read_to_string(path)
@@ -101,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
                 consistent_reader_args,
                 rpc_args,
                 system_package_task_args,
+                subscription_args,
                 VERSION,
                 rpc_config,
                 pg_pipelines,

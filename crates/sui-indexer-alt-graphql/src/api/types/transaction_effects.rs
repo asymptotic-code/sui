@@ -8,23 +8,19 @@ use async_graphql::Context;
 use async_graphql::Enum;
 use async_graphql::Object;
 use async_graphql::connection::Connection;
-use async_graphql::dataloader::DataLoader;
 use fastcrypto::encoding::Base58;
 use fastcrypto::encoding::Encoding;
-use sui_indexer_alt_reader::kv_loader::BalanceChangeContents as KvBalanceChangeContents;
 use sui_indexer_alt_reader::kv_loader::KvLoader;
 use sui_indexer_alt_reader::kv_loader::TransactionContents as NativeTransactionContents;
-use sui_indexer_alt_reader::pg_reader::PgReader;
-use sui_indexer_alt_reader::tx_balance_changes::TxBalanceChangeKey;
-use sui_indexer_alt_schema::transactions::BalanceChange as StoredBalanceChange;
-use sui_rpc::proto::sui::rpc::v2::BalanceChange as GrpcBalanceChange;
 use sui_rpc::proto::sui::rpc::v2::ExecutedTransaction;
 use sui_types::digests::TransactionDigest;
+use sui_types::effects::TransactionEffects as NativeTransactionEffects;
 use sui_types::effects::TransactionEffectsAPI;
 use sui_types::execution_status::ExecutionStatus as NativeExecutionStatus;
 use sui_types::signature::GenericSignature;
 use sui_types::transaction::TransactionData;
 use sui_types::transaction::TransactionDataAPI;
+use tokio::sync::OnceCell;
 
 use crate::api::scalars::base64::Base64;
 use crate::api::scalars::cursor::JsonCursor;
@@ -33,7 +29,6 @@ use crate::api::scalars::digest::Digest;
 use crate::api::scalars::json::Json;
 use crate::api::scalars::uint53::UInt53;
 use crate::api::types::balance_change::BalanceChange;
-use crate::api::types::balance_change::BalanceChangeContents;
 use crate::api::types::checkpoint::Checkpoint;
 use crate::api::types::epoch::Epoch;
 use crate::api::types::event::Event;
@@ -46,6 +41,7 @@ use crate::api::types::unchanged_consensus_object::UnchangedConsensusObject;
 use crate::error::RpcError;
 use crate::pagination::Page;
 use crate::pagination::PaginationConfig;
+use crate::pagination::StreamConnection;
 use crate::scope::Scope;
 
 /// The execution status of this transaction: success or failure.
@@ -124,6 +120,21 @@ impl EffectsContents {
         )
     }
 
+    /// The schema version of the effects struct.
+    async fn version(&self) -> Option<Result<i32, RpcError>> {
+        let content = self.contents.as_ref()?;
+
+        Some(
+            content
+                .effects()
+                .map(|effects| match effects {
+                    NativeTransactionEffects::V1(_) => 1i32,
+                    NativeTransactionEffects::V2(_) => 2,
+                })
+                .map_err(RpcError::from),
+        )
+    }
+
     /// The latest version of all objects (apart from packages) that have been created or modified by this transaction, immediately following this transaction.
     async fn lamport_version(&self) -> Option<Result<UInt53, RpcError>> {
         let content = self.contents.as_ref()?;
@@ -193,7 +204,7 @@ impl EffectsContents {
         after: Option<CEvent>,
         last: Option<u64>,
         before: Option<CEvent>,
-    ) -> Option<Result<Connection<String, Event>, RpcError>> {
+    ) -> Option<Result<StreamConnection<Event>, RpcError>> {
         let content = self.contents.as_ref()?;
 
         Some(
@@ -203,18 +214,24 @@ impl EffectsContents {
                 let page = Page::from_params(limits, first, after, last, before)?;
 
                 let events = content.events()?;
+                let transaction_digest = content.digest()?;
+                let timestamp_ms = content.timestamp_ms();
+                // Anchor the parent transaction (with hydrated contents) onto each yielded
+                // Event's scope, so descendant resolvers like `IAddressable.asTransactionObject`
+                // default to it and `*Contents::fetch` short-circuits via the scope.
+                let event_scope = self
+                    .scope
+                    .with_active_transaction_contents(transaction_digest, content.clone());
                 page.paginate_indices(events.len(), |i| {
-                    let transaction_digest = content.digest()?;
-                    let timestamp_ms = content.timestamp_ms();
-
                     Ok(Event {
-                        scope: self.scope.clone(),
+                        scope: event_scope.clone(),
                         native: events[i].clone(),
                         transaction_digest,
                         sequence_number: i as u64,
-                        timestamp_ms,
+                        timestamp_ms: OnceCell::from(timestamp_ms),
                     })
                 })
+                .map(Into::into)
             }
             .await,
         )
@@ -237,39 +254,12 @@ impl EffectsContents {
                 let limits = pagination.limits("TransactionEffects", "balanceChanges");
                 let page = Page::from_params(limits, first, after, last, before)?;
 
-                // First try to get balance changes from execution context (content)
-                if let Some(balance_changes) = content.balance_changes() {
-                    return page.paginate_indices(balance_changes.len(), |i| {
-                        Ok(BalanceChange::from_kv_content(
-                            self.scope.clone(),
-                            balance_changes[i].clone(),
-                        ))
-                    });
-                }
-
-                // Fall back to loading from database
-                let transaction_digest = content.digest()?;
-                let pg_loader: &Arc<DataLoader<PgReader>> = ctx.data()?;
-                let key = TxBalanceChangeKey(transaction_digest);
-
-                let Some(stored_balance_changes) = pg_loader
-                    .load_one(key)
-                    .await
-                    .context("Failed to load balance changes")?
-                else {
-                    return Ok(Connection::new(false, false));
-                };
-
-                // Deserialize balance changes from BCS bytes
-                let balance_changes: Vec<StoredBalanceChange> =
-                    bcs::from_bytes(&stored_balance_changes.balance_changes)
-                        .context("Failed to deserialize balance changes")?;
-
+                let balance_changes = content.balance_changes();
                 page.paginate_indices(balance_changes.len(), |i| {
-                    Ok(BalanceChange::from_stored(
-                        self.scope.clone(),
-                        balance_changes[i].clone(),
-                    ))
+                    Ok(BalanceChange {
+                        scope: self.scope.clone(),
+                        content: balance_changes[i].clone(),
+                    })
                 })
             }
             .await,
@@ -277,56 +267,12 @@ impl EffectsContents {
     }
 
     /// The balance changes as a JSON array, matching the gRPC proto format.
-    async fn balance_changes_json(&self, ctx: &Context<'_>) -> Option<Result<Json, RpcError>> {
+    async fn balance_changes_json(&self) -> Option<Result<Json, RpcError>> {
         let content = self.contents.as_ref()?;
 
         Some(
             async {
-                // First try to get balance changes from execution context
-                if let Some(balance_changes) = content.balance_changes() {
-                    let grpc_balance_changes: Vec<GrpcBalanceChange> = balance_changes
-                        .into_iter()
-                        .map(|kv_content| match kv_content {
-                            KvBalanceChangeContents::Grpc(grpc) => grpc,
-                            KvBalanceChangeContents::Native(native) => {
-                                let content = BalanceChangeContents::Native(native);
-                                GrpcBalanceChange::from(content)
-                            }
-                        })
-                        .collect();
-                    let json_value = serde_json::to_value(grpc_balance_changes)
-                        .context("Failed to serialize balance changes to JSON")?;
-                    return json_value.try_into();
-                }
-
-                // Fall back to loading from database
-                let transaction_digest = content.digest()?;
-                let pg_loader: &Arc<DataLoader<PgReader>> = ctx.data()?;
-                let key = TxBalanceChangeKey(transaction_digest);
-
-                let Some(stored_balance_changes) = pg_loader
-                    .load_one(key)
-                    .await
-                    .context("Failed to load balance changes")?
-                else {
-                    // No balance changes found, return empty array
-                    return serde_json::json!([]).try_into();
-                };
-
-                // Deserialize and convert to gRPC format
-                let balance_changes: Vec<StoredBalanceChange> =
-                    bcs::from_bytes(&stored_balance_changes.balance_changes)
-                        .context("Failed to deserialize balance changes")?;
-
-                let grpc_balance_changes: Vec<GrpcBalanceChange> = balance_changes
-                    .into_iter()
-                    .map(|stored| {
-                        let content = BalanceChangeContents::Stored(stored);
-                        GrpcBalanceChange::from(content)
-                    })
-                    .collect();
-
-                let json_value = serde_json::to_value(&grpc_balance_changes)
+                let json_value = serde_json::to_value(content.balance_changes())
                     .context("Failed to serialize balance changes to JSON")?;
                 json_value.try_into()
             }
@@ -341,12 +287,13 @@ impl EffectsContents {
     }
 
     /// The effects as a JSON blob, matching the gRPC proto format (excluding BCS).
-    async fn effects_json(&self) -> Option<Result<Json, RpcError>> {
+    async fn effects_json(&self, ctx: &Context<'_>) -> Option<Result<Json, RpcError>> {
         let content = self.contents.as_ref()?;
 
         Some(
             async {
-                let mut proto_effects = content.proto_effects()?;
+                let kv_loader: &KvLoader = ctx.data()?;
+                let mut proto_effects = content.proto_effects(kv_loader).await?;
                 // Clear the bcs field as effectsJson is intended to provide a full structured output
                 proto_effects.bcs = None;
                 let json_value = serde_json::to_value(&proto_effects)
@@ -448,7 +395,7 @@ impl EffectsContents {
         after: Option<CDependency>,
         last: Option<u64>,
         before: Option<CDependency>,
-    ) -> Option<Result<Connection<String, Transaction>, RpcError>> {
+    ) -> Option<Result<StreamConnection<Transaction>, RpcError>> {
         let content = self.contents.as_ref()?;
 
         Some(
@@ -465,6 +412,7 @@ impl EffectsContents {
                         dependencies[i],
                     ))
                 })
+                .map(Into::into)
             }
             .await,
         )
@@ -472,6 +420,23 @@ impl EffectsContents {
 }
 
 impl TransactionEffects {
+    /// Construct a fully-inflated TransactionEffects with already-hydrated contents. The digest
+    /// is read from `contents`, which keeps it consistent with the contents anchored on the
+    /// scope.
+    pub(crate) fn with_contents(
+        scope: Scope,
+        contents: Arc<NativeTransactionContents>,
+    ) -> Result<Self, RpcError> {
+        let digest = contents.digest()?;
+        Ok(Self {
+            digest,
+            contents: EffectsContents {
+                scope: scope.with_active_transaction_contents(digest, contents.clone()),
+                contents: Some(contents),
+            },
+        })
+    }
+
     /// Create a new TransactionEffects from an ExecutedTransaction.
     pub(crate) fn from_executed_transaction(
         scope: Scope,
@@ -485,18 +450,7 @@ impl TransactionEffects {
             signatures,
         )
         .context("Failed to create TransactionContents from ExecutedTransaction")?;
-
-        let digest = contents
-            .digest()
-            .context("Failed to get digest from transaction contents")?;
-
-        Ok(Self {
-            digest,
-            contents: EffectsContents {
-                scope,
-                contents: Some(Arc::new(contents)),
-            },
-        })
+        Self::with_contents(scope, Arc::new(contents))
     }
 
     /// Load the effects from the store, and return it fully inflated (with contents already
@@ -507,23 +461,20 @@ impl TransactionEffects {
         scope: Scope,
         digest: Digest,
     ) -> Result<Option<Self>, RpcError> {
-        let contents = EffectsContents::empty(scope)
+        let fetched = EffectsContents::empty(scope.clone())
             .fetch(ctx, digest.into())
             .await?;
 
-        let Some(tx) = &contents.contents else {
+        let Some(contents) = fetched.contents else {
             return Ok(None);
         };
 
-        Ok(Some(Self {
-            digest: tx.digest()?,
-            contents,
-        }))
+        Ok(Some(Self::with_contents(scope, contents)?))
     }
 }
 
 impl EffectsContents {
-    fn empty(scope: Scope) -> Self {
+    pub(crate) fn empty(scope: Scope) -> Self {
         Self {
             scope,
             contents: None,
@@ -541,9 +492,31 @@ impl EffectsContents {
         if self.contents.is_some() {
             return Ok(self.clone());
         }
-        let Some(checkpoint_viewed_at) = self.scope.checkpoint_viewed_at() else {
+
+        // Reuse contents anchored on the scope by a parent resolver (streaming and indexed
+        // alike both anchor with hydrated contents when they have them).
+        if let Some(contents) = self.scope.active_transaction_contents_for(digest) {
+            return Ok(Self {
+                scope: self.scope.clone(),
+                contents: Some(contents.clone()),
+            });
+        }
+
+        // Execution context is not backed by the index yet.
+        if self.scope.is_executed() {
             return Ok(self.clone());
-        };
+        }
+
+        // A just-streamed transaction runs ahead of the KV backend, so serve it from the in-memory
+        // streamed store (live streamed path only) until the backend catches up.
+        if let Some(streaming_transactions) = self.scope.streamed_transaction_store()
+            && let Some(contents) = streaming_transactions.get(&digest)
+        {
+            return Ok(Self {
+                scope: self.scope.clone(),
+                contents: Some(contents),
+            });
+        }
 
         let kv_loader: &KvLoader = ctx.data()?;
         let Some(transaction) = kv_loader
@@ -554,12 +527,15 @@ impl EffectsContents {
             return Ok(self.clone());
         };
 
-        let cp_num = transaction
-            .cp_sequence_number()
-            .context("Fetched transaction should have checkpoint sequence number")?;
-
-        if cp_num > checkpoint_viewed_at {
-            return Ok(self.clone());
+        // Enforce the consistency cutoff only when viewing as of a specific checkpoint. A
+        // subscription backfill has no `checkpoint_viewed_at` and takes the indexed contents as-is.
+        if let Some(checkpoint_viewed_at) = self.scope.checkpoint_viewed_at() {
+            let cp_num = transaction
+                .cp_sequence_number()
+                .context("Fetched transaction should have checkpoint sequence number")?;
+            if cp_num > checkpoint_viewed_at {
+                return Ok(self.clone());
+            }
         }
 
         Ok(Self {
@@ -572,7 +548,6 @@ impl EffectsContents {
 impl From<Transaction> for TransactionEffects {
     fn from(tx: Transaction) -> Self {
         let TransactionContents { scope, contents } = tx.contents;
-
         Self {
             digest: tx.digest,
             contents: EffectsContents { scope, contents },

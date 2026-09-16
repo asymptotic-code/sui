@@ -63,16 +63,10 @@ impl MockConsensusClient {
             let env = match consensus_mode {
                 ConsensusMode::Noop => ExecutionEnv::new(),
                 ConsensusMode::DirectSequencing => {
-                    // Extract the executable transaction from the consensus transaction
+                    // Extract the executable transaction from the consensus transaction.
+                    // DEPRECATED: CertifiedTransaction and UserTransaction are no longer
+                    // produced (MFP uses UserTransactionV2).
                     let executable_tx = match &tx.kind {
-                        // DEPRECATED: CertifiedTransaction is no longer used since MFP is live.
-                        ConsensusTransactionKind::CertifiedTransaction(_) => None,
-                        ConsensusTransactionKind::UserTransaction(tx) => {
-                            Some(VerifiedExecutableTransaction::new_from_consensus(
-                                VerifiedTransaction::new_unchecked(*tx.clone()),
-                                0,
-                            ))
-                        }
                         ConsensusTransactionKind::UserTransactionV2(tx) => {
                             Some(VerifiedExecutableTransaction::new_from_consensus(
                                 VerifiedTransaction::new_unchecked(tx.tx().clone()),
@@ -96,7 +90,7 @@ impl MockConsensusClient {
                             .into_iter()
                             .next()
                             .map(|(_, v)| v)
-                            .unwrap_or_default();
+                            .unwrap_or_else(crate::authority::shared_object_version_manager::AssignedVersions::empty);
                         ExecutionEnv::new().with_assigned_versions(assigned_version)
                     } else {
                         ExecutionEnv::new()
@@ -104,39 +98,26 @@ impl MockConsensusClient {
                 }
             };
             match &tx.kind {
-                // DEPRECATED: CertifiedTransaction is no longer used since MFP is live.
-                ConsensusTransactionKind::CertifiedTransaction(_) => {
-                    debug!("Ignoring deprecated CertifiedTransaction in MockConsensusClient");
+                // DEPRECATED: CertifiedTransaction and UserTransaction are no longer produced.
+                ConsensusTransactionKind::CertifiedTransaction(_)
+                | ConsensusTransactionKind::UserTransaction(_) => {
+                    debug!(
+                        "Ignoring deprecated {:?} in MockConsensusClient",
+                        std::mem::discriminant(&tx.kind)
+                    );
                 }
-                ConsensusTransactionKind::UserTransaction(tx) => {
-                    if tx.is_consensus_tx() {
-                        validator.execution_scheduler().enqueue(
-                            vec![(
-                                VerifiedExecutableTransaction::new_from_consensus(
-                                    VerifiedTransaction::new_unchecked(*tx.clone()),
-                                    0,
-                                )
-                                .into(),
-                                env,
-                            )],
-                            &epoch_store,
-                        );
-                    }
-                }
-                ConsensusTransactionKind::UserTransactionV2(tx) => {
-                    if tx.tx().is_consensus_tx() {
-                        validator.execution_scheduler().enqueue(
-                            vec![(
-                                VerifiedExecutableTransaction::new_from_consensus(
-                                    VerifiedTransaction::new_unchecked(tx.tx().clone()),
-                                    0,
-                                )
-                                .into(),
-                                env,
-                            )],
-                            &epoch_store,
-                        );
-                    }
+                ConsensusTransactionKind::UserTransactionV2(tx) if tx.tx().is_consensus_tx() => {
+                    validator.execution_scheduler().enqueue(
+                        vec![(
+                            VerifiedExecutableTransaction::new_from_consensus(
+                                VerifiedTransaction::new_unchecked(tx.tx().clone()),
+                                0,
+                            )
+                            .into(),
+                            env,
+                        )],
+                        &epoch_store,
+                    );
                 }
                 _ => {}
             }

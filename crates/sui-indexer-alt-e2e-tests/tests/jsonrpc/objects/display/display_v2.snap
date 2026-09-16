@@ -3,6 +3,7 @@ source: external-crates/move/crates/move-transactional-test-runner/src/framework
 ---
 processed 8 tasks
 
+// TODO: set protocol version once it's no longer the max
 init:
 A: object(0,0)
 
@@ -10,7 +11,7 @@ task 1, lines 7-59:
 //# publish --sender A
 created: object(1,0)
 mutated: object(0,0)
-gas summary: computation_cost: 1000000, storage_cost: 13748400,  storage_rebate: 0, non_refundable_storage_fee: 0
+gas summary: computation_cost: 1000000, storage_cost: 13771200,  storage_rebate: 0, non_refundable_storage_fee: 0
 
 task 2, lines 61-63:
 //# programmable --sender A --inputs object(0xd) @A
@@ -57,9 +58,9 @@ Response: {
   "result": [
     {
       "data": {
-        "objectId": "0x103b2cb4a74afc37240913e91e901fe5b063a936c42039ac896aeab031662ee1",
+        "objectId": "0xd3db63ee1f788c0234ed09f386d3272f5bca346a2ba423b763447b14259c6a03",
         "version": "4",
-        "digest": "CvgHhkWkjZeehqDNpXo8BbUHzD2kgGQRpQ5GJqejS4M9",
+        "digest": "AoseeAGK5w1LZnnqjzrFnCAzKwz8bJepSroW4DtyVrQC",
         "display": {
           "data": {
             "bar": "bar is 42!",
@@ -83,9 +84,9 @@ Response: {
     },
     {
       "data": {
-        "objectId": "0x5ac9c7caaceddd9969967751cba9d5e0ac81ace274e0bcc880732b6893958f11",
+        "objectId": "0x09ec8fda6a123ee443ba9f885179a7b059eafce6b2355f61decfe0b1ab719741",
         "version": "6",
-        "digest": "7Y79FuRqZaUaJysKjxUfmYAmGbAZ8vNLPAQYCbFbvhb5",
+        "digest": "BNMoCMM1QRdjbYWBEkVd1m1zdvvqZcxiJstQwRc5xEP8",
         "display": {
           "data": {
             "bar": "bar is 42!",

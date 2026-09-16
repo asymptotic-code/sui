@@ -15,6 +15,8 @@ use super::*;
 #[cfg(test)]
 use super::shared_object_version_manager::Schedulable;
 #[cfg(test)]
+use mysten_common::ZipDebugEqIteratorExt;
+#[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
 use sui_types::transaction::TransactionKey;
@@ -97,7 +99,7 @@ pub async fn submit_to_consensus(
         .into_map()
         .get(&executable.key())
         .cloned()
-        .unwrap_or_else(|| AssignedVersions::new(vec![], None));
+        .unwrap_or_else(AssignedVersions::empty);
 
     Ok((executable, versions))
 }
@@ -128,20 +130,18 @@ pub async fn submit_and_execute(
     authority: &AuthorityState,
     transaction: Transaction,
 ) -> Result<(VerifiedExecutableTransaction, SignedTransactionEffects), SuiError> {
-    submit_and_execute_with_options(authority, None, transaction, false).await
+    submit_and_execute_with_options(authority, None, transaction).await
 }
 
 /// Options:
 /// - `fullnode`: Optionally sync and execute on a fullnode as well
-/// - `with_shared`: Whether the transaction involves shared objects (triggers version assignment)
 pub async fn submit_and_execute_with_options(
     authority: &AuthorityState,
     fullnode: Option<&AuthorityState>,
     transaction: Transaction,
-    with_shared: bool,
 ) -> Result<(VerifiedExecutableTransaction, SignedTransactionEffects), SuiError> {
     let (exec, effects, _) =
-        submit_and_execute_with_error(authority, fullnode, transaction, with_shared).await?;
+        submit_and_execute_with_error(authority, fullnode, transaction).await?;
     Ok((exec, effects))
 }
 
@@ -150,7 +150,6 @@ pub async fn submit_and_execute_with_error(
     authority: &AuthorityState,
     fullnode: Option<&AuthorityState>,
     transaction: Transaction,
-    with_shared: bool,
 ) -> Result<
     (
         VerifiedExecutableTransaction,
@@ -168,22 +167,20 @@ pub async fn submit_and_execute_with_error(
     let executable =
         VerifiedExecutableTransaction::new_from_consensus(verified_tx, epoch_store.epoch());
 
-    // Assign shared object versions if needed
-    let assigned_versions = if with_shared {
-        let versions = authority
-            .epoch_store_for_testing()
-            .assign_shared_object_versions_for_tests(
-                authority.get_object_cache_reader().as_ref(),
-                std::slice::from_ref(&executable.clone()),
-            )?;
-        versions
-            .into_map()
-            .get(&executable.key())
-            .cloned()
-            .unwrap_or_else(|| AssignedVersions::new(vec![], None))
-    } else {
-        AssignedVersions::new(vec![], None)
-    };
+    // This also assigns the accumulator root's version when accumulators are enabled, even if
+    // the transaction has no shared inputs. So we should always call this, whether or not there
+    // are shared objects present in the transaction.
+    let versions = authority
+        .epoch_store_for_testing()
+        .assign_shared_object_versions_for_tests(
+            authority.get_object_cache_reader().as_ref(),
+            std::slice::from_ref(&executable.clone()),
+        )?;
+    let assigned_versions = versions
+        .into_map()
+        .get(&executable.key())
+        .cloned()
+        .unwrap_or_else(AssignedVersions::empty);
 
     // State accumulator for validation
     let state_acc =
@@ -197,7 +194,7 @@ pub async fn submit_and_execute_with_error(
 
     // Execute
     let env = ExecutionEnv::new().with_assigned_versions(assigned_versions.clone());
-    let (result, execution_error_opt) = authority
+    let (result, mut execution_error_opt) = authority
         .try_execute_executable_for_test(&executable, env.clone())
         .await;
 
@@ -211,11 +208,12 @@ pub async fn submit_and_execute_with_error(
     state.union(&effects_acc);
     assert_eq!(state_after.digest(), state.digest());
 
-    // Execute on fullnode if provided
+    // Execute on fullnode if provided, use its error which includes source error
     if let Some(fullnode) = fullnode {
-        fullnode
+        let (_, fullnode_execution_error_opt) = fullnode
             .try_execute_executable_for_test(&executable, env)
             .await;
+        execution_error_opt = fullnode_execution_error_opt;
     }
 
     Ok((executable, result.into_inner(), execution_error_opt))
@@ -288,7 +286,7 @@ pub async fn init_state_with_ids<I: IntoIterator<Item = (SuiAddress, ObjectID)>>
     let state = TestAuthorityBuilder::new().build().await;
     for (address, object_id) in objects {
         let obj = Object::with_id_owner_for_testing(object_id, address);
-        state.insert_genesis_object(obj).await;
+        state.insert_genesis_object(obj);
     }
     state
 }
@@ -305,7 +303,7 @@ pub async fn init_state_with_ids_and_versions<
             version,
             Owner::AddressOwner(address),
         );
-        state.insert_genesis_object(obj).await;
+        state.insert_genesis_object(obj);
     }
     state
 }
@@ -329,7 +327,7 @@ pub async fn init_state_with_objects_and_committee<I: IntoIterator<Item = Object
 ) -> Arc<AuthorityState> {
     let state = init_state_with_committee(genesis, authority_key).await;
     for o in objects {
-        state.insert_genesis_object(o).await;
+        state.insert_genesis_object(o);
     }
     state
 }
@@ -353,7 +351,7 @@ pub async fn init_state_with_ids_and_expensive_checks<
         .await;
     for (address, object_id) in objects {
         let obj = Object::with_id_owner_for_testing(object_id, address);
-        state.insert_genesis_object(obj).await;
+        state.insert_genesis_object(obj);
     }
     state
 }
@@ -430,7 +428,11 @@ where
         );
         let (paired, _) = captured.remove(0);
         let (schedulables, versions): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
-        let assigned_versions = schedulables.iter().map(|s| s.key()).zip(versions).collect();
+        let assigned_versions = schedulables
+            .iter()
+            .map(|s| s.key())
+            .zip_debug_eq(versions)
+            .collect();
         (schedulables, assigned_versions)
     };
 
@@ -453,7 +455,7 @@ pub async fn assign_versions_and_schedule(
         .into_map()
         .get(&executable.key())
         .cloned()
-        .unwrap_or_else(|| AssignedVersions::new(vec![], None));
+        .unwrap_or_else(AssignedVersions::empty);
 
     let env = ExecutionEnv::new().with_assigned_versions(versions.clone());
     authority.execution_scheduler().enqueue_transactions(
@@ -482,5 +484,5 @@ pub async fn assign_shared_object_versions(
         .into_map()
         .get(&executable.key())
         .cloned()
-        .unwrap_or_else(|| AssignedVersions::new(vec![], None))
+        .unwrap_or_else(AssignedVersions::empty)
 }

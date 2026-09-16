@@ -3,7 +3,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::static_programmable_transactions::{env::Env, typing::ast::Type};
+use crate::{
+    execution_mode::ExecutionMode,
+    static_programmable_transactions::{env::Env, typing::ast::Type},
+};
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::account_address::AccountAddress;
 use move_core_types::runtime_value::MoveTypeLayout;
@@ -178,7 +181,11 @@ impl Value {
         self.0.cast().map_err(iv("cast"))
     }
 
-    pub fn deserialize(env: &Env, bytes: &[u8], ty: Type) -> Result<Value, ExecutionError> {
+    pub fn deserialize<Mode: ExecutionMode>(
+        env: &Env<Mode>,
+        bytes: &[u8],
+        ty: Type,
+    ) -> Result<Value, Mode::Error> {
         let layout = env.runtime_layout(&ty)?;
         let Some(value) = VMValue::simple_deserialize(bytes, &layout) else {
             // we already checked the layout of pure bytes during typing
@@ -266,6 +273,25 @@ impl Value {
         Self(VMValue::struct_(Struct::pack([
             VMValue::address(owner),
             VMValue::u256(limit),
+        ])))
+    }
+
+    /// Constructs a `sui::allowance::AllowanceWithdrawal` value
+    pub fn allowance_withdrawal(
+        allowance: ObjectID,
+        owner: AccountAddress,
+        limit: U256,
+        is_sponsor: bool,
+    ) -> Self {
+        // public struct AllowanceWithdrawal<phantom T: store> {
+        //     allowance: ID,
+        //     is_sponsor: bool,
+        //     inner: Withdrawal<T>,
+        // }
+        Self(VMValue::struct_(Struct::pack([
+            Self::id(allowance.into()).0,
+            VMValue::bool(is_sponsor),
+            Self::funds_accumulator_withdrawal(owner, limit).0,
         ])))
     }
 

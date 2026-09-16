@@ -40,13 +40,13 @@
 use crate::accumulators::funds_read::AccountFundsRead;
 use crate::authority::AuthorityStore;
 use crate::authority::authority_per_epoch_store::AuthorityPerEpochStore;
-use crate::authority::authority_store::{
-    ExecutionLockWriteGuard, LockDetailsDeprecated, ObjectLockStatus, SuiLockResult,
-};
+use crate::authority::authority_store::ExecutionLockWriteGuard;
+#[cfg(test)]
+use crate::authority::authority_store::{LockDetailsDeprecated, ObjectLockStatus, SuiLockResult};
 use crate::authority::authority_store_tables::LiveObject;
 use crate::authority::backpressure::BackpressureManager;
 use crate::authority::epoch_start_configuration::{EpochFlag, EpochStartConfiguration};
-use crate::fallback_fetch::{do_fallback_lookup, do_fallback_lookup_fallible};
+use crate::fallback_fetch::do_fallback_lookup;
 use crate::global_state_hasher::GlobalStateHashStore;
 use crate::transaction_outputs::TransactionOutputs;
 
@@ -54,14 +54,17 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry as DashMapEntry;
 use futures::{FutureExt, future::BoxFuture};
 use moka::sync::SegmentedCache as MokaCache;
+use mysten_common::ZipDebugEqIteratorExt;
 use mysten_common::debug_fatal;
 use mysten_common::random_util::randomize_cache_capacity_in_tests;
 use mysten_common::sync::notify_read::NotifyRead;
 use parking_lot::Mutex;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::Instant;
 use sui_config::ExecutionCacheConfig;
 use sui_macros::fail_point;
 use sui_protocol_config::ProtocolVersion;
@@ -69,12 +72,15 @@ use sui_types::SUI_ACCUMULATOR_ROOT_OBJECT_ID;
 use sui_types::accumulator_event::AccumulatorEvent;
 use sui_types::accumulator_root::{AccumulatorObjId, AccumulatorValue};
 use sui_types::base_types::{
-    EpochId, FullObjectID, ObjectID, ObjectRef, SequenceNumber, VerifiedExecutionData,
+    ConsensusObjectVersion, EpochId, FullObjectID, ObjectID, ObjectRef, SequenceNumber,
+    VerifiedExecutionData,
 };
 use sui_types::bridge::{Bridge, get_bridge};
 use sui_types::digests::{ObjectDigest, TransactionDigest, TransactionEffectsDigest};
 use sui_types::effects::{TransactionEffects, TransactionEvents};
-use sui_types::error::{SuiError, SuiErrorKind, SuiResult, UserInputError};
+#[cfg(test)]
+use sui_types::error::SuiError;
+use sui_types::error::{SuiErrorKind, SuiResult, UserInputError};
 use sui_types::executable_transaction::VerifiedExecutableTransaction;
 use sui_types::global_state_hash::GlobalStateHash;
 use sui_types::message_envelope::Message;
@@ -491,6 +497,57 @@ macro_rules! check_cache_entry_by_latest {
 }
 
 impl WritebackCache {
+    /// Load an implicitly read system object at the requested version.
+    /// In normal execution, this function can block wait until the object is available at the requested version,
+    /// and it is guaranteed to return an object with the requested version.
+    /// In dry-runs, this function will never block wait, but may return None if the requested version was pruned by this point.
+    pub(crate) fn load_implicitly_read_system_object(
+        &self,
+        object_id: &ObjectID,
+        version: ConsensusObjectVersion,
+    ) -> Option<Object> {
+        assert!(
+            sui_types::IMPLICITLY_READ_SYSTEM_OBJECTS.contains(object_id),
+            "{object_id} is not an implicitly read system object"
+        );
+        let ConsensusObjectVersion {
+            initial_shared_version,
+            version,
+        } = version;
+        if let Some(object) = ObjectCacheRead::get_object_by_key(self, object_id, version) {
+            return Some(object);
+        }
+        self.metrics
+            .implicit_system_object_read_waits
+            .with_label_values(&[object_id.to_string().as_str()])
+            .inc();
+        let wait_start = Instant::now();
+        let key = InputKey::VersionedObject {
+            id: FullObjectID::Consensus((*object_id, initial_shared_version)),
+            version,
+        };
+        // Block wait until the object is available at the requested version.
+        // Note that before blocking, we check if the latest version already passed the requested version,
+        // if so it must imply that we have already produced the requested version.
+        // We are doing this check instead of exact version comparison to handle the rare case during
+        // dry-runs where the requested version was pruned by this point.
+        // Also note that in the case of dry-run, this will never block wait.
+        self.object_notify_read.read_one_blocking(
+            "load_implicitly_read_system_object",
+            &key,
+            |_key| {
+                ObjectCacheRead::get_object(self, object_id)
+                    .is_some_and(|latest| latest.version() >= version)
+                    .then_some(())
+            },
+        );
+        self.metrics
+            .implicit_system_object_read_wait_latency
+            .with_label_values(&[object_id.to_string().as_str()])
+            .observe(wait_start.elapsed().as_secs_f64());
+        ObjectCacheRead::get_object_by_key(self, object_id, version)
+    }
+
     pub fn new(
         config: &ExecutionCacheConfig,
         store: Arc<AuthorityStore>,
@@ -784,21 +841,6 @@ impl WritebackCache {
         )
     }
 
-    fn get_object_by_id_cache_only(
-        &self,
-        request_type: &'static str,
-        object_id: &ObjectID,
-    ) -> CacheResult<(SequenceNumber, Object)> {
-        match self.get_object_entry_by_id_cache_only(request_type, object_id) {
-            CacheResult::Hit((version, entry)) => match entry {
-                ObjectEntry::Object(object) => CacheResult::Hit((version, object)),
-                ObjectEntry::Deleted | ObjectEntry::Wrapped => CacheResult::NegativeHit,
-            },
-            CacheResult::NegativeHit => CacheResult::NegativeHit,
-            CacheResult::Miss => CacheResult::Miss,
-        }
-    }
-
     fn get_marker_value_cache_only(
         &self,
         object_key: FullObjectKey,
@@ -1060,7 +1102,9 @@ impl WritebackCache {
 
         let _metrics_guard =
             mysten_metrics::monitored_scope("WritebackCache::commit_transaction_outputs::flush");
-        for outputs in all_outputs.iter() {
+        // Parallel phase: tx-level metadata is keyed by unique tx_digest/effects_digest,
+        // so there are no cross-transaction ordering constraints.
+        all_outputs.par_iter().with_min_len(16).for_each(|outputs| {
             let tx_digest = outputs.transaction.digest();
             assert!(
                 self.dirty
@@ -1068,7 +1112,15 @@ impl WritebackCache {
                     .remove(tx_digest)
                     .is_some()
             );
-            self.flush_transactions_from_dirty_to_cached(epoch, *tx_digest, outputs);
+            self.flush_tx_metadata_from_dirty_to_cached(*tx_digest, outputs);
+        });
+
+        // Sequential phase: object/marker versions must be popped in causal order
+        // (oldest first) per object_id. Multiple transactions in the batch can touch
+        // the same shared object at consecutive versions, so this loop must preserve
+        // the order of all_outputs.
+        for outputs in all_outputs.iter() {
+            self.flush_objects_from_dirty_to_cached(epoch, outputs);
         }
 
         let num_outputs = all_outputs.len() as u64;
@@ -1110,21 +1162,18 @@ impl WritebackCache {
             .set(if backpressure { 1 } else { 0 });
     }
 
-    fn flush_transactions_from_dirty_to_cached(
+    // Flushes tx-level metadata for a single transaction from dirty to cache.
+    // All keys are unique per transaction (tx_digest, effects_digest), so this
+    // is safe to call in parallel across transactions.
+    fn flush_tx_metadata_from_dirty_to_cached(
         &self,
-        epoch: EpochId,
         tx_digest: TransactionDigest,
         outputs: &TransactionOutputs,
     ) {
-        // Now, remove each piece of committed data from the dirty state and insert it into the cache.
         // TODO: outputs should have a strong count of 1 so we should be able to move out of it
         let TransactionOutputs {
             transaction,
             effects,
-            markers,
-            written,
-            deleted,
-            wrapped,
             events,
             ..
         } = outputs;
@@ -1185,8 +1234,20 @@ impl WritebackCache {
             .executed_effects_digests
             .remove(&tx_digest)
             .expect("executed effects must exist");
+    }
 
-        // Move dirty markers to cache
+    // Flushes object and marker versions for a single transaction from dirty to cache.
+    // Multiple transactions in the same batch can modify the same shared object at
+    // consecutive versions, so callers must invoke this in causal (checkpoint) order.
+    fn flush_objects_from_dirty_to_cached(&self, epoch: EpochId, outputs: &TransactionOutputs) {
+        let TransactionOutputs {
+            markers,
+            written,
+            deleted,
+            wrapped,
+            ..
+        } = outputs;
+
         for (object_key, marker_value) in markers.iter() {
             Self::move_version_from_dirty_to_cache(
                 &self.dirty.markers,
@@ -1361,36 +1422,78 @@ impl WritebackCache {
     }
 }
 
+fn account_amount_from_object(account_obj: &Object) -> u128 {
+    let (_, AccumulatorValue::U128(value)) =
+        account_obj.data.try_as_move().unwrap().try_into().unwrap();
+    value.value
+}
+
 impl AccountFundsRead for WritebackCache {
-    fn get_latest_account_amount(&self, account_id: &AccumulatorObjId) -> (u128, SequenceNumber) {
+    fn get_latest_account_amount(&self, account_id: &AccumulatorObjId) -> u128 {
+        ObjectCacheRead::get_object(self, account_id.inner())
+            .map(|account_obj| account_amount_from_object(&account_obj))
+            .unwrap_or(0)
+    }
+
+    fn get_consistent_latest_account_amount_and_version(
+        &self,
+        account_id: &AccumulatorObjId,
+    ) -> (u128, SequenceNumber) {
+        // Settlement is not atomic. A settlement transaction writes the accumulator
+        // objects at version V+1 first, and then a later barrier transaction bumps the
+        // root from V to V+1. A reader that observes the state in between sees
+        // post-settlement account objects alongside the pre-settlement root version,
+        // and reading the "latest" account can therefore disagree with the root we
+        // just captured.
+        //
+        // We handle this with two pieces:
+        //
+        // 1. MVCC read capped at the captured root version (see the call site below).
+        //    By construction of the settlement/barrier ordering, every account object's
+        //    version is <= the root version after the corresponding barrier runs, so
+        //    capping at the captured root strips away any newer-settlement writes that
+        //    have raced ahead of the barrier. The returned amount is the balance at or
+        //    before the captured root version, even if the account object has a newer
+        //    latest version by the time this method returns.
+        //
+        // 2. Root-version stability check (pre == post). `get_account_amount_at_version`
+        //    is only safe to call when the target version has not been pruned. Pruning
+        //    is tied to root advancement, so by reading the root before and after the
+        //    MVCC read and retrying on mismatch, we ensure that no root advance (and
+        //    therefore no pruning of the version we read at) could have happened while
+        //    we were reading — the data we read is still live in the system (memory or
+        //    db) throughout the call.
         let mut pre_root_version =
             ObjectCacheRead::get_object(self, &SUI_ACCUMULATOR_ROOT_OBJECT_ID)
                 .unwrap()
                 .version();
+        let starting_root_version = pre_root_version;
         let mut loop_iter = 0;
         loop {
-            let account_obj = ObjectCacheRead::get_object(self, account_id.inner());
-            if let Some(account_obj) = account_obj {
-                let (_, AccumulatorValue::U128(value)) =
-                    account_obj.data.try_as_move().unwrap().try_into().unwrap();
-                return (value.value, account_obj.version());
-            }
+            loop_iter += 1;
+            // Safe because of (1) and (2) above: the stability check below bounds the
+            // lifetime of `pre_root_version` to a window in which no pruning happens.
+            let value = self.get_account_amount_at_version(account_id, pre_root_version);
             let post_root_version =
                 ObjectCacheRead::get_object(self, &SUI_ACCUMULATOR_ROOT_OBJECT_ID)
                     .unwrap()
                     .version();
             if pre_root_version == post_root_version {
-                return (0, pre_root_version);
+                if loop_iter > 10 {
+                    debug!(
+                        iterations = loop_iter,
+                        starting_root_version = %starting_root_version,
+                        ending_root_version = %post_root_version,
+                        "Root version stabilized after multiple iterations during MVCC read"
+                    );
+                }
+                return (value, pre_root_version);
             }
             debug!(
-                "Root version changed from {} to {} while reading account amount, retrying",
+                "Root version changed from {} to {} during MVCC read, retrying",
                 pre_root_version, post_root_version
             );
             pre_root_version = post_root_version;
-            loop_iter += 1;
-            if loop_iter >= 3 {
-                debug_fatal!("Unable to get a stable version after 3 iterations");
-            }
         }
     }
 
@@ -1400,13 +1503,9 @@ impl AccountFundsRead for WritebackCache {
         version: SequenceNumber,
     ) -> u128 {
         let account_obj = self.find_object_lt_or_eq_version(*account_id.inner(), version);
-        if let Some(account_obj) = account_obj {
-            let (_, AccumulatorValue::U128(value)) =
-                account_obj.data.try_as_move().unwrap().try_into().unwrap();
-            value.value
-        } else {
-            0
-        }
+        account_obj
+            .map(|account_obj| account_amount_from_object(&account_obj))
+            .unwrap_or(0)
     }
 }
 
@@ -1415,6 +1514,17 @@ impl ExecutionCacheAPI for WritebackCache {}
 impl ExecutionCacheCommit for WritebackCache {
     fn build_db_batch(&self, epoch: EpochId, digests: &[TransactionDigest]) -> Batch {
         self.build_db_batch(epoch, digests)
+    }
+
+    fn set_highest_committed_checkpoint_in_batch(
+        &self,
+        batch: &mut Batch,
+        checkpoint: CheckpointSequenceNumber,
+    ) {
+        self.store
+            .perpetual_tables
+            .set_highest_committed_checkpoint(&mut batch.1, checkpoint)
+            .expect("db error");
     }
 
     fn commit_transaction_outputs(
@@ -1832,42 +1942,38 @@ impl ObjectCacheRead for WritebackCache {
         }
     }
 
+    #[cfg(test)]
     fn get_lock(&self, obj_ref: ObjectRef, epoch_store: &AuthorityPerEpochStore) -> SuiLockResult {
         let cur_epoch = epoch_store.epoch();
-        match self.get_object_by_id_cache_only("lock", &obj_ref.0) {
-            CacheResult::Hit((_, obj)) => {
-                let actual_objref = obj.compute_object_reference();
-                if obj_ref != actual_objref {
-                    Ok(ObjectLockStatus::LockedAtDifferentVersion {
-                        locked_ref: actual_objref,
-                    })
-                } else {
-                    // requested object ref is live, check if there is a lock
-                    Ok(
-                        match self
-                            .object_locks
-                            .get_transaction_lock(&obj_ref, epoch_store)?
-                        {
-                            Some(tx_digest) => ObjectLockStatus::LockedToTx {
-                                locked_by_tx: LockDetailsDeprecated {
-                                    epoch: cur_epoch,
-                                    tx_digest,
-                                },
-                            },
-                            None => ObjectLockStatus::Initialized,
+        let Some(obj) = self.get_object_impl("lock", &obj_ref.0) else {
+            return Err(SuiError::from(UserInputError::ObjectNotFound {
+                object_id: obj_ref.0,
+                // even though we know the requested version, we leave it as None to indicate
+                // that the object does not exist at any version
+                version: None,
+            }));
+        };
+        let actual_objref = obj.compute_object_reference();
+        if obj_ref != actual_objref {
+            Ok(ObjectLockStatus::LockedAtDifferentVersion {
+                locked_ref: actual_objref,
+            })
+        } else {
+            // requested object ref is live, check if there is a lock
+            Ok(
+                match self
+                    .object_locks
+                    .get_transaction_lock(&obj_ref, epoch_store)?
+                {
+                    Some(tx_digest) => ObjectLockStatus::LockedToTx {
+                        locked_by_tx: LockDetailsDeprecated {
+                            epoch: cur_epoch,
+                            tx_digest,
                         },
-                    )
-                }
-            }
-            CacheResult::NegativeHit => {
-                Err(SuiError::from(UserInputError::ObjectNotFound {
-                    object_id: obj_ref.0,
-                    // even though we know the requested version, we leave it as None to indicate
-                    // that the object does not exist at any version
-                    version: None,
-                }))
-            }
-            CacheResult::Miss => self.record_db_get("lock").get_lock(obj_ref, epoch_store),
+                    },
+                    None => ObjectLockStatus::Initialized,
+                },
+            )
         }
     }
 
@@ -1879,37 +1985,6 @@ impl ObjectCacheRead for WritebackCache {
             },
         )?;
         Ok(obj.compute_object_reference())
-    }
-
-    fn check_owned_objects_are_live(&self, owned_object_refs: &[ObjectRef]) -> SuiResult {
-        do_fallback_lookup_fallible(
-            owned_object_refs,
-            |obj_ref| match self.get_object_by_id_cache_only("object_is_live", &obj_ref.0) {
-                CacheResult::Hit((version, obj)) => {
-                    if obj.compute_object_reference() != *obj_ref {
-                        Err(UserInputError::ObjectVersionUnavailableForConsumption {
-                            provided_obj_ref: *obj_ref,
-                            current_version: version,
-                        }
-                        .into())
-                    } else {
-                        Ok(CacheResult::Hit(()))
-                    }
-                }
-                CacheResult::NegativeHit => Err(UserInputError::ObjectNotFound {
-                    object_id: obj_ref.0,
-                    version: None,
-                }
-                .into()),
-                CacheResult::Miss => Ok(CacheResult::Miss),
-            },
-            |remaining| {
-                self.record_db_multi_get("object_is_live", remaining.len())
-                    .check_owned_objects_are_live(remaining)?;
-                Ok(vec![(); remaining.len()])
-            },
-        )?;
-        Ok(())
     }
 
     fn get_highest_pruned_checkpoint(&self) -> Option<CheckpointSequenceNumber> {
@@ -1995,7 +2070,7 @@ impl TransactionCacheRead for WritebackCache {
                     .into_iter()
                     .map(|o| o.map(Arc::new))
                     .collect();
-                for ((digest, ticket), result) in remaining.iter().zip(results.iter()) {
+                for ((digest, ticket), result) in remaining.iter().zip_debug_eq(results.iter()) {
                     if result.is_none() {
                         self.cached.transactions.insert(digest, None, *ticket).ok();
                     }
@@ -2058,7 +2133,7 @@ impl TransactionCacheRead for WritebackCache {
                     .record_db_multi_get("executed_effects_digests", remaining.len())
                     .multi_get_executed_effects_digests(&remaining_digests)
                     .expect("db error");
-                for ((digest, ticket), result) in remaining.iter().zip(results.iter()) {
+                for ((digest, ticket), result) in remaining.iter().zip_debug_eq(results.iter()) {
                     if result.is_none() {
                         self.cached
                             .executed_effects_digests
@@ -2119,7 +2194,7 @@ impl TransactionCacheRead for WritebackCache {
                     .record_db_multi_get("transaction_effects", remaining.len())
                     .multi_get_effects(remaining_digests.iter())
                     .expect("db error");
-                for ((digest, ticket), result) in remaining.iter().zip(results.iter()) {
+                for ((digest, ticket), result) in remaining.iter().zip_debug_eq(results.iter()) {
                     if result.is_none() {
                         self.cached
                             .transaction_effects
@@ -2240,7 +2315,7 @@ impl TransactionCacheRead for WritebackCache {
                     .store
                     .multi_get_events(&remaining_digests)
                     .expect("db error");
-                for ((digest, ticket), result) in remaining.iter().zip(results.iter()) {
+                for ((digest, ticket), result) in remaining.iter().zip_debug_eq(results.iter()) {
                     if result.is_none() {
                         self.cached
                             .transaction_events
@@ -2266,6 +2341,24 @@ impl TransactionCacheRead for WritebackCache {
                     .get_unchanged_loaded_runtime_objects(digest)
                     .expect("db error")
             })
+    }
+
+    fn multi_get_unchanged_loaded_runtime_objects(
+        &self,
+        digests: &[TransactionDigest],
+    ) -> Vec<Option<Vec<ObjectKey>>> {
+        do_fallback_lookup(
+            digests,
+            |digest| match self.dirty.unchanged_loaded_runtime_objects.get(digest) {
+                Some(objects) => CacheResult::Hit(Some(objects.clone())),
+                None => CacheResult::Miss,
+            },
+            |digests| {
+                self.store
+                    .multi_get_unchanged_loaded_runtime_objects(digests)
+                    .expect("db error")
+            },
+        )
     }
 
     fn take_accumulator_events(&self, digest: &TransactionDigest) -> Option<Vec<AccumulatorEvent>> {

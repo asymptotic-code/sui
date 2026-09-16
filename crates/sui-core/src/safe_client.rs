@@ -244,33 +244,15 @@ impl<C: Clone> SafeClient<C> {
                     SignedTransaction::new_from_data_and_sig(transaction.into_data(), signed),
                 ))
             }
-            TransactionStatus::Executed(cert_opt, effects, events) => {
+            TransactionStatus::Executed(_cert_opt, effects, events) => {
+                // `cert_opt` is permanently None: validators no longer aggregate or persist
+                // per-transaction quorum signatures.
                 let signed_effects = self.check_signed_effects_plain(digest, effects, None)?;
-                match cert_opt {
-                    Some(cert) => {
-                        let committee = self.get_committee(&cert.epoch)?;
-                        let ct = CertifiedTransaction::new_from_data_and_sig(
-                            transaction.into_data(),
-                            cert,
-                        );
-                        ct.verify_committee_sigs_only(&committee).map_err(|e| {
-                            SuiErrorKind::FailedToVerifyTxCertWithExecutedEffects {
-                                validator_name: self.address,
-                                error: e.to_string(),
-                            }
-                        })?;
-                        Ok(PlainTransactionInfoResponse::ExecutedWithCert(
-                            ct,
-                            signed_effects,
-                            events,
-                        ))
-                    }
-                    None => Ok(PlainTransactionInfoResponse::ExecutedWithoutCert(
-                        transaction,
-                        signed_effects,
-                        events,
-                    )),
-                }
+                Ok(PlainTransactionInfoResponse::Executed(
+                    transaction,
+                    signed_effects,
+                    events,
+                ))
             }
         }
     }
@@ -335,7 +317,6 @@ where
         match &wait_for_effects_resp {
             WaitForEffectsResponse::Executed {
                 effects_digest: _,
-                fast_path: _,
                 details: Some(details),
             } => {
                 self.verify_executed_data((**details).clone())?;

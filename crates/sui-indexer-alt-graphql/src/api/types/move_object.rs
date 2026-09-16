@@ -15,6 +15,7 @@ use tokio::sync::OnceCell;
 
 use crate::api::scalars::base64::Base64;
 use crate::api::scalars::big_int::BigInt;
+use crate::api::scalars::digest::Digest;
 use crate::api::scalars::id::Id;
 use crate::api::scalars::sui_address::SuiAddress;
 use crate::api::scalars::type_filter::TypeInput;
@@ -25,6 +26,7 @@ use crate::api::types::balance;
 use crate::api::types::balance::Balance;
 use crate::api::types::coin_metadata::CoinMetadata;
 use crate::api::types::dynamic_field;
+use crate::api::types::dynamic_field::DerivedObjectKey;
 use crate::api::types::dynamic_field::DynamicField;
 use crate::api::types::dynamic_field::DynamicFieldName;
 use crate::api::types::move_type::MoveType;
@@ -41,9 +43,11 @@ use crate::api::types::owner::Owner;
 use crate::api::types::transaction::CTransaction;
 use crate::api::types::transaction::Transaction;
 use crate::api::types::transaction::filter::TransactionFilter;
+use crate::api::types::transaction_object::TransactionObject;
 use crate::error::RpcError;
 use crate::pagination::Page;
 use crate::pagination::PaginationConfig;
+use crate::pagination::StreamConnection;
 
 #[derive(Clone)]
 pub(crate) struct MoveObject {
@@ -173,9 +177,27 @@ impl MoveObject {
         DynamicField::from_move_object(self, ctx).await
     }
 
-    /// Fetch the total balance for coins with marker type `coinType` (e.g. `0x2::sui::SUI`), owned by this address.
+    /// How this object was referenced by a specific transaction.
     ///
-    /// If the address does not own any coins of that type, a balance of zero is returned.
+    /// Returns `null` if the object was not referenced, or was present only as a non-object marker variant of unchanged consensus input (e.g. cancelled, stream-ended, per-epoch).
+    ///
+    /// The `transactionDigest` argument may be omitted when the query is scoped under a transaction context (e.g. a parent `Transaction`, `TransactionEffects`, or `Event`); the field then resolves against the in-scope transaction.
+    ///
+    /// Passing an explicit `transactionDigest` other than the in-scope transaction in subscription context is not supported; for arbitrary transaction lookups, use the indexed Query API.
+    pub(crate) async fn as_transaction_object(
+        &self,
+        ctx: &Context<'_>,
+        transaction_digest: Option<Digest>,
+    ) -> Option<Result<TransactionObject, RpcError>> {
+        self.super_
+            .as_transaction_object(ctx, transaction_digest)
+            .await
+            .ok()?
+    }
+
+    /// Fetch the balance for `coinType` (e.g. `0x2::sui::SUI`) owned by this address.
+    ///
+    /// The result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator. If this address has no balance of that type, all three values are zero.
     pub(crate) async fn balance(
         &self,
         ctx: &Context<'_>,
@@ -184,7 +206,9 @@ impl MoveObject {
         self.super_.balance(ctx, coin_type).await.ok()?
     }
 
-    /// Total balance across coins owned by this address, grouped by coin type.
+    /// Balances held by this address, grouped by coin type.
+    ///
+    /// Each result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator.
     pub(crate) async fn balances(
         &self,
         ctx: &Context<'_>,
@@ -219,6 +243,25 @@ impl MoveObject {
         ctx: &Context<'_>,
     ) -> Option<Result<NameRecord, RpcError<object::Error>>> {
         self.super_.default_name_record(ctx).await.ok()?
+    }
+
+    /// Access a derived object using its key.
+    ///
+    /// The object can be bounded by at most one of `version`, `rootVersion`, or `atCheckpoint`, with the same semantics as `Query.object`.
+    ///
+    /// Returns `null` if the derived object has not been claimed, has been deleted, or is not available in the store.
+    pub(crate) async fn derived_object(
+        &self,
+        ctx: &Context<'_>,
+        name: DynamicFieldName,
+        version: Option<UInt53>,
+        root_version: Option<UInt53>,
+        at_checkpoint: Option<UInt53>,
+    ) -> Option<Result<MoveObject, RpcError<dynamic_field::Error>>> {
+        self.super_
+            .derived_object(ctx, name, version, root_version, at_checkpoint)
+            .await
+            .ok()?
     }
 
     /// Access a dynamic field on an object using its type and BCS-encoded name.
@@ -318,6 +361,17 @@ impl MoveObject {
         .transpose()
     }
 
+    /// Access derived objects using their keys and optional version bounds.
+    ///
+    /// Each key can specify at most one of `version`, `rootVersion`, or `atCheckpoint`, with the same semantics as `Query.object`. Returns a list that is guaranteed to be the same length as `keys`. If a derived object has not been claimed, has been deleted, or is not available in the store, its corresponding entry is `null`.
+    pub(crate) async fn multi_get_derived_objects(
+        &self,
+        ctx: &Context<'_>,
+        keys: Vec<DerivedObjectKey>,
+    ) -> Result<Vec<Option<MoveObject>>, RpcError<dynamic_field::Error>> {
+        self.super_.multi_get_derived_objects(ctx, keys).await
+    }
+
     /// Access dynamic fields on an object using their types and BCS-encoded names.
     ///
     /// Returns a list of dynamic fields that is guaranteed to be the same length as `keys`. If a dynamic field in `keys` could not be found in the store, its corresponding entry in the result will be `null`.
@@ -339,9 +393,9 @@ impl MoveObject {
         .await
     }
 
-    /// Fetch the total balances keyed by coin types (e.g. `0x2::sui::SUI`) owned by this address.
+    /// Fetch balances keyed by coin types (e.g. `0x2::sui::SUI`) owned by this address.
     ///
-    /// If the address does not own any coins of a given type, a balance of zero is returned for that type.
+    /// Each result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator. Returns `null` when no checkpoint is set in scope (e.g. execution scope). If this address has no balance of a given type, all three values are zero for that type.
     pub(crate) async fn multi_get_balances(
         &self,
         ctx: &Context<'_>,
@@ -487,7 +541,7 @@ impl MoveObject {
         last: Option<u64>,
         before: Option<CTransaction>,
         filter: Option<TransactionFilter>,
-    ) -> Option<Result<Connection<String, Transaction>, RpcError>> {
+    ) -> Option<Result<StreamConnection<Transaction>, RpcError>> {
         self.super_
             .received_transactions(ctx, first, after, last, before, filter)
             .await

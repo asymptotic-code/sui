@@ -54,6 +54,11 @@ ActiveJwk:
 AdditionalConsensusStateDigest:
   NEWTYPESTRUCT:
     TYPENAME: Digest
+AllowedProposers:
+  STRUCT:
+    - epoch: U64
+    - proposers:
+        SEQ: U32
 Argument:
   ENUM:
     0:
@@ -320,6 +325,8 @@ CommandArgumentError:
       CannotWriteToExtendedReference: UNIT
     18:
       InvalidReferenceArgument: UNIT
+    19:
+      InvalidTxContext: UNIT
 CompressedSignature:
   ENUM:
     0:
@@ -504,6 +511,8 @@ EndOfEpochTransactionKind:
       WriteAccumulatorStorageCost:
         NEWTYPE:
           TYPENAME: WriteAccumulatorStorageCost
+    13:
+      ForwardingAddressRegistryCreate: UNIT
 Event:
   STRUCT:
     - package_id:
@@ -972,6 +981,13 @@ Owner:
               TYPENAME: SequenceNumber
           - owner:
               TYPENAME: SuiAddress
+    5:
+      Party:
+        STRUCT:
+          - start_version:
+              TYPENAME: SequenceNumber
+          - permissions:
+              TYPENAME: RawPartySerde
 PackageUpgradeError:
   ENUM:
     0:
@@ -1059,6 +1075,14 @@ RandomnessStateUpdate:
         SEQ: U8
     - randomness_obj_initial_shared_version:
         TYPENAME: SequenceNumber
+RawPartySerde:
+  STRUCT:
+    - default_permissions: U64
+    - members:
+        SEQ:
+          TUPLE:
+            - TYPENAME: SuiAddress
+            - U64
 Reservation:
   ENUM:
     0:
@@ -1288,6 +1312,23 @@ TransactionExpiration:
           - chain:
               TYPENAME: ChainIdentifier
           - nonce: U32
+    3:
+      Validity:
+        STRUCT:
+          - min_epoch:
+              OPTION: U64
+          - max_epoch:
+              OPTION: U64
+          - min_timestamp:
+              OPTION: U64
+          - max_timestamp:
+              OPTION: U64
+          - chain:
+              TYPENAME: ChainIdentifier
+          - nonce: U32
+          - allowed_proposers:
+              OPTION:
+                TYPENAME: AllowedProposers
 TransactionKind:
   ENUM:
     0:
@@ -1437,6 +1478,13 @@ WithdrawFrom:
       Sender: UNIT
     1:
       Sponsor: UNIT
+    2:
+      SenderAllowance:
+        STRUCT:
+          - funder:
+              TYPENAME: SuiAddress
+          - allowance:
+              TYPENAME: ObjectID
 WithdrawalTypeArg:
   ENUM:
     0:

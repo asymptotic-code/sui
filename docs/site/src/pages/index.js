@@ -8,28 +8,117 @@ import Head from "@docusaurus/Head";
 import Link from "@docusaurus/Link";
 import styles from "./index.module.css";
 
+// Target for the "Developer Updates" hero link. That page does not exist yet,
+// so this points at the external Sui blog as an interim (external links are not
+// route-checked, so the strict build passes). Swap this single constant to
+// "/developer-updates" when the dedicated page ships.
+export const DEVELOPER_UPDATES_URL = "https://blog.sui.io";
+
 export default function Home() {
-  const HomeCard = (props) => {
-    const { title, children } = props;
-    return (
-      <div className={`p-px col-span-3 w-[350px]`}>
-        <div className={styles.card}>
-          {title && <h4 className="h4 text-white">{title}</h4>}
-          <div className={styles.cardLinksContainer}>{children}</div>
-        </div>
+  const developerResources = [
+    {
+      title: "Getting Started",
+      description:
+        "Install the Sui toolchain, set up a wallet, and publish your first Move package.",
+      to: "/getting-started",
+    },
+    {
+      title: "Sui Agent Skills",
+      description: "Equip AI coding agents with Sui-specific skills and context.",
+      to: "/skills",
+    },
+    {
+      title: "Develop",
+      description:
+        "Write and upgrade Move packages, work with objects, and query onchain data.",
+      to: "/develop",
+    },
+    {
+      title: "Onchain Finance",
+      description:
+        "Issue tokens and stablecoins, tokenize assets, and build payments and NFTs.",
+      to: "/onchain-finance",
+    },
+    {
+      title: "Sui Stack",
+      description:
+        "Compose onchain primitives like zkLogin, Nautilus, and Seal into your app.",
+      to: "/sui-stack",
+    },
+    {
+      title: "References",
+      description:
+        "Look up the CLI, SDKs, Move framework, and network API references.",
+      to: "/references",
+    },
+  ];
+
+  const useCases = [
+    {
+      title: "DeepBook",
+      description:
+        "Trade on Sui's onchain central limit order book across spot, margin, and prediction markets.",
+      to: "/onchain-finance/deepbook",
+    },
+    {
+      title: "Walrus",
+      description:
+        "Store and serve media, blobs, and app data on decentralized storage.",
+      to: "/sui-stack/walrus",
+    },
+    {
+      title: "zkLogin",
+      description:
+        "Onboard users with their existing Web2 logins, no seed phrase required.",
+      to: "/sui-stack/zklogin-integration/zklogin",
+    },
+    {
+      title: "Digital Assets",
+      description:
+        "Build NFTs and composable digital collectibles with the object model.",
+      to: "/onchain-finance/types-of-assets",
+    },
+  ];
+
+  const nodeOperators = [
+    {
+      title: "Run a Sui Full Node",
+      description: "Run a full node to sync the network and serve onchain data.",
+      to: "/operators/full-node/sui-full-node",
+    },
+    {
+      title: "Validators",
+      description: "Set up and operate a validator to help secure the network.",
+      to: "/operators/validator",
+    },
+    {
+      title: "Data Management",
+      description:
+        "Set up archival storage and indexing services for onchain data.",
+      to: "/operators/data-management",
+    },
+  ];
+
+  const ResourceCard = ({ title, description, to }) => (
+    <Link to={to} className={styles.resourceCard}>
+      <h3 className={styles.resourceCardTitle}>{title}</h3>
+      <p className={styles.resourceCardDesc}>{description}</p>
+      <span className={styles.resourceCardArrow} aria-hidden="true">
+        →
+      </span>
+    </Link>
+  );
+
+  const Section = ({ heading, items }) => (
+    <section className={styles.homeSection}>
+      <h2 className={styles.homeSectionHeading}>{heading}</h2>
+      <div className="flex flex-row flex-wrap justify-center gap-2">
+        {items.map((item) => (
+          <ResourceCard key={item.title} {...item} />
+        ))}
       </div>
-    );
-  };
-  const HomeCardCTA = (props) => {
-    const { children } = props;
-    return (
-      <div className={`p-px col-span-3 w-[350px]`}>
-        <div className={styles.cardCTA}>
-          <div className={styles.cardLinksContainer}>{children}</div>
-        </div>
-      </div>
-    );
-  };
+    </section>
+  );
 
   return (
     <>
@@ -40,134 +129,37 @@ export default function Home() {
         />
       </Head>
       <Layout>
-      <div 
+        <div
           className="overflow-hidden min-h-screen flex flex-col bg-cover bg-center bg-no-repeat"
-          style={{
-            backgroundColor: '#000000',
-          }}
+          style={{ backgroundColor: "#000000" }}
         >
           <div className="w-full mt-8 mb-4 mx-auto">
             <div className={styles.heroText}>
               <h1 className="h1 center-text text-white">Sui Documentation</h1>
-              <h2 className="h2 center-text h3" style={{ color: '#89919F' }}>
-                Discover the power of Sui through examples, guides, and concepts
-              </h2>
+              <p
+                className="center-text"
+                style={{
+                  color: "#89919F",
+                  maxWidth: "720px",
+                  margin: "0 auto",
+                  fontSize: "1.1rem",
+                  lineHeight: "1.6",
+                }}
+              >
+                Sui is a next-generation smart contract platform with high
+                throughput, low latency, and an asset-oriented programming model
+                powered by the Move programming language. Explore guides,
+                references, and tutorials to start building on Sui.
+              </p>
+              <Link to={DEVELOPER_UPDATES_URL} className={styles.devUpdates}>
+                Developer Updates
+              </Link>
             </div>
           </div>
-          <div className="flex flex-row flex-wrap justify-center gap-2 max-w-[1066px] mx-auto pb-16 py-4">
-            <HomeCard title="Developers">
-              <Link
-                className={`${styles.cardLink} plausible-event-name=homepage+start+button`}
-                to="./guides/developer/getting-started/sui-install"
-              >
-                Getting Started
-              </Link>
-              <Link className={styles.cardLink} to="/guides">
-                Sui Developer Basics
-              </Link>
-              <Link
-                className={styles.cardLink}
-                to="./concepts/sui-move-concepts"
-              >
-                Move
-              </Link>
-            </HomeCard>
-            <HomeCard title="Validators and Node operators">
-              <Link
-                className={styles.cardLink}
-                to="./guides/operator/validator/validator-config"
-              >
-                Validator Configuration
-              </Link>
-              <Link
-                className={styles.cardLink}
-                to="./guides/operator/sui-full-node"
-              >
-                Run a Sui Full Node
-                <span className="block bg-auto bg-[url(../static/img/index/right-arrow.svg)]"></span>
-              </Link>
-              <Link
-                className={styles.cardLink}
-                to="./guides/operator/bridge-node-configuration"
-              >
-                Sui Bridge Node Configuration
-              </Link>
-            </HomeCard>
-            <HomeCard title="About Sui">
-              <Link className={styles.cardLink} to="./concepts/tokenomics">
-                Tokenomics
-              </Link>
-              <Link className={styles.cardLink} to="./concepts/cryptography">
-                Cryptography
-              </Link>
-              <Link className={styles.cardLink} to="standards">
-                Standards
-              </Link>
-            </HomeCard>
-            <HomeCard title="References" aux>
-              <Link
-                className={styles.cardLink}
-                to="https://sdk.mystenlabs.com/dapp-kit?ref=blog.sui.io"
-              >
-                Sui dApp Kit
-              </Link>
-              <Link className={styles.cardLink} to="/references/sui-api">
-                Sui API
-              </Link>
-              <Link
-                className={styles.cardLink}
-                to="https://github.com/MystenLabs/sui/tree/main/crates/sui-framework/docs"
-              >
-                Sui Framework
-              </Link>
-              <Link
-                className={styles.cardLink}
-                to="https://github.com/MystenLabs/sui/tree/main/crates/sui-sdk"
-              >
-                Rust SDK
-              </Link>
-            </HomeCard>
-            <HomeCard title="Resources" aux>
-              <Link
-                className={styles.cardLink}
-                to="https://sui.directory/?_project_type=api%2Cdeveloper-tools%2Cinfrastructure%2Csdk"
-              >
-                Sui Ecosystem
-              </Link>
-              <Link className={styles.cardLink} to="/references/awesome-sui">
-                Awesome Sui
-              </Link>
-              <Link className={styles.cardLink} to="https://blog.sui.io/">
-                Sui blog
-              </Link>
-              <Link
-                className={styles.cardLink}
-                to="guides/developer/dev-cheat-sheet"
-              >
-                Sui Developer Cheat Sheet
-              </Link>
-            </HomeCard>
-            <HomeCardCTA>
-              <Link
-                className={styles.cardCTALink}
-                to="/guides/developer/getting-started/hello-world"
-              >
-                <span>Build your dApp on Sui</span>
-                <svg
-                  width="11"
-                  height="11"
-                  viewBox="0 0 11 11"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <path
-                    d="M6.01312 0.5L5.05102 1.45391L8.39164 4.80332L0 4.80332L0 6.19668L8.39164 6.19668L5.05102 9.54073L6.01312 10.5L11 5.5L6.01312 0.5Z"
-                    fill="#298DFF"
-                  />
-                </svg>
-              </Link>
-            </HomeCardCTA>
-          </div>
+
+          <Section heading="Developer Resources" items={developerResources} />
+          <Section heading="Use Cases" items={useCases} />
+          <Section heading="Node Operators" items={nodeOperators} />
         </div>
       </Layout>
     </>

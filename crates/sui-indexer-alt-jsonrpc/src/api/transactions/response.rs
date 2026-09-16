@@ -2,16 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::Context as _;
-use futures::future::OptionFuture;
 use move_core_types::annotated_value::MoveDatatypeLayout;
 use move_core_types::annotated_value::MoveTypeLayout;
 use sui_indexer_alt_reader::kv_loader::TransactionContents;
 use sui_indexer_alt_reader::objects::VersionedObjectKey;
-use sui_indexer_alt_reader::tx_balance_changes::TxBalanceChangeKey;
-use sui_indexer_alt_schema::transactions::BalanceChange;
-use sui_indexer_alt_schema::transactions::StoredTxBalanceChange;
 use sui_json_rpc_types::BalanceChange as SuiBalanceChange;
 use sui_json_rpc_types::ObjectChange as SuiObjectChange;
 use sui_json_rpc_types::SuiEvent;
@@ -24,19 +21,20 @@ use sui_json_rpc_types::SuiTransactionBlockResponseOptions;
 use sui_types::TypeTag;
 use sui_types::base_types::ObjectID;
 use sui_types::base_types::SequenceNumber;
+use sui_types::base_types::SuiAddress;
 use sui_types::digests::ObjectDigest;
 use sui_types::digests::TransactionDigest;
-use sui_types::effects::IDOperation;
 use sui_types::effects::ObjectChange;
 use sui_types::effects::TransactionEffects;
 use sui_types::effects::TransactionEffectsAPI;
-use sui_types::event::Event;
 use sui_types::object::Object;
+use sui_types::object::Owner;
 use sui_types::signature::GenericSignature;
+use sui_types::transaction::SenderSignedData;
 use sui_types::transaction::TransactionData;
 use sui_types::transaction::TransactionDataAPI;
-use tokio::join;
 
+use crate::api::to_sui_object_change;
 use crate::api::transactions::error::Error;
 use crate::context::Context;
 use crate::error::RpcError;
@@ -50,28 +48,12 @@ pub(super) async fn transaction(
     digest: TransactionDigest,
     options: &SuiTransactionBlockResponseOptions,
 ) -> Result<SuiTransactionBlockResponse, RpcError<Error>> {
-    let tx = ctx.kv_loader().load_one_transaction(digest);
-    let stored_bc: OptionFuture<_> = options
-        .show_balance_changes
-        .then(|| ctx.pg_loader().load_one(TxBalanceChangeKey(digest)))
-        .into();
-
-    let (tx, stored_bc) = join!(tx, stored_bc);
-
-    let tx = tx
+    let tx = ctx
+        .kv_loader()
+        .load_one_transaction(digest)
+        .await
         .context("Failed to fetch transaction from store")?
         .ok_or_else(|| invalid_params(Error::NotFound(digest)))?;
-
-    // Balance changes might not be present because of pruning, in which case we return
-    // nothing, even if the changes were requested.
-    let stored_bc = match stored_bc
-        .transpose()
-        .context("Failed to fetch balance changes from store")?
-    {
-        Some(None) => return Err(invalid_params(Error::BalanceChangesNotFound(digest))),
-        Some(changes) => changes,
-        None => None,
-    };
 
     let digest = tx.digest()?;
 
@@ -85,7 +67,7 @@ pub(super) async fn transaction(
     }
 
     if options.show_raw_input {
-        response.raw_transaction = tx.raw_transaction()?;
+        response.raw_transaction = raw_input(&tx)?;
     }
 
     if options.show_effects {
@@ -100,8 +82,8 @@ pub(super) async fn transaction(
         response.events = Some(events(ctx, digest, &tx).await?);
     }
 
-    if let Some(changes) = stored_bc {
-        response.balance_changes = Some(balance_changes(changes)?);
+    if options.show_balance_changes {
+        response.balance_changes = Some(balance_changes(&tx)?);
     }
 
     if options.show_object_changes {
@@ -127,6 +109,12 @@ async fn input(
     })
 }
 
+/// Extract the transaction's raw BCS input in the JSON-RPC representation.
+fn raw_input(tx: &TransactionContents) -> Result<Vec<u8>, RpcError<Error>> {
+    let data = SenderSignedData::new(tx.data()?, tx.signatures()?);
+    Ok(bcs::to_bytes(&data).context("Failed to serialize transaction")?)
+}
+
 /// Extract a representation of the transaction's effects from the stored form.
 fn effects(tx: &TransactionContents) -> Result<SuiTransactionBlockEffects, RpcError<Error>> {
     let effects: TransactionEffects = tx.effects()?;
@@ -141,7 +129,7 @@ async fn events(
     digest: TransactionDigest,
     tx: &TransactionContents,
 ) -> Result<SuiTransactionBlockEvents, RpcError<Error>> {
-    let events: Vec<Event> = tx.events()?;
+    let events = tx.events()?;
     let mut sui_events = Vec::with_capacity(events.len());
 
     for (ix, event) in events.into_iter().enumerate() {
@@ -163,8 +151,14 @@ async fn events(
             ),
         };
 
-        let sui_event = SuiEvent::try_from(event, digest, ix as u64, tx.timestamp_ms(), layout)
-            .with_context(|| format!("Failed to convert Event {ix} into response"))?;
+        let sui_event = SuiEvent::try_from(
+            Arc::unwrap_or_clone(event),
+            digest,
+            ix as u64,
+            tx.timestamp_ms(),
+            layout,
+        )
+        .with_context(|| format!("Failed to convert Event {ix} into response"))?;
 
         sui_events.push(sui_event)
     }
@@ -172,25 +166,35 @@ async fn events(
     Ok(SuiTransactionBlockEvents { data: sui_events })
 }
 
-/// Extract the transaction's balance changes from their stored form.
-fn balance_changes(
-    balance_changes: StoredTxBalanceChange,
-) -> Result<Vec<SuiBalanceChange>, RpcError<Error>> {
-    let balance_changes: Vec<BalanceChange> = bcs::from_bytes(&balance_changes.balance_changes)
-        .context("Failed to deserialize BalanceChanges")?;
+/// Extract the transaction's balance changes from the ledger gRPC response.
+fn balance_changes(tx: &TransactionContents) -> Result<Vec<SuiBalanceChange>, RpcError<Error>> {
+    let balance_changes = tx.balance_changes();
     let mut response = Vec::with_capacity(balance_changes.len());
 
-    for BalanceChange::V1 {
-        owner,
-        coin_type,
-        amount,
-    } in balance_changes
-    {
-        let coin_type = TypeTag::from_str(&coin_type)
-            .with_context(|| format!("Invalid coin type: {coin_type:?}"))?;
+    for bc in balance_changes {
+        let addr: SuiAddress = bc
+            .address
+            .as_ref()
+            .context("Missing address in balance change")?
+            .parse()
+            .context("Invalid owner address in balance change")?;
+
+        let coin_type = TypeTag::from_str(
+            bc.coin_type
+                .as_ref()
+                .context("Missing coin_type in balance change")?,
+        )
+        .context("Invalid coin type in balance change")?;
+
+        let amount: i128 = bc
+            .amount
+            .as_ref()
+            .context("Missing amount in balance change")?
+            .parse()
+            .context("Invalid balance change amount")?;
 
         response.push(SuiBalanceChange {
-            owner,
+            owner: Owner::AddressOwner(addr),
             coin_type,
             amount,
         });
@@ -263,94 +267,14 @@ async fn object_changes(
         let input = fetch_object(object_id, input_version, input_digest)?;
         let output = fetch_object(object_id, output_version, output_digest)?;
 
-        use IDOperation as ID;
-        changes.push(match (id_operation, input, output) {
-            (ID::Created, Some((i, _)), _) => rpc_bail!(
-                "Unexpected input version {} for object {object_id} created by transaction {digest}",
-                i.version().value(),
-            ),
-
-            (ID::Deleted, _, Some((o, _))) => rpc_bail!(
-                "Unexpected output version {} for object {object_id} deleted by transaction {digest}",
-                o.version().value(),
-            ),
-
-            // The following cases don't end up in the output: created and wrapped objects,
-            // unwrapped objects (and by extension, unwrapped and deleted objects), system package
-            // upgrades (which happen in place).
-            (ID::Created, _, None) => continue,
-            (ID::None, None, _) => continue,
-            (ID::None, _, Some((o, _))) if o.is_package() => continue,
-            (ID::Deleted, None, _) => continue,
-
-            (ID::Created, _, Some((o, d))) if o.is_package() => SuiObjectChange::Published {
-                package_id: object_id,
-                version: o.version(),
-                digest: d,
-                modules: o
-                    .data
-                    .try_as_package()
-                    .unwrap() // SAFETY: Match guard checks that the object is a package.
-                    .serialized_module_map()
-                    .keys()
-                    .cloned()
-                    .collect(),
-            },
-
-            (ID::Created, _, Some((o, d))) => SuiObjectChange::Created {
-                sender: tx_data.sender(),
-                owner: o.owner().clone(),
-                object_type: o
-                    .struct_tag()
-                    .with_context(|| format!("No type for object {object_id}"))?,
-                object_id,
-                version: o.version(),
-                digest: d,
-            },
-
-            (ID::None, Some((i, _)), Some((o, od))) if i.owner() != o.owner() => {
-                SuiObjectChange::Transferred {
-                    sender: tx_data.sender(),
-                    recipient: o.owner().clone(),
-                    object_type: o
-                        .struct_tag()
-                        .with_context(|| format!("No type for object {object_id}"))?,
-                    object_id,
-                    version: o.version(),
-                    digest: od,
-                }
-            }
-
-            (ID::None, Some((i, _)), Some((o, od))) => SuiObjectChange::Mutated {
-                sender: tx_data.sender(),
-                owner: o.owner().clone(),
-                object_type: o
-                    .struct_tag()
-                    .with_context(|| format!("No type for object {object_id}"))?,
-                object_id,
-                version: o.version(),
-                previous_version: i.version(),
-                digest: od,
-            },
-
-            (ID::None, Some((i, _)), None) => SuiObjectChange::Wrapped {
-                sender: tx_data.sender(),
-                object_type: i
-                    .struct_tag()
-                    .with_context(|| format!("No type for object {object_id}"))?,
-                object_id,
-                version: effects.lamport_version(),
-            },
-
-            (ID::Deleted, Some((i, _)), None) => SuiObjectChange::Deleted {
-                sender: tx_data.sender(),
-                object_type: i
-                    .struct_tag()
-                    .with_context(|| format!("No type for object {object_id}"))?,
-                object_id,
-                version: effects.lamport_version(),
-            },
-        })
+        changes.extend(to_sui_object_change(
+            tx_data.sender(),
+            object_id,
+            id_operation,
+            input,
+            output,
+            effects.lamport_version(),
+        )?);
     }
 
     Ok(changes)

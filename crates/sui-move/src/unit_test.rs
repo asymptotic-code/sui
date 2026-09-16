@@ -21,19 +21,21 @@ use std::{
 use sui_adapter::gas_meter::SuiGasMeter;
 use sui_move_build::decorate_warnings;
 use sui_move_natives::{
-    NativesCostTable, object_runtime::ObjectRuntime, test_scenario::InMemoryTestStore,
-    transaction_context::TransactionContext,
+    NativesCostTable, object_runtime::ObjectRuntime, scratch::ScratchRuntime,
+    test_scenario::InMemoryTestStore, transaction_context::TransactionContext,
 };
-use sui_package_alt::find_environment;
+use sui_package_alt::{SuiFlavor, find_environment};
 use sui_protocol_config::ProtocolConfig;
 use sui_sdk::wallet_context::WalletContext;
 use sui_types::{
+    TypeTag,
     base_types::{SuiAddress, TxContext},
     digests::TransactionDigest,
     gas::{SuiGasStatus, SuiGasStatusAPI},
     gas_model::{tables::GasStatus, units_types::Gas},
     in_memory_storage::InMemoryStorage,
-    metrics::LimitsMetrics,
+    metrics::ExecutionMetrics,
+    storage::ObjectFundsResolver,
 };
 
 // Move unit tests will halt after executing this many steps. This is a protection to avoid divergence
@@ -56,6 +58,7 @@ impl Test {
         path: Option<&Path>,
         mut build_config: BuildConfig,
         wallet: &WalletContext,
+        flavor: SuiFlavor,
     ) -> anyhow::Result<UnitTestResult> {
         let compute_coverage = self.test.compute_coverage;
         if !cfg!(feature = "tracing") && compute_coverage {
@@ -85,7 +88,7 @@ impl Test {
         // it as the optional argument in the build-config, which then looks it up again, but it
         // should be ok.
         let environment =
-            find_environment(&rerooted_path, build_config.environment, wallet).await?;
+            find_environment(&rerooted_path, build_config.environment, wallet, false).await?;
         build_config.environment = Some(environment.name);
 
         run_move_unit_tests(
@@ -94,6 +97,7 @@ impl Test {
             Some(unit_test_config),
             compute_coverage,
             save_disassembly,
+            flavor,
         )
         .await
     }
@@ -107,18 +111,20 @@ pub async fn run_move_unit_tests(
     config: Option<UnitTestingConfig>,
     compute_coverage: bool,
     save_disassembly: bool,
+    flavor: SuiFlavor,
 ) -> anyhow::Result<UnitTestResult> {
     let config = config.unwrap_or_else(|| {
         UnitTestingConfig::default_with_bound(Some(*MAX_UNIT_TEST_INSTRUCTIONS))
     });
 
-    let result = move_cli::base::test::run_move_unit_tests::<sui_package_alt::SuiFlavor, _, _>(
+    let result = move_cli::base::test::run_move_unit_tests(
         path,
         build_config,
         UnitTestingConfig {
             report_stacktrace_on_abort: true,
             ..config
         },
+        flavor,
         SuiVMTestSetup::new(),
         compute_coverage,
         save_disassembly,
@@ -167,9 +173,29 @@ impl SuiVMTestSetup {
     }
 }
 
+/// Bundles the in-memory test store with a borrowed protocol config, which is what lets the
+/// protocol config be threaded into the native context extensions.
+pub struct SuiExtensionsBuilder<'a> {
+    store: InMemoryTestStore,
+    object_funds_resolver: UnlimitedObjectFundsResolver,
+    protocol_config: &'a ProtocolConfig,
+}
+
+struct UnlimitedObjectFundsResolver;
+
+impl ObjectFundsResolver for UnlimitedObjectFundsResolver {
+    fn object_available_balance(
+        &self,
+        _owner: SuiAddress,
+        _type_: &TypeTag,
+    ) -> sui_types::error::SuiResult<u128> {
+        Ok(u128::MAX)
+    }
+}
+
 impl VMTestSetup for SuiVMTestSetup {
     type Meter<'a> = SuiGasMeter<SuiGasStatusTestWrapper>;
-    type ExtensionsBuilder<'a> = InMemoryTestStore;
+    type ExtensionsBuilder<'a> = SuiExtensionsBuilder<'a>;
 
     fn new_meter<'a>(&'a self, execution_bound: Option<u64>) -> Self::Meter<'a> {
         SuiGasMeter(SuiGasStatusTestWrapper(
@@ -199,30 +225,35 @@ impl VMTestSetup for SuiVMTestSetup {
         self.native_function_table.clone()
     }
 
-    fn new_extensions_builder(&self) -> InMemoryTestStore {
-        InMemoryTestStore(RefCell::new(InMemoryStorage::default()))
+    fn new_extensions_builder(&self) -> SuiExtensionsBuilder<'_> {
+        SuiExtensionsBuilder {
+            store: InMemoryTestStore(RefCell::new(InMemoryStorage::default())),
+            object_funds_resolver: UnlimitedObjectFundsResolver,
+            protocol_config: &self.protocol_config,
+        }
     }
 
-    fn new_native_context_extensions<'ext>(
-        &self,
-        store: &'ext InMemoryTestStore,
+    fn new_native_context_extensions<'a, 'ext>(
+        &'a self,
+        builder: &'ext SuiExtensionsBuilder<'a>,
     ) -> NativeContextExtensions<'ext> {
         let mut ext = NativeContextExtensions::default();
         // Use a throwaway metrics registry for testing.
         let registry = prometheus::Registry::new();
-        let metrics = Arc::new(LimitsMetrics::new(&registry));
+        let metrics = Arc::new(ExecutionMetrics::new(&registry));
 
+        let protocol_config = builder.protocol_config;
         ext.add(ObjectRuntime::new(
-            store,
+            &builder.store,
+            &builder.object_funds_resolver,
             BTreeMap::new(),
             false,
-            Box::leak(Box::new(ProtocolConfig::get_for_max_version_UNSAFE())), // leak for testing
+            protocol_config,
             metrics,
             0, // epoch id
         ));
-        ext.add(NativesCostTable::from_protocol_config(
-            &self.protocol_config,
-        ));
+        ext.add(NativesCostTable::from_protocol_config(protocol_config));
+        ext.add(ScratchRuntime::new(protocol_config));
         let tx_context = TxContext::new_from_components(
             &SuiAddress::ZERO,
             &TransactionDigest::default(),
@@ -237,7 +268,7 @@ impl VMTestSetup for SuiVMTestSetup {
         ext.add(TransactionContext::new_for_testing(Rc::new(RefCell::new(
             tx_context,
         ))));
-        ext.add(store);
+        ext.add(&builder.store);
         ext
     }
 }
