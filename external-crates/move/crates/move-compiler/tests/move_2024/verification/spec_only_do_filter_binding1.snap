@@ -1,12 +1,11 @@
 ---
 source: crates/move-compiler/tests/move_check_testsuite.rs
-assertion_line: 276
 info:
   flavor: core
   edition: 2024.alpha
   lint: false
 ---
-warning[W09002]: unused variable
+warning[WC09002]: unused variable
   ┌─ tests/move_2024/verification/spec_only_do_filter_binding1.move:8:13
   │
 8 │         let x0 = old !(_x);
@@ -14,8 +13,13 @@ warning[W09002]: unused variable
   │
   = This warning can be suppressed with '#[allow(unused_variable)]' applied to the 'module' or module member ('const', 'fun', or 'struct')
 
-error[E03005]: unbound unscoped name
+error[EC03006]: unexpected name in this position
   ┌─ tests/move_2024/verification/spec_only_do_filter_binding1.move:8:18
   │
+7 │     public fun foo(_x: u64) {
+  │                --- Similarly named defintion found here
 8 │         let x0 = old !(_x);
-  │                  ^^^ Unbound function 'old' in current scope
+  │                  ^^^
+  │                  │
+  │                  Could not resolve the name 'old'
+  │                  Did you mean: 'foo'
