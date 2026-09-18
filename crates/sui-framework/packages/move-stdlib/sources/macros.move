@@ -339,7 +339,7 @@ public(package) macro fun uq_int_div<$T, $U>(
 
 // === Q fixed-point macro (spec-only, arbitrary-precision Integer) ===
 
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public macro fun q_pow(
     $a: std::integer::Integer,
     $n: std::integer::Integer,

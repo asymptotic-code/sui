@@ -299,5 +299,5 @@ public(package) native fun has_child_object_with_ty<Child: key>(parent: address,
 
 /// Spec-only total borrow: returns the value stored under `name` on `object`
 /// if present, else an uninterpreted but deterministic value. Never aborts.
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public native fun borrow_or_unknown<Name: copy + drop + store, Value: store>(object: &UID, name: Name): &Value;

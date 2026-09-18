@@ -1,0 +1,16 @@
+---
+source: crates/move-compiler/tests/move_check_testsuite.rs
+assertion_line: 284
+info:
+  flavor: core
+  edition: 2024.alpha
+  lint: false
+---
+error[EC04001]: restricted visibility
+   ┌─ tests/move_2024/verification/spec_mode_visibility.move:12:34
+   │
+ 4 │     fun secret(): u64 { 7 }
+   │         ------ This function is internal to its module. Only 'public' and 'public(package)' functions can be called outside of their module
+   ·
+12 │     public fun not_spec(): u64 { 0x42::m::secret() }
+   │                                  ^^^^^^^^^^^^^^^^^ Invalid call to internal function '0x42::m::secret'

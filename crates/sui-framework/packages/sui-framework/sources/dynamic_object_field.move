@@ -326,5 +326,5 @@ macro fun exists_with_type_impl<$Name: copy + drop + store, $Value: key>(
 
 /// Spec-only total borrow: returns the object stored under `name` on `object`
 /// if present, else an uninterpreted but deterministic value. Never aborts.
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public native fun borrow_or_unknown<Name: copy + drop + store, Value: key + store>(object: &UID, name: Name): &Value;
