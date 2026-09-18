@@ -162,5 +162,5 @@ public fun from_raw(raw_value: u64): UQ32_32 {
     UQ32_32(raw_value)
 }
 
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public use fun std::q32::from_uq32_32 as UQ32_32.to_q32;

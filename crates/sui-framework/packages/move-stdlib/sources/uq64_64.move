@@ -162,5 +162,5 @@ public fun from_raw(raw_value: u128): UQ64_64 {
     UQ64_64(raw_value)
 }
 
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public use fun std::q64::from_uq64_64 as UQ64_64.to_q64;

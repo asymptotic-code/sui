@@ -159,21 +159,21 @@ public macro fun do_eq<$R: drop>($stop: u256, $f: |u256| -> $R) {
     std::macros::do_eq!($stop, $f)
 }
 
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public use fun std::integer::from_u256 as u256.to_int;
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public use fun std::integer::signed_from_u256 as u256.to_signed_int;
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public use fun std::real::from_u256 as u256.to_real;
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public use fun std::q32::from_u256 as u256.to_q32;
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public use fun std::q64::from_u256 as u256.to_q64;
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public use fun std::q128::from_u256 as u256.to_q128;
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public use fun std::q_wad::from_u256 as u256.to_q_wad;
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public use fun std::q_ray::from_u256 as u256.to_q_ray;
 
 // === Deprecated ===

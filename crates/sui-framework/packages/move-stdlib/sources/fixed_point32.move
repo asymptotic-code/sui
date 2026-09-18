@@ -114,5 +114,5 @@ public fun is_zero(num: FixedPoint32): bool {
     num.value == 0
 }
 
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 public use fun std::q32::from_fp32 as FixedPoint32.to_q32;
