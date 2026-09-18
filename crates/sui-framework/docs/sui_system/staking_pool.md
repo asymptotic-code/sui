@@ -863,6 +863,7 @@ Convert the given staked SUI to an FungibleStakedSui object
         <a href="../sui_system/staking_pool.md#sui_system_staking_pool_stake_activation_epoch">stake_activation_epoch</a>,
     );
     <b>let</b> <a href="../sui_system/staking_pool.md#sui_system_staking_pool_pool_token_amount">pool_token_amount</a> = exchange_rate_at_staking_epoch.<a href="../sui_system/staking_pool.md#sui_system_staking_pool_get_token_amount">get_token_amount</a>(principal.value());
+    <b>assert</b>!(<a href="../sui_system/staking_pool.md#sui_system_staking_pool_pool_token_amount">pool_token_amount</a> &gt; 0, <a href="../sui_system/staking_pool.md#sui_system_staking_pool_EStakedSuiBelowThreshold">EStakedSuiBelowThreshold</a>);
     <b>let</b> key = <a href="../sui_system/staking_pool.md#sui_system_staking_pool_FungibleStakedSuiDataKey">FungibleStakedSuiDataKey</a> {};
     <b>if</b> (!pool.extra_fields.contains(key)) {
         pool
@@ -1037,9 +1038,12 @@ Also called immediately upon withdrawal if the pool is inactive.
     pool.<a href="../sui_system/staking_pool.md#sui_system_staking_pool_sui_balance">sui_balance</a> = <b>if</b> (pool.<a href="../sui_system/staking_pool.md#sui_system_staking_pool_sui_balance">sui_balance</a> &gt;= pool.pending_total_sui_withdraw) {
         pool.<a href="../sui_system/staking_pool.md#sui_system_staking_pool_sui_balance">sui_balance</a> - pool.pending_total_sui_withdraw
     } <b>else</b> {
-        // the diff will be applied in the `<a href="../sui_system/staking_pool.md#sui_system_staking_pool_process_pending_stake">process_pending_stake</a>` function.
         <b>let</b> diff = pool.pending_total_sui_withdraw - pool.<a href="../sui_system/staking_pool.md#sui_system_staking_pool_sui_balance">sui_balance</a>;
-        pool.extra_fields.add(<a href="../sui_system/staking_pool.md#sui_system_staking_pool_UnderflowSuiBalance">UnderflowSuiBalance</a> {}, diff);
+        // While this key is expected to be removed in the next call to `<a href="../sui_system/staking_pool.md#sui_system_staking_pool_process_pending_stake">process_pending_stake</a>`,
+        // we do not call `<a href="../sui_system/staking_pool.md#sui_system_staking_pool_process_pending_stake">process_pending_stake</a>` <b>for</b> inactive pools — skip the bookkeeping.
+        <b>if</b> (!pool.<a href="../sui_system/staking_pool.md#sui_system_staking_pool_is_inactive">is_inactive</a>()) {
+            pool.extra_fields.add(<a href="../sui_system/staking_pool.md#sui_system_staking_pool_UnderflowSuiBalance">UnderflowSuiBalance</a> {}, diff);
+        };
         0
     };
     pool.pool_token_balance = <b>if</b> (pool.pool_token_balance &gt;= pool.pending_pool_token_withdraw) {
@@ -1099,12 +1103,12 @@ Called at epoch boundaries to process the pending stake.
 ## Function `withdraw_rewards`
 
 This function does the following:
-1. Calculates the total amount of SUI (including principal and rewards) that the provided pool tokens represent
-at the current exchange rate.
-2. Using the above number and the given <code>principal_withdraw_amount</code>, calculates the rewards portion of the
-stake we should withdraw.
-3. Withdraws the rewards portion from the rewards pool at the current exchange rate. We only withdraw the rewards
-portion because the principal portion was already taken out of the staker's self custodied StakedSui.
+    1. Calculates the total amount of SUI (including principal and rewards) that the provided pool tokens represent
+       at the current exchange rate.
+    2. Using the above number and the given <code>principal_withdraw_amount</code>, calculates the rewards portion of the
+       stake we should withdraw.
+    3. Withdraws the rewards portion from the rewards pool at the current exchange rate. We only withdraw the rewards
+       portion because the principal portion was already taken out of the staker's self custodied StakedSui.
 
 
 <pre><code><b>fun</b> <a href="../sui_system/staking_pool.md#sui_system_staking_pool_withdraw_rewards">withdraw_rewards</a>(pool: &<b>mut</b> <a href="../sui_system/staking_pool.md#sui_system_staking_pool_StakingPool">sui_system::staking_pool::StakingPool</a>, principal_withdraw_amount: u64, pool_token_withdraw_amount: u64, epoch: u64): <a href="../sui/balance.md#sui_balance_Balance">sui::balance::Balance</a>&lt;<a href="../sui/sui.md#sui_sui_SUI">sui::sui::SUI</a>&gt;

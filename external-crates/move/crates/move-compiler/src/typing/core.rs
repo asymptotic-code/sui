@@ -7,11 +7,11 @@ use crate::{
     diagnostics::{
         Diagnostic, DiagnosticReporter, Diagnostics,
         codes::{NameResolution, TypeSafety},
-        warning_filters::WarningFilters,
+        filter::FilterScope,
     },
-    editions::FeatureGate,
+    editions::{self, FeatureGate},
     expansion::ast::{self as E, AbilitySet, ModuleIdent, ModuleIdent_, Mutability, Visibility},
-    ice,
+    ice, ice_assert,
     naming::ast::{
         self as N, ANYTHING_TYPE, BlockLabel, BuiltinTypeName_, Color, DatatypeTypeParameter,
         EnumDefinition, IndexSyntaxMethods, ResolvedUseFuns, StructDefinition, TParam, TParamID,
@@ -34,6 +34,7 @@ use crate::{
     },
     typing::deprecation_warnings::Deprecations,
 };
+use indexmap::IndexMap;
 use known_attributes::AttributePosition;
 use move_ir_types::location::*;
 use move_symbol_pool::Symbol;
@@ -155,6 +156,8 @@ pub struct Context<'env, 'outer> {
     use_funs: Vec<UseFunsScope<'env, 'outer>>,
     pub current_function: Option<FunctionName>,
     pub in_macro_function: bool,
+    /// True only while speculatively typing an IDE macro body with diagnostics thrown away.
+    pub ide_typing_macro_body: bool,
     max_variable_color: RefCell<u16>,
     pub return_type: Option<Type>,
     locals: UniqueMap<Var, Type>,
@@ -453,7 +456,7 @@ impl<'env> ModuleContext<'env> {
         self.reporter.add_ide_annotation(loc, info);
     }
 
-    pub fn push_warning_filter_scope(&mut self, filters: WarningFilters) {
+    pub fn push_warning_filter_scope(&mut self, filters: FilterScope) {
         self.reporter.push_warning_filter_scope(filters)
     }
 
@@ -545,6 +548,7 @@ impl<'env> ModuleContext<'env> {
             use_funs,
             current_function: None,
             in_macro_function: false,
+            ide_typing_macro_body: false,
             max_variable_color: RefCell::new(0),
             return_type: None,
             locals: UniqueMap::new(),
@@ -754,8 +758,16 @@ impl<'env, 'outer> Context<'env, 'outer> {
         self.outer.current_module.as_ref()
     }
 
+    /// Checks the current feature using the currently-registered diagnostic reporter.
     pub fn check_feature(&self, package: Option<Symbol>, feature: FeatureGate, loc: Loc) -> bool {
-        self.outer.check_feature(package, feature, loc)
+        self.env()
+            .check_feature(&self.reporter, package, feature, loc)
+    }
+
+    /// Asserts that normal compiler errors already exist or IDE macro-body diagnostics are discarded.
+    pub fn assert_has_errors(&self, msg: &str) {
+        let has_errors = self.env().has_errors() || self.ide_typing_macro_body;
+        assert!(has_errors, "{msg}");
     }
 
     pub fn error_type(&mut self, loc: Loc) -> Type {
@@ -850,7 +862,7 @@ impl<'env, 'outer> Context<'env, 'outer> {
         self.reporter.add_ide_annotation(loc, info);
     }
 
-    pub fn push_warning_filter_scope(&mut self, filters: WarningFilters) {
+    pub fn push_warning_filter_scope(&mut self, filters: FilterScope) {
         self.reporter.push_warning_filter_scope(filters)
     }
 
@@ -1265,7 +1277,7 @@ impl<'env, 'outer> Context<'env, 'outer> {
         }
 
         different.append(&mut same_filtered);
-        different.sort_by(|a1, a2| a1.method_name.cmp(&a2.method_name));
+        different.sort_by_key(|a1| a1.method_name);
         different
     }
 
@@ -1341,7 +1353,8 @@ impl TVarCounter {
 #[derive(Clone, Debug)]
 pub struct Subst {
     tvars: HashMap<TVar, Type>,
-    tvar_constraints: HashMap<TVar, VarConstraint>,
+    // IndexMap (rather than HashMap) so iteration order matches insertion order.
+    tvar_constraints: IndexMap<TVar, VarConstraint>,
 }
 
 #[derive(Clone, Debug)]
@@ -1356,7 +1369,7 @@ impl Subst {
     pub fn empty() -> Self {
         Self {
             tvars: HashMap::new(),
-            tvar_constraints: HashMap::new(),
+            tvar_constraints: IndexMap::new(),
         }
     }
 
@@ -1952,30 +1965,27 @@ pub fn make_constant_type(
     m: &ModuleIdent,
     c: &ConstantName,
 ) -> Type {
-    let in_current_module = context.is_current_module(m);
     context.emit_warning_if_deprecated(m, c.0, None);
-    let (defined_loc, signature) = {
+    let (defined_loc, visibility, signature) = {
         let ConstantInfo {
             doc: _,
             index: _,
             attributes: _,
             defined_loc,
+            visibility,
             signature,
             value: _,
         } = context.constant_info(m, c);
-        (*defined_loc, signature.clone())
+        (*defined_loc, *visibility, signature.clone())
     };
-    if !in_current_module {
-        let msg = format!("Invalid access of '{}::{}'", m, c);
-        let internal_msg = "Constants are internal to their module, and cannot can be accessed \
-                            outside of their module";
-        context.add_diag(diag!(
-            TypeSafety::Visibility,
-            (loc, msg),
-            (defined_loc, internal_msg)
-        ));
-    }
-
+    check_member_visibility(
+        context,
+        defined_loc,
+        loc,
+        m,
+        VisibilityMember::Constant(c),
+        visibility,
+    );
     signature
 }
 
@@ -2092,13 +2102,15 @@ pub fn make_function_type(
     let return_ty = make_function_type_no_visibility_check(context, loc, m, f, ty_args_opt);
     let finfo = context.function_info(m, f);
     let defined_loc = finfo.defined_loc;
-    check_function_visibility(
+    check_member_visibility(
         context,
         defined_loc,
         loc,
         m,
-        f,
-        finfo.entry,
+        VisibilityMember::Function {
+            name: f,
+            entry: finfo.entry,
+        },
         finfo.visibility,
     );
     return_ty
@@ -2169,46 +2181,140 @@ pub fn make_function_type_no_visibility_check(
     }
 }
 
-fn check_function_visibility(
+//**************************************************************************************************
+// Member Visibility
+//**************************************************************************************************
+
+/// A module member subject to visibility checking. Constants only permit `Internal` and
+/// `Package` visibility; the other visibilities are rejected during expansion.
+enum VisibilityMember<'a> {
+    Function {
+        name: &'a FunctionName,
+        entry: Option<Loc>,
+    },
+    Constant(&'a ConstantName),
+}
+
+impl VisibilityMember<'_> {
+    fn kind(&self) -> &'static str {
+        match self {
+            VisibilityMember::Function { .. } => "function",
+            VisibilityMember::Constant(_) => "constant",
+        }
+    }
+
+    /// "call to"/"access of", for `Invalid {} ...` messages
+    fn access(&self) -> &'static str {
+        match self {
+            VisibilityMember::Function { .. } => "call to",
+            VisibilityMember::Constant(_) => "access of",
+        }
+    }
+
+    fn access_noun(&self) -> &'static str {
+        match self {
+            VisibilityMember::Function { .. } => "call",
+            VisibilityMember::Constant(_) => "access",
+        }
+    }
+
+    fn verb(&self) -> &'static str {
+        match self {
+            VisibilityMember::Function { .. } => "called",
+            VisibilityMember::Constant(_) => "accessed",
+        }
+    }
+
+    fn full_name(&self, m: &ModuleIdent) -> String {
+        match self {
+            VisibilityMember::Function { name, .. } => format!("{}::{}", m, name),
+            VisibilityMember::Constant(c) => format!("{}::{}", m, c),
+        }
+    }
+}
+
+fn check_member_visibility(
     context: &mut Context,
     defined_loc: Loc,
     usage_loc: Loc,
     m: &ModuleIdent,
-    f: &FunctionName,
-    entry_opt: Option<Loc>,
+    member: VisibilityMember<'_>,
     visibility: Visibility,
 ) {
+    use VisibilityMember as VM;
     let in_current_module = context.is_current_module(m);
-    let public_for_testing =
-        public_testing_visibility(context.env(), context.current_package(), f, entry_opt);
+    if let VM::Constant(_) = &member {
+        // Inside a macro function definition, visibility is resolved in the scope of the caller
+        // at each expansion site
+        if in_current_module || context.in_macro_function {
+            return;
+        }
+        let cross_module_constants = context
+            .env()
+            .supports_feature(context.current_package(), FeatureGate::CrossModuleConstants);
+        if !cross_module_constants {
+            let msg = format!("Invalid access of '{}'", member.full_name(m));
+            let internal_msg = "Constants are internal to their module, and cannot be \
+                                accessed outside of their module";
+            let mut diag = diag!(
+                TypeSafety::Visibility,
+                (usage_loc, msg),
+                (defined_loc, internal_msg)
+            );
+            if let Some(note) = editions::feature_edition_error_msg(
+                context.env().edition(context.current_package()),
+                FeatureGate::CrossModuleConstants,
+            ) {
+                diag.add_note(note);
+            }
+            context.add_diag(diag);
+            return;
+        }
+    }
+    let public_for_testing = match &member {
+        VM::Function { name, entry } => {
+            public_testing_visibility(context.env(), context.current_package(), name, *entry)
+        }
+        VM::Constant(_) => None,
+    };
     let is_testing_context = context.is_testing_context();
     let is_spec_context = context.is_spec_context();
-
-    let supports_public_package = context
-        .env()
-        .supports_feature(context.current_package(), FeatureGate::PublicPackage);
     match visibility {
         _ if is_testing_context && public_for_testing.is_some() => (),
         _ if is_spec_context => (),
         Visibility::Internal if in_current_module => (),
         Visibility::Internal => {
-            let friend_or_package = if supports_public_package {
-                Visibility::PACKAGE
-            } else {
-                Visibility::FRIEND
+            let valid_visibilities = match &member {
+                VM::Function { .. } => {
+                    let supports_public_package = context
+                        .env()
+                        .supports_feature(context.current_package(), FeatureGate::PublicPackage);
+                    let friend_or_package = if supports_public_package {
+                        Visibility::PACKAGE
+                    } else {
+                        Visibility::FRIEND
+                    };
+                    format!("'{}' and '{}'", Visibility::PUBLIC, friend_or_package)
+                }
+                VM::Constant(_) => format!("'{}'", Visibility::PACKAGE),
             };
             let internal_msg = format!(
-                "This function is internal to its module. Only '{}' and '{}' functions can \
-                 be called outside of their module",
-                Visibility::PUBLIC,
-                friend_or_package,
+                "This {kind} is internal to its module. Only {valid_visibilities} {kind}s can \
+                 be {verb} outside of their module",
+                kind = member.kind(),
+                verb = member.verb(),
             );
             report_visibility_error_(
                 context,
                 public_for_testing,
                 (
                     usage_loc,
-                    format!("Invalid call to internal function '{m}::{f}'"),
+                    format!(
+                        "Invalid {} internal {} '{}'",
+                        member.access(),
+                        member.kind(),
+                        member.full_name(m)
+                    ),
                 ),
                 (defined_loc, internal_msg),
             );
@@ -2216,18 +2322,23 @@ fn check_function_visibility(
         Visibility::Package(loc)
             if in_current_module || context.current_module_shares_package_and_address(m) =>
         {
-            context.record_current_module_as_friend(m, loc);
+            // Constant uses are resolved entirely at compile time and create no linkage, so no
+            // friend relationship is recorded for them
+            if matches!(member, VM::Function { .. }) {
+                context.record_current_module_as_friend(m, loc);
+            }
         }
         Visibility::Package(vis_loc) => {
             let msg = format!(
-                "Invalid call to '{}' visible function '{}::{}'",
+                "Invalid {} '{}' visible {} '{}'",
+                member.access(),
                 Visibility::PACKAGE,
-                m,
-                f
+                member.kind(),
+                member.full_name(m)
             );
             let internal_msg = format!(
-                "A '{}' function can only be called from the same address and package as \
-                module '{}' in package '{}'. This call is from address '{}' in package '{}'",
+                "A '{}' {kind} can only be {verb} from the same address and package as \
+                module '{}' in package '{}'. This {noun} is from address '{}' in package '{}'",
                 Visibility::PACKAGE,
                 m,
                 context
@@ -2243,7 +2354,10 @@ fn check_function_visibility(
                     .current_module()
                     .and_then(|cur_module| context.module_info(cur_module).package)
                     .map(|pkg_name| format!("{}", pkg_name))
-                    .unwrap_or("<unknown package>".to_string())
+                    .unwrap_or("<unknown package>".to_string()),
+                kind = member.kind(),
+                verb = member.verb(),
+                noun = member.access_noun(),
             );
             report_visibility_error_(
                 context,
@@ -2252,11 +2366,23 @@ fn check_function_visibility(
                 (vis_loc, internal_msg),
             );
         }
+        // rejected during expansion
+        Visibility::Friend(vis_loc) | Visibility::Public(vis_loc)
+            if matches!(member, VM::Constant(_)) =>
+        {
+            ice_assert!(
+                context.reporter,
+                context.env().has_errors(),
+                vis_loc,
+                "constant declared with disallowed visibility"
+            );
+        }
         Visibility::Friend(_) if in_current_module || context.current_module_is_a_friend_of(m) => {}
         Visibility::Friend(vis_loc) => {
             let msg = format!(
-                "Invalid call to '{}' visible function '{m}::{f}'",
+                "Invalid call to '{}' visible function '{}'",
                 Visibility::FRIEND,
+                member.full_name(m)
             );
             let internal_msg =
                 format!("This function can only be called from a 'friend' of module '{m}'",);
@@ -2404,8 +2530,25 @@ pub fn check_call_arity<S: std::fmt::Display, F: Fn() -> S>(
 pub fn solve_constraints(context: &mut Context) {
     use BuiltinTypeName_ as BT;
 
-    // Solve these constraints first to minimize error reporting.
+    // Resolve divergent type variables first, so that downstream constraints (e.g., base type)
+    // can see Void rather than an unresolved TVar. `tvar_constraints` is an IndexMap so iteration
+    // is deterministic using insertion order.
+    {
+        let var_constraints = context.subst.tvar_constraints.clone();
+        let mut subst = std::mem::replace(&mut context.subst, Subst::empty());
+        for (var, constraint) in &var_constraints {
+            if let VarConstraint::Divergent(loc) = constraint {
+                let last_tvar = forward_tvar(&subst, *var);
+                if subst.get(last_tvar).is_none() {
+                    join_bind_tvar(&mut subst, *loc, last_tvar, sp(*loc, VOID_TYPE.clone()))
+                        .expect("ICE failed handling unbound divergent type");
+                }
+            }
+        }
+        context.subst = subst;
+    }
 
+    // Solve these constraints now that divergent types have been resolved to Void.
     let constraints = std::mem::take(&mut context.constraints);
     for constraint in constraints {
         match constraint {
@@ -2438,6 +2581,9 @@ pub fn solve_constraints(context: &mut Context) {
 
     for (var, constraint) in var_constraints.into_iter() {
         match constraint {
+            VarConstraint::Divergent(_) => {
+                // Already resolved above.
+            }
             VarConstraint::Num(loc) => {
                 let tvar = sp(loc, TI::Var(var).into());
                 let unfolded_ty_ = unfold_type(&subst, &tvar).value;
@@ -2484,13 +2630,6 @@ pub fn solve_constraints(context: &mut Context) {
                         .unwrap()
                         .0;
                     subst = next_subst;
-                }
-            }
-            VarConstraint::Divergent(loc) => {
-                let last_tvar = forward_tvar(&subst, var);
-                if subst.get(last_tvar).is_none() {
-                    join_bind_tvar(&mut subst, loc, last_tvar, sp(loc, VOID_TYPE.clone()))
-                        .expect("ICE failed handling unbound divergent type");
                 }
             }
         }
@@ -2664,12 +2803,15 @@ fn solve_base_type_constraint(context: &mut Context, loc: Loc, msg: String, ty: 
                 (tyloc, tmsg)
             ))
         }
-        TI::UnresolvedError
-        | TI::Anything
-        | TI::Void
-        | TI::Param(_)
-        | TI::Apply(_, _, _)
-        | TI::Fun(_, _) => (),
+        TI::Void => {
+            let tmsg = "Could not find a concrete type for this expression";
+            context.add_diag(diag!(
+                TypeSafety::ExpectedBaseType,
+                (loc, msg),
+                (tyloc, tmsg)
+            ))
+        }
+        TI::UnresolvedError | TI::Anything | TI::Param(_) | TI::Apply(_, _, _) | TI::Fun(_, _) => {}
     }
 }
 

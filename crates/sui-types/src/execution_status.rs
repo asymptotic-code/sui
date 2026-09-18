@@ -3,9 +3,11 @@
 
 use crate::ObjectID;
 use crate::base_types::SuiAddress;
+use crate::error::{BoxError, ExecutionError, ExecutionErrorMetadata, ExecutionErrorTrait};
 use move_binary_format::file_format::{CodeOffset, TypeParameterIndex};
 use move_core_types::language_storage::ModuleId;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use sui_macros::EnumVariantOrder;
 use thiserror::Error;
@@ -25,6 +27,52 @@ pub enum ExecutionStatus {
 pub struct ExecutionFailure {
     pub error: ExecutionErrorKind,
     pub command: Option<CommandIndex>,
+}
+
+impl ExecutionFailure {
+    pub fn new(error: ExecutionErrorKind, command: Option<CommandIndex>) -> Self {
+        ExecutionFailure { error, command }
+    }
+}
+
+impl From<ExecutionError> for ExecutionFailure {
+    fn from(value: ExecutionError) -> Self {
+        Self {
+            error: value.kind().clone(),
+            command: value.command(),
+        }
+    }
+}
+
+impl Error for ExecutionFailure {}
+
+impl Display for ExecutionFailure {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Execution Failure: {}", self.error)
+    }
+}
+
+impl ExecutionErrorTrait for ExecutionFailure {
+    fn new(
+        failure: ExecutionFailure,
+        _source: Option<BoxError>,
+        _metadata: ExecutionErrorMetadata,
+    ) -> Self {
+        failure
+    }
+
+    fn with_command_index(self, command: CommandIndex) -> Self {
+        Self {
+            command: Some(command),
+            ..self
+        }
+    }
+    fn kind(&self) -> &ExecutionErrorKind {
+        &self.error
+    }
+    fn command(&self) -> Option<CommandIndex> {
+        self.command
+    }
 }
 
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
@@ -347,6 +395,12 @@ pub enum CommandArgumentError {
         command."
     )]
     InvalidReferenceArgument,
+    #[error(
+        "Invalid usage of TxContext in the function signature. TxContext can only be used by \
+        reference, `&TxContext` or `&mut TxContext`. If used mutably, it must be the only \
+        TxContext parameter, and TxContext can never be returned from a Move call."
+    )]
+    InvalidTxContext,
 }
 
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize, Hash, Error)]
@@ -414,11 +468,8 @@ impl Display for MoveLocation {
 }
 
 impl ExecutionStatus {
-    pub fn new_failure(
-        error: ExecutionErrorKind,
-        command: Option<CommandIndex>,
-    ) -> ExecutionStatus {
-        ExecutionStatus::Failure(ExecutionFailure { error, command })
+    pub fn new_failure(failure: ExecutionFailure) -> ExecutionStatus {
+        ExecutionStatus::Failure(failure)
     }
 
     pub fn is_ok(&self) -> bool {

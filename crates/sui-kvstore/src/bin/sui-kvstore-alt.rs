@@ -8,17 +8,17 @@ use anyhow::Result;
 use clap::Parser;
 use sui_indexer_alt_framework::IndexerArgs;
 use sui_indexer_alt_framework::ingestion::ClientArgs;
-use sui_indexer_alt_framework::pipeline::CommitterConfig;
 use sui_indexer_alt_framework::service::Error;
 use sui_indexer_alt_metrics::MetricsArgs;
 use sui_kvstore::BigTableClient;
 use sui_kvstore::BigTableIndexer;
-use sui_kvstore::BigTableStore;
 use sui_kvstore::IndexerConfig;
+use sui_kvstore::default_committer_config;
 use sui_kvstore::set_write_legacy_data;
 use sui_protocol_config::Chain;
 use telemetry_subscribers::TelemetryConfig;
 use tracing::info;
+use tracing::warn;
 
 #[derive(Parser)]
 #[command(name = "sui-kvstore-alt")]
@@ -50,6 +50,11 @@ struct Args {
     /// Enable writing legacy data: deprecated combined transaction tx column
     #[arg(long)]
     write_legacy_data: bool,
+
+    /// Deprecated and ignored: the pipelines this used to gate are now always
+    /// registered. Still accepted so existing deployments keep starting.
+    #[arg(long = "enable-alpha-pipeline", value_name = "PIPELINE_NAME")]
+    enable_alpha_pipelines: Vec<String>,
 
     #[command(flatten)]
     metrics_args: MetricsArgs,
@@ -87,6 +92,12 @@ async fn main() -> Result<()> {
     info!("Starting sui-kvstore-alt indexer");
     info!(instance_id = %args.instance_id);
     info!("Config: {:#?}", config);
+    if !args.enable_alpha_pipelines.is_empty() {
+        warn!(
+            pipelines = ?args.enable_alpha_pipelines,
+            "--enable-alpha-pipeline is deprecated and ignored; these pipelines are always registered",
+        );
+    }
 
     let channel_timeout = config
         .bigtable_channel_timeout_ms
@@ -97,6 +108,10 @@ async fn main() -> Result<()> {
         .clone()
         .finish(config.bigtable_connection_pool_size);
 
+    let registry = prometheus::Registry::new();
+    let metrics_service =
+        sui_indexer_alt_metrics::MetricsService::new(args.metrics_args, registry.clone());
+
     let client = BigTableClient::new_remote(
         args.instance_id,
         args.bigtable_project,
@@ -104,22 +119,17 @@ async fn main() -> Result<()> {
         channel_timeout,
         args.bigtable_max_decoding_message_size,
         "sui-kvstore-alt".to_string(),
-        None,
+        Some(&registry),
         args.app_profile_id,
         pool_config,
+        config.batch_write_flow_control,
     )
     .await?;
 
-    let store = BigTableStore::new(client);
-
-    let registry = prometheus::Registry::new_custom(Some("kvstore_alt".into()), None)?;
-    let metrics_service =
-        sui_indexer_alt_metrics::MetricsService::new(args.metrics_args, registry.clone());
-
     let indexer_config = config.clone();
-    let committer = config.committer.finish(CommitterConfig::default());
+    let committer = config.committer.finish(default_committer_config());
     let bigtable_indexer = BigTableIndexer::new(
-        store,
+        client,
         args.indexer_args,
         args.client_args,
         config.ingestion,
@@ -132,7 +142,7 @@ async fn main() -> Result<()> {
     .await?;
 
     let metrics_handle = metrics_service.run().await?;
-    let service = bigtable_indexer.indexer.run().await?;
+    let service = bigtable_indexer.run().await?;
 
     match service.attach(metrics_handle).main().await {
         Ok(()) => {}

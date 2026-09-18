@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    diagnostics::warning_filters::{WarningFilters, WarningFiltersTable},
+    diagnostics::filter::FilterScope,
     expansion::ast::{
         AbilitySet, Attributes, DottedUsage, Fields, Friend, ImplicitUseFunCandidate, ModuleIdent,
         Mutability, Value, Value_, Visibility, ability_constraints_ast_debug,
@@ -33,8 +33,6 @@ use std::{
 #[derive(Debug, Clone)]
 pub struct Program {
     pub info: NamingProgramInfo,
-    /// Safety: This table should not be dropped as long as any `WarningFilters` are alive
-    pub warning_filters_table: Arc<WarningFiltersTable>,
     pub inner: Program_,
 }
 
@@ -151,7 +149,7 @@ pub struct StdlibDefinitions {
 pub struct ModuleDefinition {
     pub doc: DocComment,
     pub loc: Loc,
-    pub warning_filter: WarningFilters,
+    pub warning_filter: FilterScope,
     // package name metadata from compiler arguments, not used for any language rules
     pub package_name: Option<Symbol>,
     /// The named address map used by this module during `expansion`.
@@ -181,7 +179,7 @@ pub struct DatatypeTypeParameter {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct StructDefinition {
     pub doc: DocComment,
-    pub warning_filter: WarningFilters,
+    pub warning_filter: FilterScope,
     // index in the original order as defined in the source file
     pub index: usize,
     pub loc: Loc,
@@ -200,7 +198,7 @@ pub enum StructFields {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDefinition {
     pub doc: DocComment,
-    pub warning_filter: WarningFilters,
+    pub warning_filter: FilterScope,
     // index in the original order as defined in the source file
     pub index: usize,
     pub loc: Loc,
@@ -247,7 +245,7 @@ pub type FunctionBody = Spanned<FunctionBody_>;
 pub struct Function {
     pub doc: DocComment,
     pub loc: Loc,
-    pub warning_filter: WarningFilters,
+    pub warning_filter: FilterScope,
     // index in the original order as defined in the source file
     pub index: usize,
     pub attributes: Attributes,
@@ -265,11 +263,12 @@ pub struct Function {
 #[derive(PartialEq, Debug, Clone)]
 pub struct Constant {
     pub doc: DocComment,
-    pub warning_filter: WarningFilters,
+    pub warning_filter: FilterScope,
     // index in the original order as defined in the source file
     pub index: usize,
     pub attributes: Attributes,
     pub loc: Loc,
+    pub visibility: Visibility,
     pub signature: Type,
     pub value: Exp,
 }
@@ -1025,6 +1024,19 @@ impl Type_ {
     pub fn inner(&self) -> &TypeInner {
         &self.0
     }
+
+    pub fn contains_error(&self) -> bool {
+        use TypeInner as T;
+        match &*self.0 {
+            T::UnresolvedError => true,
+            T::Ref(_, inner) => inner.value.contains_error(),
+            T::Apply(_, _, tyargs) => tyargs.iter().any(|t| t.value.contains_error()),
+            T::Fun(params, ret) => {
+                params.iter().any(|t| t.value.contains_error()) || ret.value.contains_error()
+            }
+            T::Unit | T::Param(_) | T::Var(_) | T::Anything | T::Void => false,
+        }
+    }
 }
 
 impl From<TypeInner> for Type_ {
@@ -1583,6 +1595,7 @@ impl AstDebug for (ConstantName, &Constant) {
                 index,
                 attributes,
                 loc: _loc,
+                visibility,
                 signature,
                 value,
             },
@@ -1590,6 +1603,7 @@ impl AstDebug for (ConstantName, &Constant) {
         doc.ast_debug(w);
         warning_filter.ast_debug(w);
         attributes.ast_debug(w);
+        visibility.ast_debug(w);
         w.write(format!("const#{index} {name}:"));
         signature.ast_debug(w);
         w.write(" = ");

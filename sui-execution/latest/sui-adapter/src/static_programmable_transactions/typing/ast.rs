@@ -4,11 +4,13 @@
 use crate::{
     gas_charger::GasPayment,
     static_programmable_transactions::{
-        linkage::resolved_linkage::ResolvedLinkage, loading::ast as L, spanned::Spanned,
+        linkage::resolved_linkage::{ExecutableLinkage, ResolvedLinkage},
+        loading::ast::{self as L, PackagePayload},
+        spanned::Spanned,
     },
 };
 use indexmap::{IndexMap, IndexSet};
-use move_core_types::{account_address::AccountAddress, u256::U256};
+use move_core_types::u256::U256;
 use move_vm_runtime::execution::values::VectorSpecialization;
 use std::cell::OnceCell;
 use sui_types::base_types::{ObjectID, ObjectRef};
@@ -31,7 +33,11 @@ pub struct Transaction {
     /// All receiving inputs
     pub receiving: Vec<ReceivingInput>,
     pub withdrawal_compatibility_conversions: IndexMap<Location, WithdrawalCompatibilityConversion>,
+    /// Original number of commands in the transaction. All Spanned indices in the AST should be
+    /// < `original_command_len`
+    pub original_command_len: usize,
     pub commands: Commands,
+    pub unified_linkage: Option<ExecutableLinkage>,
 }
 
 /// The original index into the `input` vector of the transaction, before the inputs were split
@@ -71,9 +77,11 @@ pub struct ReceivingInput {
 #[derive(Debug)]
 pub struct WithdrawalInput {
     pub original_input_index: InputIndex,
-    /// The full type `sui::funds_accumulator::Withdrawal<T>`
+    /// The full type.
+    /// Either `sui::funds_accumulator::Withdrawal<T>` for a direct source, or
+    /// `sui::allowance::AllowanceWithdrawal<T>` for an allowance source
     pub ty: Type,
-    pub owner: AccountAddress,
+    pub source: WithdrawalSource,
     /// This amount is verified to be <= the max for the type described by the `T` in `ty`
     pub amount: U256,
 }
@@ -91,6 +99,8 @@ pub type Commands = Vec<Command>;
 pub type ObjectArg = L::ObjectArg;
 
 pub type Type = L::Type;
+
+pub type WithdrawalSource = L::WithdrawalSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Information for a given constraint for input bytes
@@ -116,9 +126,10 @@ pub struct Command_ {
     /// checker to remove unused references to allow potentially reuse of parent references.
     /// The value at result `j` is unused and can be dropped if `drop_value[j]` is true.
     pub drop_values: Vec</* drop value */ bool>,
-    /// The set of object shared object IDs that are consumed by this command.
-    /// After this command is executed, these objects must be either reshared or deleted.
-    pub consumed_shared_objects: Vec<ObjectID>,
+    /// Marks if the command consumes by value either a legacy shared object, or a party object with
+    /// post-execution checks. A party object has post-execution checks if it is used with mutable
+    /// usage and is missing one of the mutable permissions.
+    pub incurs_post_execution_checks: bool,
 }
 
 #[derive(Debug)]
@@ -128,9 +139,9 @@ pub enum Command__ {
     SplitCoins(/* Coin<T> */ Type, Argument, Vec<Argument>),
     MergeCoins(/* Coin<T> */ Type, Argument, Vec<Argument>),
     MakeMoveVec(/* T for vector<T> */ Type, Vec<Argument>),
-    Publish(Vec<Vec<u8>>, Vec<ObjectID>, ResolvedLinkage),
+    Publish(PackagePayload, Vec<ObjectID>, ResolvedLinkage),
     Upgrade(
-        Vec<Vec<u8>>,
+        PackagePayload,
         Vec<ObjectID>,
         ObjectID,
         Argument,

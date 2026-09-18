@@ -1618,10 +1618,8 @@ For candidate validators, the name is not checked for duplicates.
     <b>let</b> <a href="../sui_system/validator.md#sui_system_validator">validator</a> = self.<a href="../sui_system/sui_system_state_inner.md#sui_system_sui_system_state_inner_validators">validators</a>.any_validator_mut(validator_address);
     <a href="../sui_system/validator.md#sui_system_validator">validator</a>.update_name(name);
     <b>let</b> <a href="../sui_system/validator.md#sui_system_validator">validator</a>: &Validator = <a href="../sui_system/validator.md#sui_system_validator">validator</a>; // Avoid parallel mutable borrow.
-    // only run the duplicate check <b>for</b> non-candidates
-    <b>if</b> (!self.<a href="../sui_system/sui_system_state_inner.md#sui_system_sui_system_state_inner_validators">validators</a>.is_validator_candidate(validator_address)) {
-        self.<a href="../sui_system/sui_system_state_inner.md#sui_system_sui_system_state_inner_validators">validators</a>.assert_no_pending_or_active_duplicates(<a href="../sui_system/validator.md#sui_system_validator">validator</a>);
-    };
+    // always check <b>for</b> duplicates in active/pending state
+    self.<a href="../sui_system/sui_system_state_inner.md#sui_system_sui_system_state_inner_validators">validators</a>.assert_no_pending_or_active_duplicates(<a href="../sui_system/validator.md#sui_system_validator">validator</a>);
 }
 </code></pre>
 
@@ -2202,7 +2200,7 @@ This function should be called at the end of an epoch, and advances the system t
 It does the following things:
 1. Add storage charge to the storage fund.
 2. Burn the storage rebates from the storage fund. These are already refunded to transaction sender's
-gas coins.
+   gas coins.
 3. Distribute computation charge to validator stake.
 4. Update all validators.
 

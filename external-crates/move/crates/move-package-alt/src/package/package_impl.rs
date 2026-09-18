@@ -2,7 +2,7 @@
 // Copyright (c) The Move Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use derive_where::derive_where;
 use sha2::{Digest as _, Sha256};
@@ -12,23 +12,23 @@ use tracing::debug;
 use super::manifest::Manifest;
 use super::package_lock::PackageSystemLock;
 use super::paths::PackagePath;
+use crate::errors::FileHandle;
 use crate::{
     compatibility::legacy::LegacyData,
     dependency::Pinned,
-    package::{manifest::ManifestError, package_loader::PackageLoader},
+    package::{manifest::ManifestError, package_loader::PackageConfig},
     schema::{
         CachedPackageInfo, DefaultDependency, ManifestDependencyInfo, ParsedManifest, Publication,
     },
 };
-use crate::{dependency::FetchedDependency, schema::ReplacementDependency};
+use crate::{dependency::fetch, schema::ReplacementDependency};
 use crate::{
-    dependency::{CombinedDependency, PinnedDependencyInfo},
+    dependency::{CombinedDependency, PinnedDependency},
     errors::{PackageError, PackageResult},
     flavor::MoveFlavor,
     package::manifest::Digest,
     schema::{Environment, OriginalID, PackageMetadata, PackageName},
 };
-use crate::{errors::FileHandle, package::package_loader::PackageConfig};
 
 pub type EnvironmentName = String;
 pub type EnvironmentID = String;
@@ -66,48 +66,57 @@ pub struct Package<F: MoveFlavor> {
     pub dummy_addr: OriginalID,
 }
 
+/// Read the publication recorded for `env` at the package rooted in `dir`, consulting the modern
+/// pubfile and then a legacy lockfile, without loading the dependency graph. Returns `None` if the
+/// package records no publication for `env`.
+///
+/// This resolves the publication the same way [`Package::load`] does, so a caller learns a package's
+/// published address exactly as the package system would resolve it when linking against that
+/// package, without paying for a full graph load.
+///
+/// This acquires an exclusive per-package filesystem lock while it reads, the same lock a
+/// `RootPackage` holds for its package. The lock is not reentrant: do not call this while the
+/// current task already holds it for the same package (for instance, while a `RootPackage` for the
+/// same directory is alive), or the call will deadlock.
+pub async fn read_publication<F: MoveFlavor>(
+    dir: &Path,
+    env: &Environment,
+    flavor: &F,
+) -> PackageResult<Option<Publication<F>>> {
+    let path = PackagePath::new(dir.to_path_buf())?;
+    // TODO: this self-acquires a non-reentrant per-package lock (see the doc comment above). The
+    // clean fix is to centralize the lock in `PackageLoader` and route both `RootPackage`
+    // construction and publication reads through it, so callers share one acquisition rather than
+    // deadlocking on a second one.
+    let mtx = path.lock()?;
+    // This reads recorded metadata for a package the caller may not own (for example, verifying
+    // someone else's published source), so it must not emit advice about that package's manifest.
+    let (_, _, publication) =
+        Package::<F>::read_manifest_and_publication(&path, env, false, &mtx, flavor).await?;
+    Ok(publication)
+}
+
 impl<F: MoveFlavor> Package<F> {
-    /// Fetch [dep] (relative to [self]) and load a package from the fetched source
-    /// Makes a best effort to translate old-style packages into the current format,
+    /// Fetch `dep` (relative to `self`) and load a package from the fetched source.
+    /// Makes a best effort to translate old-style packages into the current format.
     pub async fn load(
         dep: Pinned,
         env: &Environment,
         mtx: &PackageSystemLock,
-        config: &PackageConfig,
+        config: &PackageConfig<F>,
     ) -> PackageResult<Self> {
         debug!("loading package {:?}", dep);
-        let path = FetchedDependency::fetch(&dep, config.allow_dirty).await?;
+        let flavor = &*config.flavor;
+        let path = fetch::fetch(&dep, config.allow_dirty, &config.chain_id).await?;
 
-        // try to load a legacy manifest (with an `[addresses]` section)
-        //   - if it fails, load a modern manifest (and return any errors)
-        let legacy_manifest = path.read_legacy_manifest::<F>(env, dep.is_root(), mtx)?;
-        let (file_handle, manifest) = if let Some(result) = legacy_manifest {
-            result
-        } else {
-            let manifest = Manifest::read_from_file(&path, mtx)?;
-            check_for_environment::<F>(&manifest, &env.name)?;
-
-            (*manifest.file_handle(), manifest.into_parsed())
-        };
-
-        F::validate_manifest(&manifest)
-            .map_err(|msg| ManifestError::flavor_rejected_manifest(file_handle, msg))?;
-
-        // try to load the address from the modern lockfile
-        //   - if it fails, look in the legacy data
-        //   - if that fails, use a dummy address
-        let publication = Self::load_publication(&path, env.name(), mtx)?.or_else(|| {
-            manifest
-                .legacy_data
-                .as_ref()
-                .and_then(|legacy| legacy.publication::<F>(env))
-        });
+        let (file_handle, manifest, publication) =
+            Self::read_manifest_and_publication(&path, env, dep.is_root(), mtx, flavor).await?;
 
         // TODO: try to gather dependencies from the modern lockfile
         //   - if it fails (no lockfile / out of date lockfile), compute them from the manifest
         //     (adding system deps)
 
-        let deps = Self::deps_from_manifest(&file_handle, &manifest, env).await?;
+        let deps = Self::deps_from_manifest(&file_handle, &manifest, env, flavor).await?;
 
         // Fail if any of the deps has the same name as the package
         if deps
@@ -136,10 +145,7 @@ impl<F: MoveFlavor> Package<F> {
             dummy_addr,
         };
 
-        debug!(
-            "successfully loaded {:?}",
-            result.dep_for_self.unfetched_path()
-        );
+        debug!("successfully loaded {}", result.dep_for_self);
         Ok(result)
     }
 
@@ -219,6 +225,50 @@ impl<F: MoveFlavor> Package<F> {
         &self.metadata
     }
 
+    /// Read the manifest for the (already-fetched) package at `path` and the publication recorded
+    /// for `env` — from the modern pubfile, falling back to a legacy lockfile — without resolving
+    /// the dependency graph. Shared by [`Self::load`] and [`read_publication`].
+    ///
+    /// `display_warnings` enables user-facing advice about the package's manifest (such as
+    /// redundant implicit dependencies); pass it only when loading a package the caller authors.
+    async fn read_manifest_and_publication(
+        path: &PackagePath,
+        env: &Environment,
+        display_warnings: bool,
+        mtx: &PackageSystemLock,
+        flavor: &F,
+    ) -> PackageResult<(FileHandle, ParsedManifest, Option<Publication<F>>)> {
+        // try to load a legacy manifest (with an `[addresses]` section)
+        //   - if it fails, load a modern manifest (and return any errors)
+        let legacy_manifest = path
+            .read_legacy_manifest::<F>(env, display_warnings, mtx, flavor)
+            .await?;
+        let (file_handle, manifest) = if let Some(result) = legacy_manifest {
+            result
+        } else {
+            let manifest = Manifest::read_from_file(path, mtx)?;
+            check_for_environment(&manifest, &env.name, flavor)?;
+
+            (*manifest.file_handle(), manifest.into_parsed())
+        };
+
+        flavor
+            .validate_manifest(&manifest)
+            .map_err(|msg| ManifestError::flavor_rejected_manifest(file_handle, msg))?;
+
+        // try to load the address from the modern lockfile
+        //   - if it fails, look in the legacy data
+        //   - if that fails, there is no recorded publication
+        let publication = Self::load_publication(path, env.name(), mtx)?.or_else(|| {
+            manifest
+                .legacy_data
+                .as_ref()
+                .and_then(|legacy| legacy.publication::<F>(env))
+        });
+
+        Ok((file_handle, manifest, publication))
+    }
+
     /// Read the publication for the given environment from the package pubfile.
     fn load_publication(
         path: &PackagePath,
@@ -237,20 +287,21 @@ impl<F: MoveFlavor> Package<F> {
         Ok(Some(publish.clone()))
     }
 
-    /// Compute the direct dependencies for the given environment by combining the default
-    /// dependencies, system dependencies, and dep-replacements from the manifest and then pinning
-    /// the results
+    /// Compute the direct dependencies for the given `env` by combining the default dependencies,
+    /// system dependencies, and dep-replacements from `manifest` and then pinning the results.
+    /// `flavor` is used to determine implicit/system dependencies.
     async fn deps_from_manifest(
         file_handle: &FileHandle,
         manifest: &ParsedManifest,
         env: &Environment,
+        flavor: &F,
     ) -> PackageResult<Vec<CombinedDependency>> {
-        let implicits = F::implicit_dependencies(env.id());
+        let implicits = flavor.implicit_dependencies(env.id()).await;
         let is_implicit = implicits.contains_key(manifest.package.name.as_ref());
 
         let system_dependencies = if manifest.package.implicit_dependencies && !is_implicit {
             debug!("adding implicit dependencies");
-            F::implicit_dependencies(env.id())
+            implicits
         } else {
             debug!("no implicit dependencies");
             BTreeMap::new()
@@ -299,10 +350,11 @@ impl<F: MoveFlavor> Package<F> {
 }
 
 /// Ensure that the dependency given by `dep_info` is cached on disk, and return information
-/// about its publication in `env`
+/// about its publication in `env`. `flavor` is used for system dep resolution and validation.
 pub async fn cache_package<F: MoveFlavor>(
     env: &Environment,
     manifest_dep: &ManifestDependencyInfo,
+    flavor: F,
 ) -> PackageResult<CachedPackageInfo> {
     // We need some file handles and things to give context to the dep loading system
     let tempdir = tempdir().expect("can create a temporary directory");
@@ -326,35 +378,39 @@ pub async fn cache_package<F: MoveFlavor>(
 
     // convert to a combined dependency
     let combined =
-        CombinedDependency::from_default(toml_handle, package, env.name().clone(), default_dep);
+        CombinedDependency::from_default(toml_handle, package, env.name().clone(), default_dep)?;
 
     // pin
     let root = Pinned::Root(dummy_path.clone());
-    let deps = PinnedDependencyInfo::pin::<F>(&root, vec![combined], env.id()).await?;
+    let flavor = Arc::new(flavor);
+    let deps = PinnedDependency::pin(&root, vec![combined], env, &*flavor).await?;
 
     // load
     let package = Package::<F>::load(
-        deps[0].as_ref().clone(),
+        deps[0].pinned().clone(),
         env,
         &mtx,
-        PackageLoader::new(dummy_path.path(), env.clone()).config(),
+        &PackageConfig::persistent(dummy_path.path(), env.clone(), vec![], flavor),
     )
     .await?;
 
     // summarize
     Ok(CachedPackageInfo {
         name: package.name().clone(),
+        path: package.path().path().to_path_buf(),
         addresses: package.publication().map(|p| p.addresses.clone()),
         chain_id: env.id.clone(),
     })
 }
 
-/// Check that `env` is defined in `manifest`, returning an error if it isn't
+/// Check that `env` is defined in `manifest`, returning an error if it isn't.
+/// Uses `flavor` to determine the default environments.
 fn check_for_environment<F: MoveFlavor>(
     manifest: &Manifest,
     env: &EnvironmentName,
+    flavor: &F,
 ) -> PackageResult<()> {
-    let mut known_environments = F::default_environments();
+    let mut known_environments = flavor.default_environments();
     let manifest_envs = manifest.environments();
 
     if let Some((name, _)) = manifest_envs
@@ -406,7 +462,9 @@ mod tests {
     };
 
     use super::*;
+    use crate::package::package_loader::PackageLoader;
 
+    use async_trait::async_trait;
     use indexmap::IndexMap;
     use insta::assert_snapshot;
     use test_log::test;
@@ -414,21 +472,25 @@ mod tests {
     #[derive(Debug)]
     struct TestFlavor;
 
+    #[async_trait]
     impl MoveFlavor for TestFlavor {
         type PublishedMetadata = ();
         type PackageMetadata = ();
         type AddressInfo = String;
 
-        fn name() -> String {
+        fn name(&self) -> String {
             "test".to_string()
         }
 
-        fn default_environments() -> IndexMap<EnvironmentName, EnvironmentID> {
+        fn default_environments(&self) -> IndexMap<EnvironmentName, EnvironmentID> {
             IndexMap::from([(DEFAULT_ENV_NAME.into(), DEFAULT_ENV_ID.into())])
         }
 
         // Our test flavor has `[foo, bar, baz]` system dependencies.
-        fn system_deps(_env: &EnvironmentID) -> BTreeMap<SystemDepName, LockfileDependencyInfo> {
+        async fn system_deps(
+            &self,
+            _env: &EnvironmentID,
+        ) -> BTreeMap<SystemDepName, LockfileDependencyInfo> {
             let mut deps = BTreeMap::new();
             deps.insert(
                 "FOO".into(),
@@ -452,7 +514,8 @@ mod tests {
         }
 
         // In this flavor, only `[foo, bar]` are enabled by default.
-        fn implicit_dependencies(
+        async fn implicit_dependencies(
+            &self,
             _env: &EnvironmentID,
         ) -> BTreeMap<PackageName, ReplacementDependency> {
             let mut result = BTreeMap::new();
@@ -470,11 +533,11 @@ mod tests {
             result
         }
 
-        fn validate_manifest(_: &ParsedManifest) -> Result<(), String> {
+        fn validate_manifest(&self, _: &ParsedManifest) -> Result<(), String> {
             Ok(())
         }
 
-        fn is_system_address(_: &OriginalID) -> bool {
+        fn is_system_address(&self, _: &OriginalID) -> bool {
             false
         }
     }
@@ -485,10 +548,14 @@ mod tests {
     async fn test_default_implicit_deps() {
         let scenario = TestPackageGraph::new(["root", "foo", "bar", "baz"]).build();
 
-        let root = PackageLoader::new(scenario.path_for("root"), Vanilla::default_environment())
-            .load::<TestFlavor>()
-            .await
-            .unwrap();
+        let root = PackageLoader::new(
+            scenario.path_for("root"),
+            Vanilla::default_environment(),
+            TestFlavor,
+        )
+        .load()
+        .await
+        .unwrap();
 
         assert_eq!(
             root.package_info()
@@ -522,8 +589,8 @@ mod tests {
             .add_package("a", |a| a.implicit_deps(false))
             .build();
 
-        let root = PackageLoader::new(scenario.path_for("a"), default_environment())
-            .load::<TestFlavor>()
+        let root = PackageLoader::new(scenario.path_for("a"), default_environment(), TestFlavor)
+            .load()
             .await
             .unwrap();
 
@@ -537,8 +604,8 @@ mod tests {
             .add_dep("a", "b", |dep| dep.name("foo").rename_from("b"))
             .build();
 
-        let err = PackageLoader::new(scenario.path_for("a"), default_environment())
-            .load::<TestFlavor>()
+        let err = PackageLoader::new(scenario.path_for("a"), default_environment(), TestFlavor)
+            .load()
             .await
             .unwrap_err();
 
@@ -559,14 +626,134 @@ mod tests {
             .add_dep("a", "b", |dep| dep.name("foo").rename_from("b"))
             .build();
 
-        PackageLoader::new(scenario.path_for("a"), default_environment())
-            .load::<TestFlavor>()
+        PackageLoader::new(scenario.path_for("a"), default_environment(), TestFlavor)
+            .load()
             .await
             .unwrap();
     }
 
     fn new_package_name(name: &str) -> PackageName {
         PackageName::new(name.to_string()).unwrap()
+    }
+
+    /// `read_publication` returns the addresses a package recorded, without building its graph.
+    #[test(tokio::test)]
+    async fn read_publication_returns_recorded_addresses() {
+        let scenario = TestPackageGraph::new(["root"])
+            .add_published("a", OriginalID::from(1), PublishedID::from(2))
+            .build();
+
+        let publication = read_publication::<Vanilla>(
+            &scenario.path_for("a"),
+            &Vanilla::default_environment(),
+            &Vanilla::new(),
+        )
+        .await
+        .unwrap()
+        .expect("package records a publication");
+
+        assert_eq!(publication.addresses.original_id, OriginalID::from(1));
+        assert_eq!(publication.addresses.published_at, PublishedID::from(2));
+    }
+
+    /// When a package records a publication in *both* a `Published.toml` and a legacy manifest
+    /// `published-at`, the `Published.toml` address wins. This is the address the package system
+    /// bakes into a dependent's linkage table during publication, so the verifier (which reads it
+    /// through the same path) and a publisher cannot disagree about which address to link.
+    #[test(tokio::test)]
+    async fn published_toml_wins_over_manifest_published_at() {
+        // The legacy manifest records published-at = 0x2 (original 0x1); the Published.toml records a
+        // different address, 0x4 (original 0x3).
+        let pubfile = r#"
+            [published._test_env]
+            chain-id = "_test_env_id"
+            published-at = "0x4"
+            original-id = "0x3"
+            version = 1
+        "#;
+
+        let scenario = TestPackageGraph::new(["root"])
+            .add_package("a", |a| {
+                a.set_legacy()
+                    .publish(OriginalID::from(1), PublishedID::from(2), None)
+                    .add_file("Published.toml", pubfile)
+            })
+            .build();
+
+        let publication = read_publication::<Vanilla>(
+            &scenario.path_for("a"),
+            &Vanilla::default_environment(),
+            &Vanilla::new(),
+        )
+        .await
+        .unwrap()
+        .expect("package records a publication");
+
+        assert_eq!(publication.addresses.published_at, PublishedID::from(4));
+        assert_eq!(publication.addresses.original_id, OriginalID::from(3));
+    }
+
+    /// When a package records a publication in *both* a `Published.toml` and a legacy `Move.lock`
+    /// `[env]` managed section, the `Published.toml` address wins. DeepBook's pre-v6 releases record
+    /// their address in the `[env]` lock, so this is the case retrofitting a `Published.toml` relies
+    /// on; the resolution stays identical for the verifier and for a publisher building linkage.
+    #[test(tokio::test)]
+    async fn published_toml_wins_over_legacy_lock() {
+        // The legacy Move.lock records the managed address 0x6 (original 0x5); the Published.toml
+        // records a different address, 0x4 (original 0x3).
+        let lock = r#"
+            [move]
+            version = 1
+
+            [env._test_env]
+            chain-id = "_test_env_id"
+            original-published-id = "0x5"
+            latest-published-id = "0x6"
+            published-version = "1"
+        "#;
+        let pubfile = r#"
+            [published._test_env]
+            chain-id = "_test_env_id"
+            published-at = "0x4"
+            original-id = "0x3"
+            version = 1
+        "#;
+
+        let scenario = TestPackageGraph::new(["root"])
+            .add_package("a", |a| {
+                a.set_legacy()
+                    .add_file("Move.lock", lock)
+                    .add_file("Published.toml", pubfile)
+            })
+            .build();
+
+        let publication = read_publication::<Vanilla>(
+            &scenario.path_for("a"),
+            &Vanilla::default_environment(),
+            &Vanilla::new(),
+        )
+        .await
+        .unwrap()
+        .expect("package records a publication");
+
+        assert_eq!(publication.addresses.published_at, PublishedID::from(4));
+        assert_eq!(publication.addresses.original_id, OriginalID::from(3));
+    }
+
+    /// `read_publication` returns `None` for a package that has not been published.
+    #[test(tokio::test)]
+    async fn read_publication_is_none_when_unpublished() {
+        let scenario = TestPackageGraph::new(["a"]).build();
+
+        let publication = read_publication::<Vanilla>(
+            &scenario.path_for("a"),
+            &Vanilla::default_environment(),
+            &Vanilla::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(publication.is_none());
     }
 
     /// Create a basic package and then call cache_package on a local dependency to it; check that
@@ -577,14 +764,19 @@ mod tests {
             .add_published("a", OriginalID::from(1), PublishedID::from(2))
             .build();
 
-        let path = scenario.path_for("a");
+        let pkg_path = scenario.path_for("a");
         let env = default_environment();
-        let dep = &ManifestDependencyInfo::Local(LocalDepInfo { local: path });
+        let dep = &ManifestDependencyInfo::Local(LocalDepInfo {
+            local: pkg_path.clone(),
+        });
 
-        let info = cache_package::<Vanilla>(&env, dep).await.unwrap();
+        let info = cache_package::<Vanilla>(&env, dep, Vanilla::new())
+            .await
+            .unwrap();
 
         let CachedPackageInfo {
             name,
+            path,
             addresses,
             chain_id,
         } = info;
@@ -595,6 +787,7 @@ mod tests {
         } = addresses.unwrap();
 
         assert_eq!(name.as_str(), "a");
+        assert_eq!(path, pkg_path);
         assert_eq!(published_at, PublishedID::from(2));
         assert_eq!(original_id, OriginalID::from(1));
         assert_eq!(chain_id, DEFAULT_ENV_ID);

@@ -53,13 +53,12 @@ fn translate_without_optimization() {
     let version_id = AccountAddress::from([2u8; 32]);
     let verified = make_verified_empty_package(original_id, version_id);
 
-    let vm_config = VMConfig {
-        ..VMConfig::default()
-    };
+    let vm_config =
+        VMConfig::new_for_test(/* allow_unpublishable_code_execution */ false, None);
     let natives = NativeFunctions::empty_for_testing().unwrap();
     let interner = IdentifierInterner::new();
 
-    let result = translate_package(&vm_config, &interner, &natives, verified);
+    let result = translate_package(&vm_config, &interner, &natives, &BTreeMap::new(), verified);
     let runtime_pkg = result.expect("translate_package should succeed for minimal package");
     assert_basic_runtime_pkg(&runtime_pkg, original_id, version_id);
 }
@@ -75,12 +74,12 @@ fn translate_without_optimization() {
 //
 //     let vm_config = VMConfig {
 //         // FUTURE: Enable optimizations here when we have some implemented.
-//         ..VMConfig::default()
+//         ..VMConfig::new_for_test(/* allow_unpublishable_code_execution */ false, None)
 //     };
 //     let natives = NativeFunctions::empty_for_testing().unwrap();
 //     let interner = IdentifierInterner::new();
 //
-//     let result = translate_package(&vm_config, &interner, &natives, verified);
+//     let result = translate_package(&vm_config, &interner, &natives, &BTreeMap::new(), verified);
 //     let runtime_pkg = result.expect("translate_package should succeed for minimal package");
 //     assert_basic_runtime_pkg(&runtime_pkg, original_id, version_id);
 // }
@@ -143,11 +142,12 @@ fn translate_and_verify(
     verified: verif_ast::Package,
     expected_module_count: usize,
 ) -> RuntimePackage {
-    let vm_config = VMConfig::default();
+    let vm_config =
+        VMConfig::new_for_test(/* allow_unpublishable_code_execution */ false, None);
     let natives = NativeFunctions::empty_for_testing().unwrap();
     let interner = IdentifierInterner::new();
 
-    let result = translate_package(&vm_config, &interner, &natives, verified);
+    let result = translate_package(&vm_config, &interner, &natives, &BTreeMap::new(), verified);
     let runtime_pkg = result.expect("translate_package should succeed");
     assert_eq!(runtime_pkg.loaded_modules.len(), expected_module_count);
     runtime_pkg

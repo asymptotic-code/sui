@@ -14,9 +14,11 @@ mod checked {
     use sui_types::base_types::{ObjectID, ObjectRef};
     use sui_types::error::{SuiResult, UserInputError, UserInputResult};
     use sui_types::executable_transaction::VerifiedExecutableTransaction;
+    use sui_types::gas::SuiGasStatusAPI;
     use sui_types::metrics::BytecodeVerifierMetrics;
+    use sui_types::object::ObjectPermission;
     use sui_types::transaction::{
-        CheckedInputObjects, InputObjectKind, InputObjects, ObjectReadResult, ObjectReadResultKind,
+        CheckedInputObjects, InputObjectKind, InputObjects, ObjectReadResultKind,
         ReceivingObjectReadResult, ReceivingObjects, SharedObjectMutability, TransactionData,
         TransactionDataAPI, TransactionKind,
     };
@@ -27,6 +29,7 @@ mod checked {
     };
     use sui_types::{
         base_types::{SequenceNumber, SuiAddress},
+        coin_reservation::ParsedDigest,
         error::SuiError,
         fp_bail, fp_ensure,
         gas::SuiGasStatus,
@@ -58,8 +61,10 @@ mod checked {
         gas_ownership_checks: bool,
     ) -> SuiResult<SuiGasStatus> {
         if transaction.kind().is_system_tx() {
-            Ok(SuiGasStatus::new_unmetered())
+            Ok(SuiGasStatus::new_unmetered(protocol_config))
         } else {
+            let is_gasless =
+                protocol_config.enable_gasless() && transaction.is_gasless_transaction();
             check_gas(
                 objects,
                 protocol_config,
@@ -67,6 +72,7 @@ mod checked {
                 gas,
                 transaction,
                 gas_ownership_checks,
+                is_gasless,
             )
         }
     }
@@ -88,39 +94,8 @@ mod checked {
             &input_objects,
             &[],
         )?;
+        transaction.check_allowance_inputs(&input_objects)?;
         check_receiving_objects(&input_objects, receiving_objects)?;
-        // Runs verifier, which could be expensive.
-        check_non_system_packages_to_be_published(
-            transaction,
-            protocol_config,
-            metrics,
-            verifier_signing_config,
-        )?;
-
-        Ok((gas_status, input_objects.into_checked()))
-    }
-
-    pub fn check_transaction_input_with_given_gas(
-        protocol_config: &ProtocolConfig,
-        reference_gas_price: u64,
-        transaction: &TransactionData,
-        mut input_objects: InputObjects,
-        receiving_objects: ReceivingObjects,
-        gas_object: Object,
-        metrics: &Arc<BytecodeVerifierMetrics>,
-        verifier_signing_config: &VerifierSigningConfig,
-    ) -> SuiResult<(SuiGasStatus, CheckedInputObjects)> {
-        let gas_object_ref = gas_object.compute_object_reference();
-        input_objects.push(ObjectReadResult::new_from_gas_object(&gas_object));
-
-        let gas_status = check_transaction_input_inner(
-            protocol_config,
-            reference_gas_price,
-            transaction,
-            &input_objects,
-            &[gas_object_ref],
-        )?;
-        check_receiving_objects(&input_objects, &receiving_objects)?;
         // Runs verifier, which could be expensive.
         check_non_system_packages_to_be_published(
             transaction,
@@ -153,6 +128,8 @@ mod checked {
         )?;
         // NB: We do not check receiving objects when executing. Only at signing time do we check.
         // NB: move verifier is only checked at signing time, not at execution.
+        // NB: allowance withdrawal declarations are only validated at signing; at execution
+        // the allowance's own Move checks enforce policy on consensus-sequenced state.
 
         Ok((gas_status, input_objects.into_checked()))
     }
@@ -229,8 +206,12 @@ mod checked {
             transaction,
             true, // gas_ownership_checks
         )?;
-        check_objects(transaction, input_objects)?;
+        check_objects(transaction, input_objects, protocol_config)?;
         check_replay_protection(transaction, input_objects)?;
+
+        if protocol_config.enable_gasless() && transaction.is_gasless_transaction() {
+            check_gasless_object_inputs(input_objects, protocol_config)?;
+        }
 
         Ok(gas_status)
     }
@@ -359,7 +340,9 @@ mod checked {
                             .into()
                         )
                     }
-                    Owner::Shared { .. } | Owner::ConsensusAddressOwner { .. } => {
+                    Owner::Shared { .. }
+                    | Owner::ConsensusAddressOwner { .. }
+                    | Owner::Party { .. } => {
                         fp_bail!(UserInputError::NotSharedObjectError.into())
                     }
                     Owner::Immutable => fp_bail!(
@@ -391,34 +374,59 @@ mod checked {
         gas: &[ObjectRef],
         transaction: &TransactionData,
         gas_ownership_checks: bool,
+        is_gasless: bool,
     ) -> SuiResult<SuiGasStatus> {
         let gas_budget = transaction.gas_budget();
         let gas_price = transaction.gas_price();
         let gas_paid_from_address_balance = transaction.is_gas_paid_from_address_balance();
 
-        let gas_status =
-            SuiGasStatus::new(gas_budget, gas_price, reference_gas_price, protocol_config)?;
+        let gas_status = if is_gasless {
+            debug_assert_ne!(reference_gas_price, 0);
+            let rgp = reference_gas_price.max(1);
+            let compute_cap = protocol_config.gasless_max_computation_units() * rgp;
+            SuiGasStatus::new(compute_cap, rgp, reference_gas_price, protocol_config)?
+        } else {
+            SuiGasStatus::new(gas_budget, gas_price, reference_gas_price, protocol_config)?
+        };
 
         // check balance and coins consistency
-        // load all gas coins
+        // load all gas coins (skip coin reservations - they're not loaded as input objects)
         let objects: BTreeMap<_, _> = objects.iter().map(|o| (o.id(), o)).collect();
-        let mut gas_objects = vec![];
-        for obj_ref in gas {
-            let obj = objects.get(&obj_ref.0);
-            let obj = *obj.ok_or(UserInputError::ObjectNotFound {
-                object_id: obj_ref.0,
-                version: Some(obj_ref.1),
-            })?;
-            gas_objects.push(obj);
-        }
 
-        // Skip gas balance check for address balance payments
-        // We reserve gas budget in advance
-        if !gas_paid_from_address_balance {
+        let (gas_objects, available_address_balance_gas) = if gas_paid_from_address_balance {
+            // When paying from address balance via gas_data.payment = [], the budget is reserved by the scheduler
+            // and guaranteed to be available.
+            (vec![], gas_budget)
+        } else {
+            // Gas payment may include a mix of coin objects and coin reservations (withdrawals).
+            // Sum up the reservation amounts separately since they don't have input objects.
+            let mut available_address_balance_gas: u64 = 0;
+            let mut gas_objects = vec![];
+            for obj_ref in gas {
+                if let Ok(parsed) = ParsedDigest::try_from(obj_ref.2) {
+                    available_address_balance_gas =
+                        available_address_balance_gas.saturating_add(parsed.reservation_amount());
+                } else {
+                    let obj = objects.get(&obj_ref.0);
+                    let obj = *obj.ok_or(UserInputError::ObjectNotFound {
+                        object_id: obj_ref.0,
+                        version: Some(obj_ref.1),
+                    })?;
+                    gas_objects.push(obj);
+                }
+            }
+            (gas_objects, available_address_balance_gas)
+        };
+
+        if !is_gasless {
             if gas_ownership_checks {
                 gas_status.check_gas_objects(&gas_objects)?;
             }
-            gas_status.check_gas_data(&gas_objects, gas_budget)?;
+            gas_status.check_gas_balance(
+                &gas_objects,
+                gas_budget,
+                available_address_balance_gas,
+            )?;
         }
         Ok(gas_status)
     }
@@ -426,7 +434,11 @@ mod checked {
     /// Check all the objects used in the transaction against the database, and ensure
     /// that they are all the correct version and number.
     #[instrument(level = "trace", skip_all)]
-    fn check_objects(transaction: &TransactionData, objects: &InputObjects) -> UserInputResult<()> {
+    fn check_objects(
+        transaction: &TransactionData,
+        objects: &InputObjects,
+        protocol_config: &ProtocolConfig,
+    ) -> UserInputResult<()> {
         // We require that mutable objects cannot show up more than once.
         let mut used_objects: HashSet<SuiAddress> = HashSet::new();
         for object in objects.iter() {
@@ -440,7 +452,19 @@ mod checked {
             }
         }
 
-        if !transaction.is_genesis_tx() && objects.is_empty() {
+        // When coin reservations are enabled, allow empty objects if gas is paid from
+        // address balance or entirely from coin reservations (the gas coin is materialized
+        // from the address balance, so no input objects are needed).
+        let gas_only_contains_coin_reservations = !transaction.gas().is_empty()
+            && transaction
+                .gas()
+                .iter()
+                .all(|obj_ref| ParsedDigest::is_coin_reservation_digest(&obj_ref.2));
+
+        let allow_empty_objects = protocol_config.enable_coin_reservation_obj_refs()
+            && (transaction.is_gas_paid_from_address_balance()
+                || gas_only_contains_coin_reservations);
+        if !transaction.is_genesis_tx() && objects.is_empty() && !allow_empty_objects {
             return Err(UserInputError::ObjectInputArityViolation);
         }
 
@@ -484,6 +508,13 @@ mod checked {
         object: &Object,
         system_transaction: bool,
     ) -> UserInputResult {
+        // Defense-in-depth: Owner::Party is not yet supported.
+        if matches!(object.owner, Owner::Party { .. }) {
+            return Err(UserInputError::Unsupported(
+                "Party-owned objects are not yet supported".to_string(),
+            ));
+        }
+
         match object_kind {
             InputObjectKind::MovePackage(package_id) => {
                 fp_ensure!(
@@ -544,7 +575,9 @@ mod checked {
                             parent_id: owner.into(),
                         });
                     }
-                    Owner::Shared { .. } | Owner::ConsensusAddressOwner { .. } => {
+                    Owner::Shared { .. }
+                    | Owner::ConsensusAddressOwner { .. }
+                    | Owner::Party { .. } => {
                         // This object is a mutable consensus object. However the transaction
                         // specifies it as an owned object. This is inconsistent.
                         return Err(UserInputError::NotOwnedObjectError);
@@ -622,9 +655,97 @@ mod checked {
                             }
                         )
                     }
+
+                    Owner::Party {
+                        start_version: actual_initial_shared_version,
+                        permissions,
+                    } => {
+                        fp_ensure!(
+                            input_initial_shared_version == *actual_initial_shared_version,
+                            UserInputError::SharedObjectStartingVersionMismatch
+                        );
+                        // Check the owner has permissions for this kind of mutability
+                        let sender_permissions = permissions.permissions_for(owner);
+                        match mutability {
+                            SharedObjectMutability::Immutable => {
+                                // TODO better error kind here
+                                fp_ensure!(
+                                    sender_permissions.can_use_immutably(),
+                                    UserInputError::IncorrectUserSignature {
+                                        error: format!(
+                                            "Sender address {owner:?} does not have immutable access permissions for object {object_id:?} with party ownership. The required permission is {}, but the permissions for the sender for this object are {sender_permissions}",
+                                            ObjectPermission::ImmutableUsage,
+                                        ),
+                                    }
+                                )
+                            }
+                            SharedObjectMutability::Mutable => {
+                                // TODO better error kind here
+                                fp_ensure!(
+                                    sender_permissions.can_use_mutably(),
+                                    UserInputError::IncorrectUserSignature {
+                                        error: format!(
+                                            "Sender address {owner:?} does not have mutable access permissions for object {object_id:?} with party ownership. The required permission is {}, but the permissions for the sender for this object are {sender_permissions}",
+                                            ObjectPermission::MutableUsage,
+                                        ),
+                                    }
+                                )
+                            }
+                            SharedObjectMutability::NonExclusiveWrite => {
+                                // TODO(Party WIP)
+                                todo!("Party WIP")
+                            }
+                        }
+                    }
                 }
             }
         };
+        Ok(())
+    }
+
+    /// Verify that all Move object inputs in a gasless transaction are `Coin<T>`
+    /// where `T` is in the allowlist.
+    pub fn check_gasless_object_inputs(
+        input_objects: &InputObjects,
+        protocol_config: &ProtocolConfig,
+    ) -> UserInputResult<()> {
+        let allowed_token_types =
+            sui_types::transaction::get_gasless_allowed_token_types(protocol_config);
+
+        for obj_read in input_objects.iter() {
+            let Some(object) = obj_read.as_object() else {
+                continue;
+            };
+            if object.is_package() {
+                continue;
+            }
+            match object.owner() {
+                Owner::AddressOwner(_) | Owner::ConsensusAddressOwner { .. } => (),
+                Owner::Immutable
+                | Owner::Shared { .. }
+                | Owner::ObjectOwner(_)
+                | Owner::Party { .. } => {
+                    return Err(UserInputError::Unsupported(
+                        "Gasless transactions only support owned object inputs".to_string(),
+                    ));
+                }
+            }
+            // Every non-package Move object input must be Coin<T> with T allowlisted
+            let coin_type = object.coin_type_maybe().ok_or_else(|| {
+                UserInputError::Unsupported(
+                    "Gasless transactions can only use Coin<T> object inputs, \
+                     but found a non-Coin object"
+                        .to_string(),
+                )
+            })?;
+            fp_ensure!(
+                allowed_token_types.contains_key(&coin_type),
+                UserInputError::Unsupported(
+                    "Gasless transactions only support allowlisted types for Coin inputs"
+                        .to_string()
+                )
+            );
+        }
         Ok(())
     }
 

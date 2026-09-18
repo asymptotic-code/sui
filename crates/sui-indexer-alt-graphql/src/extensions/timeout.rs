@@ -1,9 +1,9 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_graphql::Response;
@@ -17,8 +17,7 @@ use async_graphql::extensions::NextExecute;
 use async_graphql::extensions::NextParseQuery;
 use async_graphql::parser::types::ExecutableDocument;
 use async_graphql::parser::types::OperationType;
-use timeout_tracing::CaptureSpanTrace;
-use timeout_tracing::timeout;
+use sui_futures::timeout_trace::timeout;
 use tracing::warn;
 
 use crate::error::request_timeout;
@@ -37,7 +36,9 @@ pub(crate) struct Timeout(Arc<TimeoutConfig>);
 
 struct TimeoutExt {
     config: Arc<TimeoutConfig>,
-    is_mutation: AtomicBool,
+    /// Map from operation name to its type, populated once during parsing.
+    /// `None` key represents an anonymous (single) operation.
+    operation_types: OnceLock<HashMap<Option<String>, OperationType>>,
 }
 
 impl Timeout {
@@ -50,7 +51,7 @@ impl ExtensionFactory for Timeout {
     fn create(&self) -> Arc<dyn Extension> {
         Arc::new(TimeoutExt {
             config: self.0.clone(),
-            is_mutation: AtomicBool::new(false),
+            operation_types: OnceLock::new(),
         })
     }
 }
@@ -66,13 +67,12 @@ impl Extension for TimeoutExt {
     ) -> ServerResult<ExecutableDocument> {
         let document = next.run(ctx, query, variables).await?;
 
-        self.is_mutation.store(
-            document
-                .operations
-                .iter()
-                .any(|(_, op)| op.node.ty == OperationType::Mutation),
-            Ordering::Relaxed,
-        );
+        let types: HashMap<_, _> = document
+            .operations
+            .iter()
+            .map(|(name, op)| (name.map(|n| n.to_string()), op.node.ty))
+            .collect();
+        let _ = self.operation_types.set(types);
 
         Ok(document)
     }
@@ -83,14 +83,26 @@ impl Extension for TimeoutExt {
         operation_name: Option<&str>,
         next: NextExecute<'_>,
     ) -> Response {
-        let is_mutation = self.is_mutation.load(Ordering::Relaxed);
+        let key = operation_name.map(|s| s.to_string());
+        let operation_type = self
+            .operation_types
+            .get()
+            .and_then(|types| types.get(&key).copied())
+            .unwrap_or(OperationType::Query);
+
+        // Subscriptions are long-lived streams — a per-request timeout does not apply.
+        if operation_type == OperationType::Subscription {
+            return next.run(ctx, operation_name).await;
+        }
+
+        let is_mutation = operation_type == OperationType::Mutation;
         let limit = if is_mutation {
             self.config.mutation
         } else {
             self.config.query
         };
 
-        timeout(limit, CaptureSpanTrace, next.run(ctx, operation_name))
+        timeout(limit, next.run(ctx, operation_name))
             .await
             .unwrap_or_else(|e| {
                 let kind = if is_mutation { "Mutation" } else { "Query" };
@@ -116,6 +128,8 @@ mod tests {
     use itertools::Itertools;
     use regex::Regex;
     use telemetry_subscribers::TelemetryConfig;
+
+    use crate::extensions::logging::ClientInfo;
     use uuid::Uuid;
 
     use crate::error::code;
@@ -134,7 +148,7 @@ mod tests {
     }
 
     /// The request takes less than the timeout to handle, so it should pass.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_query_timeout_pass() {
         let zero = Duration::from_millis(0);
         let delay = Duration::from_millis(200);
@@ -148,10 +162,11 @@ mod tests {
             .await;
 
         assert!(response.is_ok());
+        assert_eq!(response.data, async_graphql::value!({ "op": true }));
     }
 
     /// Like [test_query_timeout_pass], but for a mutation.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_mutation_timeout_pass() {
         let zero = Duration::from_millis(0);
         let delay = Duration::from_millis(200);
@@ -165,10 +180,11 @@ mod tests {
             .await;
 
         assert!(response.is_ok());
+        assert_eq!(response.data, async_graphql::value!({ "op": true }));
     }
 
     /// The request takes longer than the timeout to handle, so it should fail.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_query_timeout_fail() {
         let timeout = Duration::from_millis(200);
         let event = test_timeout_fail(
@@ -191,7 +207,7 @@ mod tests {
     }
 
     /// Like [test_query_timeout_fail], but for a mutation.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_mutation_timeout_fail() {
         let timeout = Duration::from_millis(200);
         let event = test_timeout_fail(
@@ -215,13 +231,15 @@ mod tests {
 
     /// Mutations are resolved sequentially, and the timeout should apply to the total time spent
     /// on the request.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_mutation_additive_timeout() {
         let timeout = Duration::from_millis(200);
+        // Keep the deadline strictly inside b: equal resolver/deadline timers can advance to c
+        // during the timeout's final tracing poll.
         let event = test_timeout_fail(
             Duration::ZERO,
             timeout,
-            timeout / 2,
+            timeout * 3 / 4,
             "mutation { a:op b:op c:op }",
             "Mutation",
         )
@@ -237,6 +255,41 @@ mod tests {
         ")
     }
 
+    /// Queries resolve their root fields concurrently, so all three pending fields should be
+    /// captured as separate traces when the timeout fires -- unlike
+    /// [test_mutation_additive_timeout], which only ever has one field in flight at a time.
+    #[tokio::test(start_paused = true)]
+    async fn test_query_concurrent_timeout() {
+        let timeout = Duration::from_millis(200);
+        let event = test_timeout_fail(
+            timeout,
+            Duration::ZERO,
+            timeout * 2,
+            "query { a:op b:op c:op }",
+            "Query",
+        )
+        .await;
+        assert_snapshot!(event, @r"
+        [WARN] Request timed out: timeout elapsed at:
+        trace 0:
+           0: async_graphql::graphql::field
+                   with path: a, parent_type: Root, return_type: Boolean!
+           1: async_graphql::graphql::execute
+           2: async_graphql::graphql::request
+        trace 1:
+           0: async_graphql::graphql::field
+                   with path: b, parent_type: Root, return_type: Boolean!
+           1: async_graphql::graphql::execute
+           2: async_graphql::graphql::request
+        trace 2:
+           0: async_graphql::graphql::field
+                   with path: c, parent_type: Root, return_type: Boolean!
+           1: async_graphql::graphql::execute
+           2: async_graphql::graphql::request
+         request_id=ffffffff-ffff-ffff-ffff-ffffffffffff kind=Query
+        ")
+    }
+
     async fn test_timeout_fail(
         query_timeout: Duration,
         mutation_timeout: Duration,
@@ -244,24 +297,19 @@ mod tests {
         request: &str,
         expected_error: &str,
     ) -> String {
-        // Enable tracing, configured by environment variables.
         let (_guard, handle) = TelemetryConfig::new()
             .with_set_global_default(false)
-            // Enable to match default in main.rs
             .with_enable_error_layer(true)
-            // Required for handle.get_test_layer_events()
             .with_enable_test_layer(true)
             .init();
 
         let root = Root(delay);
-
         let response = Schema::build(root.clone(), root, EmptySubscription)
-            // Timeout reads session data. This either needs to be set by the GraphQL framework or
-            // a test like this if bypassing the GraphQL framework.
+            // Timeout reads session data normally supplied by the GraphQL framework.
             .data(Session {
-                // ffffffff-ffff-ffff-ffff-ffffffffffff
                 uuid: Uuid::from_bytes([255; 16]),
                 addr: SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
+                client: ClientInfo::default(),
             })
             .extension(Timeout::new(TimeoutConfig {
                 query: query_timeout,
@@ -272,19 +320,17 @@ mod tests {
             .execute(request)
             .await;
 
-        assert!(response.is_err());
-
-        let error = &response.errors[0];
-        assert!(error.message.contains(expected_error));
+        assert_eq!(response.data, Value::Null);
+        assert_eq!(response.errors.len(), 1);
+        assert!(response.errors[0].message.contains(expected_error));
         assert_eq!(
-            error.extensions.as_ref().unwrap().get("code"),
+            response.errors[0].extensions.as_ref().unwrap().get("code"),
             Some(&Value::String(code::REQUEST_TIMEOUT.into()))
         );
 
         let events = handle.get_test_layer_events();
         assert_eq!(events.len(), 1);
-        // Remove line number strings to avoid test churn
-        // example: "             at /Users/evanwall/.cargo/git/checkouts/async-graphql-7336e61dcafca7ed/7be9351/src/extensions/tracing.rs:135"
+        // Source locations vary between machines; field paths and request metadata do not.
         let re = Regex::new(r"\s+at\s.+").unwrap();
         events[0].split("\n").filter(|s| !re.is_match(s)).join("\n")
     }

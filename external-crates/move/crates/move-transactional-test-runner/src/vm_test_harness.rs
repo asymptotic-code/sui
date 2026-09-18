@@ -13,7 +13,9 @@ use clap::Parser;
 use move_binary_format::{
     CompiledModule,
     errors::{Location, VMError, VMResult},
-    file_format::{EnumDefinitionIndex, FieldHandleIndex, LocalIndex, MemberCount, VariantTag},
+    file_format::{
+        CodeOffset, EnumDefinitionIndex, FieldHandleIndex, LocalIndex, MemberCount, VariantTag,
+    },
 };
 use move_bytecode_source_map::source_map::{FunctionSourceMap, SourceMap};
 use move_bytecode_verifier::{absint::FunctionContext, regex_reference_safety};
@@ -465,6 +467,8 @@ impl MoveTestAdapter<'_> for SimpleRuntimeTestAdapter {
             stop_line: _,
             data: _,
             task_text: _,
+            unattached_comments_before: _,
+            unattached_comments_after: _,
         } = task;
         match command {
             Subcommand::ViewAbstractState(view_abstract_state_command) => {
@@ -534,11 +538,28 @@ impl MoveTestAdapter<'_> for SimpleRuntimeTestAdapter {
                 // Serialize each state
                 let mut serializer =
                     SourceMapRegexStateSerializer::new(&module, function_source_map);
+                let label_for_offset: BTreeMap<CodeOffset, String> = function_source_map
+                    .labels
+                    .iter()
+                    .map(|(label, offset)| (*offset, label.0.to_string()))
+                    .collect();
                 let serializable_states: BTreeMap<_, _> = states
                     .into_iter()
                     .map(|(offset, state)| {
-                        // TODO get label for offset for mvir
-                        (offset, state.pre.to_serializable(&mut serializer))
+                        let is_ir = self.compiled_state.syntax_choice(&module_id)
+                            == Some(&SyntaxChoice::IR);
+                        // IR syntax ==> blocks has a label
+                        // All IR blocks must have a label
+                        debug_assert!(
+                            !is_ir || label_for_offset.contains_key(&offset),
+                            "IR source should have a label for every block offset, \
+                             but offset {offset} has no label"
+                        );
+                        let key = label_for_offset
+                            .get(&offset)
+                            .cloned()
+                            .unwrap_or_else(|| offset.to_string());
+                        (key, state.pre.to_serializable(&mut serializer))
                     })
                     .collect();
 
@@ -623,7 +644,7 @@ fn test_vm_config(switch_to_regex_reference_safety: bool) -> VMConfig {
             ..VerifierConfig::default()
         },
 
-        ..VMConfig::default()
+        ..VMConfig::new_for_test(/* allow_unpublishable_code_execution */ false, None)
     }
 }
 

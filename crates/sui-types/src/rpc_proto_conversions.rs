@@ -4,12 +4,28 @@
 //! Module for conversions from sui-core types to rpc protos
 
 use crate::crypto::SuiSignature;
+use nonempty::NonEmpty;
 
 fn ms_to_timestamp(ms: u64) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: (ms / 1000) as _,
         nanos: ((ms % 1000) * 1_000_000) as _,
     }
+}
+
+fn timestamp_to_ms(timestamp: &prost_types::Timestamp) -> Result<u64, &'static str> {
+    let seconds: u64 = timestamp
+        .seconds
+        .try_into()
+        .map_err(|_| "invalid timestamp: negative seconds")?;
+    let nanos: u64 = timestamp
+        .nanos
+        .try_into()
+        .map_err(|_| "invalid timestamp: negative nanos")?;
+    seconds
+        .checked_mul(1000)
+        .and_then(|ms| ms.checked_add(nanos / 1_000_000))
+        .ok_or("invalid timestamp: out of range")
 }
 use crate::message_envelope::Message as _;
 use fastcrypto::traits::ToFromBytes;
@@ -74,12 +90,43 @@ impl Merge<&crate::full_checkpoint_content::ExecutedTransaction> for ExecutedTra
         source: &crate::full_checkpoint_content::ExecutedTransaction,
         mask: &FieldMaskTree,
     ) {
-        if mask.contains(ExecutedTransaction::DIGEST_FIELD) {
-            self.digest = Some(source.transaction.digest().to_string());
+        use crate::effects::TransactionEffectsAPI;
+
+        let transaction_mask = mask.subtree(ExecutedTransaction::TRANSACTION_FIELD);
+        let top_level_digest_selected = mask.contains(ExecutedTransaction::DIGEST_FIELD);
+        let nested_digest_selected = transaction_mask
+            .as_ref()
+            .is_some_and(|submask| submask.contains(Transaction::DIGEST_FIELD.name));
+        let (top_level_digest_string, nested_digest_string) =
+            match (top_level_digest_selected, nested_digest_selected) {
+                (false, false) => (None, None),
+                (true, false) => (
+                    Some(source.effects.transaction_digest().base58_encode()),
+                    None,
+                ),
+                (false, true) => (
+                    None,
+                    Some(source.effects.transaction_digest().base58_encode()),
+                ),
+                (true, true) => {
+                    let digest_string = source.effects.transaction_digest().base58_encode();
+                    (Some(digest_string.clone()), Some(digest_string))
+                }
+            };
+
+        if top_level_digest_selected {
+            self.digest = top_level_digest_string;
         }
 
-        if let Some(submask) = mask.subtree(ExecutedTransaction::TRANSACTION_FIELD) {
-            self.transaction = Some(Transaction::merge_from(&source.transaction, &submask));
+        if let Some(submask) = transaction_mask {
+            let mut transaction = Transaction::default();
+            merge_transaction_data(
+                &mut transaction,
+                &source.transaction,
+                nested_digest_string,
+                &submask,
+            );
+            self.transaction = Some(transaction);
         }
 
         if let Some(submask) = mask.subtree(ExecutedTransaction::SIGNATURES_FIELD) {
@@ -142,6 +189,8 @@ impl TryFrom<&Checkpoint> for crate::full_checkpoint_content::Checkpoint {
             .map(|(_, user_signatures)| user_signatures)
             .collect();
 
+        #[allow(clippy::disallowed_methods)]
+        // Intentional zip: transactions field may be partially populated via field masks
         let transactions = checkpoint
             .transactions()
             .iter()
@@ -1431,6 +1480,7 @@ impl From<crate::execution_status::CommandArgumentError> for CommandArgumentErro
                 CommandArgumentErrorKind::CannotWriteToExtendedReference
             }
             E::InvalidReferenceArgument => CommandArgumentErrorKind::InvalidReferenceArgument,
+            E::InvalidTxContext => CommandArgumentErrorKind::InvalidTxContext,
         };
 
         message.set_kind(kind);
@@ -2165,6 +2215,8 @@ impl From<crate::object::Owner> for Owner {
                 message.address = Some(owner.to_string());
                 OwnerKind::ConsensusAddress
             }
+            // TODO(Party WIP)
+            O::Party { .. } => todo!("Party WIP"),
         };
 
         message.set_kind(kind);
@@ -2184,37 +2236,47 @@ impl From<crate::transaction::TransactionData> for Transaction {
 
 impl Merge<&crate::transaction::TransactionData> for Transaction {
     fn merge(&mut self, source: &crate::transaction::TransactionData, mask: &FieldMaskTree) {
-        if mask.contains(Self::BCS_FIELD.name) {
-            let mut bcs = Bcs::serialize(&source).unwrap();
-            bcs.name = Some("TransactionData".to_owned());
-            self.bcs = Some(bcs);
-        }
+        merge_transaction_data(self, source, None, mask);
+    }
+}
 
-        if mask.contains(Self::DIGEST_FIELD.name) {
-            self.digest = Some(source.digest().to_string());
-        }
+fn merge_transaction_data(
+    message: &mut Transaction,
+    source: &crate::transaction::TransactionData,
+    precomputed_digest_string: Option<String>,
+    mask: &FieldMaskTree,
+) {
+    if mask.contains(Transaction::BCS_FIELD.name) {
+        let mut bcs = Bcs::serialize(&source).unwrap();
+        bcs.name = Some("TransactionData".to_owned());
+        message.bcs = Some(bcs);
+    }
 
-        if mask.contains(Self::VERSION_FIELD.name) {
-            self.version = Some(1);
-        }
+    if mask.contains(Transaction::DIGEST_FIELD.name) {
+        message.digest =
+            Some(precomputed_digest_string.unwrap_or_else(|| source.digest().base58_encode()));
+    }
 
-        let crate::transaction::TransactionData::V1(source) = source;
+    if mask.contains(Transaction::VERSION_FIELD.name) {
+        message.version = Some(1);
+    }
 
-        if mask.contains(Self::KIND_FIELD.name) {
-            self.kind = Some(source.kind.clone().into());
-        }
+    let crate::transaction::TransactionData::V1(source) = source;
 
-        if mask.contains(Self::SENDER_FIELD.name) {
-            self.sender = Some(source.sender.to_string());
-        }
+    if mask.contains(Transaction::KIND_FIELD.name) {
+        message.kind = Some(source.kind.clone().into());
+    }
 
-        if mask.contains(Self::GAS_PAYMENT_FIELD.name) {
-            self.gas_payment = Some((&source.gas_data).into());
-        }
+    if mask.contains(Transaction::SENDER_FIELD.name) {
+        message.sender = Some(source.sender.to_string());
+    }
 
-        if mask.contains(Self::EXPIRATION_FIELD.name) {
-            self.expiration = Some(source.expiration.into());
-        }
+    if mask.contains(Transaction::GAS_PAYMENT_FIELD.name) {
+        message.gas_payment = Some((&source.gas_data).into());
+    }
+
+    if mask.contains(Transaction::EXPIRATION_FIELD.name) {
+        message.expiration = Some(source.expiration.clone().into());
     }
 }
 
@@ -2271,6 +2333,30 @@ impl From<crate::transaction::TransactionExpiration> for TransactionExpiration {
 
                 TransactionExpirationKind::ValidDuring
             }
+            E::Validity {
+                min_epoch,
+                max_epoch,
+                min_timestamp,
+                max_timestamp,
+                chain,
+                nonce,
+                allowed_proposers,
+            } => {
+                message.epoch = max_epoch;
+                message.min_epoch = min_epoch;
+                message.min_timestamp = min_timestamp.map(ms_to_timestamp);
+                message.max_timestamp = max_timestamp.map(ms_to_timestamp);
+                message.set_chain(sui_sdk_types::Digest::new(*chain.as_bytes()));
+                message.set_nonce(nonce);
+                if let Some(allowed) = allowed_proposers {
+                    let mut proposers = AllowedProposers::default();
+                    proposers.set_epoch(allowed.epoch);
+                    proposers.proposers = allowed.proposers.into();
+                    message.set_allowed_proposers(proposers);
+                }
+
+                TransactionExpirationKind::Validity
+            }
         };
 
         message.set_kind(kind);
@@ -2287,6 +2373,66 @@ impl TryFrom<&TransactionExpiration> for crate::transaction::TransactionExpirati
         Ok(match value.kind() {
             TransactionExpirationKind::None => Self::None,
             TransactionExpirationKind::Epoch => Self::Epoch(value.epoch()),
+            kind @ (TransactionExpirationKind::ValidDuring
+            | TransactionExpirationKind::Validity) => {
+                let chain_str = value
+                    .chain
+                    .as_deref()
+                    .ok_or("ValidDuring expiration is missing chain")?;
+                let chain_digest: sui_sdk_types::Digest = chain_str
+                    .parse()
+                    .map_err(|_| "ValidDuring expiration has invalid chain digest")?;
+                let chain = crate::digests::ChainIdentifier::from(
+                    crate::digests::CheckpointDigest::new(chain_digest.into_inner()),
+                );
+                let nonce = value
+                    .nonce
+                    .ok_or("ValidDuring expiration is missing nonce")?;
+                let min_timestamp = value
+                    .min_timestamp
+                    .as_ref()
+                    .map(timestamp_to_ms)
+                    .transpose()?;
+                let max_timestamp = value
+                    .max_timestamp
+                    .as_ref()
+                    .map(timestamp_to_ms)
+                    .transpose()?;
+                let min_epoch = value.min_epoch;
+                let max_epoch = value.epoch;
+
+                if kind == TransactionExpirationKind::ValidDuring {
+                    Self::ValidDuring {
+                        min_epoch,
+                        max_epoch,
+                        min_timestamp,
+                        max_timestamp,
+                        chain,
+                        nonce,
+                    }
+                } else {
+                    let allowed_proposers = value
+                        .allowed_proposers
+                        .as_ref()
+                        .map(|allowed| -> Result<_, Self::Error> {
+                            Ok(crate::transaction::AllowedProposers {
+                                epoch: allowed.epoch(),
+                                proposers: NonEmpty::from_vec(allowed.proposers.clone())
+                                    .ok_or("allowed_proposers must not be empty")?,
+                            })
+                        })
+                        .transpose()?;
+                    Self::Validity {
+                        min_epoch,
+                        max_epoch,
+                        min_timestamp,
+                        max_timestamp,
+                        chain,
+                        nonce,
+                        allowed_proposers,
+                    }
+                }
+            }
             TransactionExpirationKind::Unknown | _ => {
                 return Err("unknown TransactionExpirationKind");
             }
@@ -2611,6 +2757,9 @@ impl From<crate::transaction::EndOfEpochTransactionKind> for EndOfEpochTransacti
             K::CoinRegistryCreate => message.with_kind(Kind::CoinRegistryCreate),
             K::DisplayRegistryCreate => message.with_kind(Kind::DisplayRegistryCreate),
             K::AddressAliasStateCreate => message.with_kind(Kind::AddressAliasStateCreate),
+            K::ForwardingAddressRegistryCreate => {
+                message.with_kind(Kind::ForwardingAddressRegistryCreate)
+            }
             K::WriteAccumulatorStorageCost(storage_cost) => message
                 .with_kind(Kind::WriteAccumulatorStorageCost)
                 .with_storage_cost(storage_cost.storage_cost),
@@ -2786,10 +2935,16 @@ impl From<crate::transaction::FundsWithdrawalArg> for FundsWithdrawal {
         };
         let crate::transaction::WithdrawalTypeArg::Balance(coin_type) = value.type_arg;
         message.coin_type = Some(coin_type.to_canonical_string(true));
-        message.set_source(match value.withdraw_from {
+        let source = match value.withdraw_from {
             crate::transaction::WithdrawFrom::Sender => Source::Sender,
             crate::transaction::WithdrawFrom::Sponsor => Source::Sponsor,
-        });
+            crate::transaction::WithdrawFrom::SenderAllowance { funder, allowance } => {
+                message.funder = Some(funder.to_string());
+                message.allowance = Some(allowance.to_string());
+                Source::SenderAllowance
+            }
+        };
+        message.set_source(source);
 
         message
     }
@@ -2980,6 +3135,10 @@ impl Merge<&crate::effects::TransactionEffectsV1> for TransactionEffects {
                 .collect();
         }
 
+        if mask.contains(Self::LAMPORT_VERSION_FIELD.name) {
+            self.lamport_version = Some(value.lamport_version().value());
+        }
+
         if mask.contains(Self::CHANGED_OBJECTS_FIELD.name)
             || mask.contains(Self::UNCHANGED_CONSENSUS_OBJECTS_FIELD.name)
             || mask.contains(Self::GAS_OBJECT_FIELD.name)
@@ -3098,8 +3257,10 @@ impl Merge<&crate::effects::TransactionEffectsV1> for TransactionEffects {
                 }
             }
 
-            if mask.contains(Self::GAS_OBJECT_FIELD.name) {
-                let gas_object_id = value.gas_object().0.0.to_canonical_string(true);
+            if mask.contains(Self::GAS_OBJECT_FIELD.name)
+                && let Some(((gas_id, _, _), _)) = value.gas_object()
+            {
+                let gas_object_id = gas_id.to_canonical_string(true);
                 self.gas_object = changed_objects
                     .iter()
                     .find(|object| object.object_id() == gas_object_id)
@@ -3285,7 +3446,7 @@ impl From<crate::effects::AccumulatorWriteV1> for AccumulatorWrite {
             crate::effects::AccumulatorOperation::Split => AccumulatorOperation::Split,
         });
         match value.value {
-            crate::effects::AccumulatorValue::Integer(value) => message.set_value(value),
+            crate::effects::AccumulatorValue::Integer(value) => message.set_integer_value(value),
             //TODO unsupported value types
             crate::effects::AccumulatorValue::IntegerTuple(_, _)
             | crate::effects::AccumulatorValue::EventDigest(_) => {}
@@ -3514,5 +3675,20 @@ impl TryFrom<&ObjectSet> for crate::full_checkpoint_content::ObjectSet {
         }
 
         Ok(objects)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::effects::TransactionEffectsAPI;
+
+    #[test]
+    fn transaction_effects_v1_proto_includes_lamport_version() {
+        let effects = crate::effects::TransactionEffectsV1::default();
+        let lamport_version = effects.lamport_version().value();
+        let proto: sui_rpc::proto::sui::rpc::v2::TransactionEffects =
+            crate::effects::TransactionEffects::V1(effects).into();
+
+        assert_eq!(proto.lamport_version, Some(lamport_version));
     }
 }

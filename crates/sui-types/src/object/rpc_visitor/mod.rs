@@ -1,16 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-mod format;
-pub mod json;
-mod meter;
 pub mod proto;
 
-pub use format::Format;
-pub use meter::LocalMeter;
-pub use meter::Meter;
-pub use meter::MeterError;
-pub use meter::Unmetered;
+pub use mysten_common::rpc_format::Format;
+pub use mysten_common::rpc_format::LocalMeter;
+pub use mysten_common::rpc_format::Meter;
+pub use mysten_common::rpc_format::MeterError;
+pub use mysten_common::rpc_format::Unmetered;
 
 use std::marker::PhantomData;
 
@@ -23,6 +20,7 @@ use crate::balance::Balance;
 use crate::base_types::RESOLVED_STD_OPTION;
 use crate::base_types::move_ascii_str_layout;
 use crate::base_types::move_utf8_str_layout;
+use crate::base_types::type_name_layout;
 use crate::base_types::url_layout;
 use crate::id::ID;
 use crate::id::UID;
@@ -180,9 +178,10 @@ impl<'b, 'l, F: Format, M: Meter> AV::Visitor<'b, 'l> for RpcVisitor<F, M> {
 
         if layout == &move_ascii_str_layout()
             || layout == &move_utf8_str_layout()
+            || layout == &type_name_layout()
             || layout == &url_layout()
         {
-            // 0x1::ascii::String or 0x1::string::String or 0x2::url::Url
+            // 0x1::ascii::String or 0x1::string::String or 0x1::type_name::TypeName or 0x2::url::Url
 
             let lo = driver.position();
             driver.skip_field()?;
@@ -368,9 +367,7 @@ mod tests {
 
     #[test]
     fn json_ascii_string() {
-        let l = struct_!("0x1::ascii::String" {
-            "bytes": vector_!(L::U8)
-        });
+        let l = A::MoveTypeLayout::Struct(Box::new(move_ascii_str_layout()));
         let actual = json(l, "The quick brown fox");
         let expect = json!("The quick brown fox");
         assert_eq!(expect, actual);
@@ -378,21 +375,28 @@ mod tests {
 
     #[test]
     fn json_utf8_string() {
-        let l = struct_!("0x1::string::String" {
-            "bytes": vector_!(L::U8)
-        });
+        let l = A::MoveTypeLayout::Struct(Box::new(move_utf8_str_layout()));
         let actual = json(l, "The quick brown fox");
         let expect = json!("The quick brown fox");
         assert_eq!(expect, actual);
     }
 
     #[test]
+    fn json_type_name() {
+        let l = A::MoveTypeLayout::Struct(Box::new(type_name_layout()));
+        let actual = json(
+            l,
+            "0000000000000000000000000000000000000000000000000000000000000002::coin::Coin<0000000000000000000000000000000000000000000000000000000000000002::sui::SUI>",
+        );
+        let expect = json!(
+            "0000000000000000000000000000000000000000000000000000000000000002::coin::Coin<0000000000000000000000000000000000000000000000000000000000000002::sui::SUI>"
+        );
+        assert_eq!(expect, actual);
+    }
+
+    #[test]
     fn json_url() {
-        let l = struct_!("0x2::url::Url" {
-            "url": struct_!("0x1::ascii::String" {
-                "bytes": vector_!(L::U8)
-            })
-        });
+        let l = A::MoveTypeLayout::Struct(Box::new(url_layout()));
         let actual = json(l, "https://example.com");
         let expect = json!("https://example.com");
         assert_eq!(expect, actual);

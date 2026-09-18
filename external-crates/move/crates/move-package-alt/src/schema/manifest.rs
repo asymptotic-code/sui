@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 
+use anyhow::ensure;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_spanned::Spanned;
 
@@ -8,7 +9,8 @@ use move_compiler::editions::Edition;
 use crate::compatibility::legacy::LegacyData;
 
 use super::{
-    EnvironmentName, LocalDepInfo, OnChainDepInfo, PackageName, PublishAddresses, ResolverName,
+    EnvironmentName, LocalDepInfo, OnChainAddress, OnChainPlaceholder, PackageName,
+    PublishAddresses, ResolverName,
 };
 
 /// The on-chain identifier for an environment (such as a chain ID); these are bound to environment
@@ -108,7 +110,8 @@ pub enum ManifestDependencyInfo {
     Git(ManifestGitDependency),
     External(ExternalDependency),
     Local(LocalDepInfo),
-    OnChain(OnChainDepInfo),
+    OnChainPlaceholder(OnChainPlaceholder),
+    OnChain(OnChainAddress),
     System(SystemDependency),
 }
 
@@ -149,7 +152,7 @@ pub struct SystemDependency {
 /// Convenience type for serializing/deserializing external deps
 #[derive(Serialize, Deserialize)]
 struct RField {
-    r: BTreeMap<String, toml::Value>,
+    r: BTreeMap<ResolverName, toml::Value>,
 }
 
 impl ReplacementDependency {
@@ -192,8 +195,18 @@ impl<'de> Deserialize<'de> for ManifestDependencyInfo {
                 let dep = LocalDepInfo::deserialize(data).map_err(de::Error::custom)?;
                 Ok(ManifestDependencyInfo::Local(dep))
             } else if tbl.contains_key("on-chain") {
-                let dep = OnChainDepInfo::deserialize(data).map_err(de::Error::custom)?;
-                Ok(ManifestDependencyInfo::OnChain(dep))
+                match &tbl["on-chain"] {
+                    toml::Value::Boolean(_) => OnChainPlaceholder::deserialize(data)
+                        .map(ManifestDependencyInfo::OnChainPlaceholder)
+                        .map_err(de::Error::custom),
+                    toml::Value::String(_) => OnChainAddress::deserialize(data)
+                        .map(ManifestDependencyInfo::OnChain)
+                        .map_err(de::Error::custom),
+                    _ => Err(de::Error::custom(
+                        "on-chain must be `true` (in [dependencies]) or a hex address string \
+                         like \"0x...\" (in [dep-replacements])",
+                    )),
+                }
             } else {
                 Err(de::Error::custom(
                     "Invalid dependency; dependencies must have exactly one of the following fields: `system`, `git`, `r.<resolver>`, `local`, or `on-chain`.",
@@ -206,13 +219,14 @@ impl<'de> Deserialize<'de> for ManifestDependencyInfo {
 }
 
 impl TryFrom<RField> for ExternalDependency {
-    type Error = &'static str;
+    type Error = anyhow::Error;
 
     /// Convert from [RField] (`{r.<res> = <data>}`) to [ExternalDependency] (`{ res, data }`)
     fn try_from(value: RField) -> Result<Self, Self::Error> {
-        if value.r.len() != 1 {
-            return Err("Externally resolved dependencies may only have one `r.<resolver>` field");
-        }
+        ensure!(
+            value.r.len() == 1,
+            "Externally resolved dependencies may only have one `r.<resolver>` field"
+        );
 
         let (resolver, data) = value
             .r
@@ -364,7 +378,7 @@ mod tests {
 
         let dep = manifest.get_dep("mock").dependency_info.as_external();
 
-        assert_eq!(dep.resolver, "mock-resolver");
+        assert_eq!(dep.resolver.to_string(), "mock-resolver");
         assert_eq!(
             dep.data,
             toml_edit::de::from_str(r#"resolved = { local = "." }"#).unwrap()
@@ -392,6 +406,29 @@ mod tests {
         7 |             foo = { r.mvr = "a", r.ext = "b" }
           |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
         Externally resolved dependencies may only have one `r.<resolver>` field
+        "###);
+    }
+
+    /// external resolver names can't contain invalid characters (DVX-2019)
+    #[test]
+    fn parse_malformed_external_resolver() {
+        let error = toml_edit::de::from_str::<ParsedManifest>(
+            r#"
+            [package]
+            name = "test"
+
+            [dependencies]
+            foo = { r."foo//bar" = "foo" }
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_snapshot!(error, @r###"
+        TOML parse error at line 6, column 19
+          |
+        6 |             foo = { r."foo//bar" = "foo" }
+          |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+        invalid character in external resolver name `foo//bar` for key `r`
         "###);
     }
 
@@ -958,6 +995,159 @@ mod tests {
           |                 ^^^^^^^^^^^^^
         invalid type: integer `1`, expected path string for key `local`
         "###);
+    }
+
+    // On-chain dependency parsing ///////////////////////////////////////////////////
+
+    /// Parsing `on-chain = true` in [dependencies] succeeds
+    #[test]
+    fn parse_on_chain_flag() {
+        let manifest: ParsedManifest = toml_edit::de::from_str(
+            r#"
+            [package]
+            name = "test"
+            edition = "2024"
+
+            [dependencies]
+            foo = { on-chain = true }
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            manifest.get_dep("foo").dependency_info,
+            ManifestDependencyInfo::OnChainPlaceholder(_)
+        ));
+    }
+
+    /// Parsing `on-chain = "0x1234"` in [dep-replacements] succeeds
+    #[test]
+    fn parse_on_chain_address_in_replacement() {
+        let _: ParsedManifest = toml_edit::de::from_str(
+            r#"
+            [package]
+            name = "test"
+            edition = "2024"
+
+            [dependencies]
+            foo = { on-chain = true }
+
+            [dep-replacements]
+            mainnet.foo = { on-chain = "0x0000000000000000000000000000000000000000000000000000000000000001" }
+            "#,
+        )
+        .unwrap();
+    }
+
+    /// Parsing `on-chain = false` is rejected
+    #[test]
+    fn parse_on_chain_false() {
+        let error = toml_edit::de::from_str::<ParsedManifest>(
+            r#"
+            [package]
+            name = "test"
+            edition = "2024"
+
+            [dependencies]
+            foo = { on-chain = false }
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert_snapshot!(error, @r###"
+        TOML parse error at line 7, column 19
+          |
+        7 |             foo = { on-chain = false }
+          |                   ^^^^^^^^^^^^^^^^^^^^
+        Expected the constant `true` for key `on-chain`
+        "###);
+    }
+
+    /// Parsing `on-chain = 42` is rejected
+    #[test]
+    fn parse_on_chain_integer() {
+        let error = toml_edit::de::from_str::<ParsedManifest>(
+            r#"
+            [package]
+            name = "test"
+            edition = "2024"
+
+            [dependencies]
+            foo = { on-chain = 42 }
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert_snapshot!(error, @r###"
+        TOML parse error at line 7, column 19
+          |
+        7 |             foo = { on-chain = 42 }
+          |                   ^^^^^^^^^^^^^^^^^
+        on-chain must be `true` (in [dependencies]) or a hex address string like "0x..." (in [dep-replacements])
+        "###);
+    }
+
+    /// Parsing a short hex address like `on-chain = "0x1"` succeeds (addresses are zero-padded)
+    #[test]
+    fn parse_on_chain_short_address() {
+        let _: ParsedManifest = toml_edit::de::from_str(
+            r#"
+            [package]
+            name = "test"
+            edition = "2024"
+
+            [dependencies]
+            foo = { on-chain = true }
+
+            [dep-replacements]
+            mainnet.foo = { on-chain = "0x1" }
+            "#,
+        )
+        .unwrap();
+    }
+
+    /// Parsing an address longer than 32 bytes should be a parse error.
+    // TODO(DVX-2143): currently silently drops the invalid address due to serde flatten+default
+    #[test]
+    #[ignore]
+    fn parse_on_chain_too_long_address() {
+        toml_edit::de::from_str::<ParsedManifest>(
+            r#"
+            [package]
+            name = "test"
+            edition = "2024"
+
+            [dependencies]
+            foo = { on-chain = true }
+
+            [dep-replacements]
+            mainnet.foo = { on-chain = "0x00000000000000000000000000000000000000000000000000000000000000000001" }
+            "#,
+        )
+        .unwrap_err();
+    }
+
+    /// Parsing an invalid hex string should be a parse error.
+    // TODO(DVX-2143): currently silently drops the invalid address due to serde flatten+default
+    #[test]
+    #[ignore]
+    fn parse_on_chain_invalid_hex() {
+        toml_edit::de::from_str::<ParsedManifest>(
+            r#"
+            [package]
+            name = "test"
+            edition = "2024"
+
+            [dependencies]
+            foo = { on-chain = true }
+
+            [dep-replacements]
+            mainnet.foo = { on-chain = "0x0000q" }
+            "#,
+        )
+        .unwrap_err();
     }
 
     /// [addresses] is dead ♥

@@ -5,17 +5,22 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use consensus_config::{
+    NetworkPublicKey, ObserverParameters, Parameters as ConsensusParameters, PeerRecord,
+};
 use fastcrypto::encoding::{Encoding, Hex};
 use fastcrypto::traits::KeyPair;
 use sui_config::node::{
     AuthorityKeyPairWithPath, AuthorityOverloadConfig, AuthorityStorePruningConfig,
-    CheckpointExecutorConfig, DBCheckpointConfig, DEFAULT_GRPC_CONCURRENCY_LIMIT,
-    ExecutionCacheConfig, ExecutionTimeObserverConfig, ExpensiveSafetyCheckConfig,
-    FundsWithdrawSchedulerType, Genesis, KeyPairWithPath, StateSnapshotConfig,
-    default_enable_index_processing, default_end_of_epoch_broadcast_channel_capacity,
+    CheckpointExecutorConfig, ConsensusTransactionPoolConfig, DBCheckpointConfig,
+    DEFAULT_GRPC_CONCURRENCY_LIMIT, ExecutionCacheConfig, ExecutionTimeObserverConfig,
+    ExpensiveSafetyCheckConfig, FundsWithdrawSchedulerType, Genesis, KeyPairWithPath,
+    StateSnapshotConfig, default_enable_index_processing,
+    default_end_of_epoch_broadcast_channel_capacity,
 };
 use sui_config::node::{RunWithRange, TransactionDriverConfig, default_zklogin_oauth_providers};
 use sui_config::p2p::{P2pConfig, SeedPeer, StateSyncConfig};
+use sui_config::transaction_deny_config::PeerDenySyncConfig;
 use sui_config::verifier_signing_config::VerifierSigningConfig;
 use sui_config::{
     AUTHORITIES_DB_NAME, CONSENSUS_DB_NAME, ConsensusConfig, FULL_NODE_DB_PATH, NodeConfig,
@@ -24,6 +29,7 @@ use sui_config::{
 use sui_protocol_config::Chain;
 use sui_types::crypto::{AuthorityKeyPair, AuthorityPublicKeyBytes, NetworkKeyPair, SuiKeyPair};
 use sui_types::multiaddr::Multiaddr;
+use sui_types::node_role::FullNodeSyncMode;
 use sui_types::supported_protocol_versions::SupportedProtocolVersions;
 use sui_types::traffic_control::{PolicyConfig, RemoteFirewallConfig};
 
@@ -43,13 +49,14 @@ pub struct ValidatorConfigBuilder {
     data_ingestion_dir: Option<PathBuf>,
     policy_config: Option<PolicyConfig>,
     firewall_config: Option<RemoteFirewallConfig>,
-    max_submit_position: Option<usize>,
-    submit_delay_step_override_millis: Option<u64>,
     global_state_hash_v2: bool,
     funds_withdraw_scheduler_type: FundsWithdrawSchedulerType,
     execution_time_observer_config: Option<ExecutionTimeObserverConfig>,
     chain_override: Option<Chain>,
     state_sync_config: Option<StateSyncConfig>,
+    observer_config: Option<ObserverParameters>,
+    peer_deny_sync_config: Option<PeerDenySyncConfig>,
+    consensus_transaction_pool_config: Option<ConsensusTransactionPoolConfig>,
 }
 
 impl ValidatorConfigBuilder {
@@ -96,6 +103,14 @@ impl ValidatorConfigBuilder {
         self
     }
 
+    pub fn with_consensus_transaction_pool_config(
+        mut self,
+        config: ConsensusTransactionPoolConfig,
+    ) -> Self {
+        self.consensus_transaction_pool_config = Some(config);
+        self
+    }
+
     pub fn with_execution_cache_config(mut self, config: ExecutionCacheConfig) -> Self {
         self.execution_cache_config = Some(config);
         self
@@ -113,19 +128,6 @@ impl ValidatorConfigBuilder {
 
     pub fn with_firewall_config(mut self, config: Option<RemoteFirewallConfig>) -> Self {
         self.firewall_config = config;
-        self
-    }
-
-    pub fn with_max_submit_position(mut self, max_submit_position: usize) -> Self {
-        self.max_submit_position = Some(max_submit_position);
-        self
-    }
-
-    pub fn with_submit_delay_step_override_millis(
-        mut self,
-        submit_delay_step_override_millis: u64,
-    ) -> Self {
-        self.submit_delay_step_override_millis = Some(submit_delay_step_override_millis);
         self
     }
 
@@ -155,6 +157,16 @@ impl ValidatorConfigBuilder {
         self
     }
 
+    pub fn with_observer_config(mut self, config: ObserverParameters) -> Self {
+        self.observer_config = Some(config);
+        self
+    }
+
+    pub fn with_peer_deny_sync_config(mut self, config: PeerDenySyncConfig) -> Self {
+        self.peer_deny_sync_config = Some(config);
+        self
+    }
+
     pub fn build(
         self,
         validator: ValidatorGenesisConfig,
@@ -171,14 +183,25 @@ impl ValidatorConfigBuilder {
         let network_address = validator.network_address;
         let consensus_db_path = config_directory.join(CONSENSUS_DB_NAME).join(key_path);
         let localhost = local_ip_utils::localhost_for_testing();
+        let parameters = self
+            .observer_config
+            .map(|observer_config| ConsensusParameters {
+                observer: ObserverParameters {
+                    server_port: observer_config
+                        .server_port
+                        .or_else(|| Some(local_ip_utils::get_available_port(&localhost))),
+                    allowlist: observer_config.allowlist,
+                    quorum_release: observer_config.quorum_release,
+                    peers: observer_config.peers,
+                },
+                ..Default::default()
+            });
         let consensus_config = ConsensusConfig {
             db_path: consensus_db_path,
             db_retention_epochs: None,
             db_pruner_period_secs: None,
             max_pending_transactions: None,
-            max_submit_position: self.max_submit_position,
-            submit_delay_step_override_millis: self.submit_delay_step_override_millis,
-            parameters: Default::default(),
+            parameters,
             listen_address: None,
             external_address: None,
         };
@@ -218,6 +241,8 @@ impl ValidatorConfigBuilder {
         };
 
         NodeConfig {
+            recent_submission_dedup_window_ms: None,
+            address_prober: None,
             protocol_key_pair: AuthorityKeyPairWithPath::new(validator.key_pair),
             network_key_pair: KeyPairWithPath::new(SuiKeyPair::Ed25519(validator.network_key_pair)),
             account_key_pair: KeyPairWithPath::new(validator.account_key_pair),
@@ -230,6 +255,7 @@ impl ValidatorConfigBuilder {
                 .to_socket_addr()
                 .unwrap(),
             consensus_config: Some(consensus_config),
+            fullnode_sync_mode: None,
             remove_deprecated_tables: false,
             enable_index_processing: default_enable_index_processing(),
             sync_post_process_one_tx: false,
@@ -250,6 +276,7 @@ impl ValidatorConfigBuilder {
             name_service_registry_id: None,
             name_service_reverse_registry_id: None,
             transaction_deny_config: Default::default(),
+            peer_deny_sync_config: self.peer_deny_sync_config.unwrap_or_default(),
             dev_inspect_disabled: false,
             certificate_deny_config: Default::default(),
             state_debug_dump_config: Default::default(),
@@ -270,11 +297,13 @@ impl ValidatorConfigBuilder {
             execution_cache: self.execution_cache_config.unwrap_or_default(),
             run_with_range: None,
             jsonrpc_server_type: None,
+            disable_json_rpc: false,
             policy_config: self.policy_config,
             firewall_config: self.firewall_config,
             state_accumulator_v2: self.global_state_hash_v2,
             funds_withdraw_scheduler_type: self.funds_withdraw_scheduler_type,
             enable_soft_bundle: true,
+            enable_simulate_allowed_proposers: true,
             verifier_signing_config: VerifierSigningConfig::default(),
             enable_db_write_stall: None,
             enable_db_sync_to_disk: None,
@@ -283,6 +312,7 @@ impl ValidatorConfigBuilder {
             validator_client_monitor_config: None,
             fork_recovery: None,
             transaction_driver_config: Some(TransactionDriverConfig::default()),
+            consensus_transaction_pool: self.consensus_transaction_pool_config,
             congestion_log: None,
         }
     }
@@ -320,11 +350,47 @@ pub struct FullnodeConfigBuilder {
     fw_config: Option<RemoteFirewallConfig>,
     data_ingestion_dir: Option<PathBuf>,
     disable_pruning: bool,
+    disable_json_rpc: bool,
     sync_post_process_one_tx: bool,
     chain_override: Option<Chain>,
     transaction_driver_config: Option<TransactionDriverConfig>,
     rpc_config: Option<sui_config::RpcConfig>,
     state_sync_config: Option<StateSyncConfig>,
+    observer_setup: Option<ObserverSetup>,
+}
+
+/// How a fullnode should be set up as a consensus observer.
+#[derive(Clone, Debug)]
+enum ObserverSetup {
+    /// Use the given observer parameters as-is. Peers must be non-empty.
+    Explicit(ObserverParameters),
+    /// Derive the observer peer from the validator at this index in the network
+    /// config, which must have its observer server enabled.
+    SubscribeToValidator { index: usize },
+}
+
+/// Builds the observer `PeerRecord` for connecting to the given validator's observer server.
+/// Panics if the validator does not have its observer server enabled.
+pub fn observer_peer_record(validator_config: &NodeConfig) -> PeerRecord {
+    let observer_port = validator_config
+        .consensus_config()
+        .and_then(|c| c.parameters.as_ref())
+        .and_then(|p| p.observer.server_port)
+        .expect("validator must have its observer server enabled");
+    let public_key = NetworkPublicKey::new(validator_config.network_key_pair().public().clone());
+    let host = validator_config
+        .network_address
+        .to_socket_addr()
+        .unwrap()
+        .ip()
+        .to_string();
+    let address = format!("/ip4/{host}/udp/{observer_port}/http")
+        .parse()
+        .unwrap();
+    PeerRecord {
+        public_key,
+        address,
+    }
 }
 
 impl FullnodeConfigBuilder {
@@ -372,6 +438,11 @@ impl FullnodeConfigBuilder {
 
     pub fn with_disable_pruning(mut self, disable_pruning: bool) -> Self {
         self.disable_pruning = disable_pruning;
+        self
+    }
+
+    pub fn with_disable_json_rpc(mut self, disable_json_rpc: bool) -> Self {
+        self.disable_json_rpc = disable_json_rpc;
         self
     }
 
@@ -471,6 +542,19 @@ impl FullnodeConfigBuilder {
         self
     }
 
+    pub fn with_observer_config(mut self, config: ObserverParameters) -> Self {
+        self.observer_setup = Some(ObserverSetup::Explicit(config));
+        self
+    }
+
+    /// Sets up the fullnode as a consensus observer subscribed to the observer server of the
+    /// validator at `index` in the network config. The peer record is derived from the
+    /// network config at build time, so the validator must have its observer server enabled.
+    pub fn with_observer_subscribed_to_validator(mut self, index: usize) -> Self {
+        self.observer_setup = Some(ObserverSetup::SubscribeToValidator { index });
+        self
+    }
+
     pub fn build<R: rand::RngCore + rand::CryptoRng>(
         self,
         rng: &mut R,
@@ -490,6 +574,54 @@ impl FullnodeConfigBuilder {
         let config_directory = self
             .config_directory
             .unwrap_or_else(|| mysten_common::tempdir().unwrap().keep());
+
+        let consensus_db_path = config_directory.join(CONSENSUS_DB_NAME).join(&key_path);
+
+        // Resolve the observer parameters, deriving the peer record from the network config
+        // when subscribing to a validator.
+        let observer_config = self.observer_setup.map(|setup| match setup {
+            ObserverSetup::Explicit(config) => config,
+            ObserverSetup::SubscribeToValidator { index } => {
+                let validator_config = network_config
+                    .validator_configs
+                    .get(index)
+                    .unwrap_or_else(|| panic!("no validator at index {index} in network config"));
+                ObserverParameters {
+                    peers: vec![observer_peer_record(validator_config)],
+                    ..Default::default()
+                }
+            }
+        });
+
+        let fullnode_sync_mode = observer_config.as_ref().map(|c| {
+            // A consensus config without peers would make this node's intended role a validator.
+            assert!(
+                !c.peers.is_empty(),
+                "observer fullnode must be configured with at least one peer"
+            );
+            FullNodeSyncMode::ConsensusObserver
+        });
+
+        // Create consensus config, if observer config is provided.
+        let consensus_config = observer_config.map(|observer_config| ConsensusConfig {
+            db_path: consensus_db_path,
+            db_retention_epochs: None,
+            db_pruner_period_secs: None,
+            max_pending_transactions: None,
+            parameters: Some(ConsensusParameters {
+                observer: ObserverParameters {
+                    server_port: observer_config
+                        .server_port
+                        .or_else(|| Some(local_ip_utils::get_available_port(&ip))),
+                    allowlist: observer_config.allowlist,
+                    quorum_release: observer_config.quorum_release,
+                    peers: observer_config.peers,
+                },
+                ..Default::default()
+            }),
+            listen_address: None,
+            external_address: None,
+        });
 
         let p2p_config = {
             let seed_peers = network_config
@@ -553,6 +685,8 @@ impl FullnodeConfigBuilder {
         };
 
         NodeConfig {
+            recent_submission_dedup_window_ms: None,
+            address_prober: None,
             protocol_key_pair: AuthorityKeyPairWithPath::new(validator_config.key_pair),
             account_key_pair: KeyPairWithPath::new(validator_config.account_key_pair),
             worker_key_pair: KeyPairWithPath::new(SuiKeyPair::Ed25519(
@@ -574,7 +708,8 @@ impl FullnodeConfigBuilder {
                 .admin_interface_port
                 .unwrap_or(local_ip_utils::get_available_port(&localhost)),
             json_rpc_address: self.json_rpc_address.unwrap_or(json_rpc_address),
-            consensus_config: None,
+            fullnode_sync_mode,
+            consensus_config,
             remove_deprecated_tables: false,
             enable_index_processing: default_enable_index_processing(),
             sync_post_process_one_tx: self.sync_post_process_one_tx,
@@ -598,6 +733,7 @@ impl FullnodeConfigBuilder {
             name_service_registry_id: None,
             name_service_reverse_registry_id: None,
             transaction_deny_config: Default::default(),
+            peer_deny_sync_config: Default::default(),
             dev_inspect_disabled: false,
             certificate_deny_config: Default::default(),
             state_debug_dump_config: Default::default(),
@@ -618,12 +754,14 @@ impl FullnodeConfigBuilder {
             authority_overload_config: Default::default(),
             run_with_range: self.run_with_range,
             jsonrpc_server_type: None,
+            disable_json_rpc: self.disable_json_rpc,
             policy_config: self.policy_config,
             firewall_config: self.fw_config,
             execution_cache: ExecutionCacheConfig::default(),
             state_accumulator_v2: true,
             funds_withdraw_scheduler_type: FundsWithdrawSchedulerType::default(),
             enable_soft_bundle: true,
+            enable_simulate_allowed_proposers: true,
             verifier_signing_config: VerifierSigningConfig::default(),
             enable_db_write_stall: None,
             enable_db_sync_to_disk: None,
@@ -634,6 +772,7 @@ impl FullnodeConfigBuilder {
             transaction_driver_config: self
                 .transaction_driver_config
                 .or(Some(TransactionDriverConfig::default())),
+            consensus_transaction_pool: None,
             congestion_log: None,
         }
     }

@@ -1,7 +1,43 @@
 ---
 title: Sui Environment Setup
-description: Get the background information you need before you start developing on Sui. Learn the layout of the Sui monorepository and the suggested development environment for working with Move.
-keywords: [ setup environment, setup dev environment, setup mono repo, download mono repo, monorepo, fork sui repo, how to contribute to sui repo, contribute to sui, develop sui locally ]
+description: >-
+  Get the background information you need before you start developing on Sui.
+  Learn the layout of the Sui monorepository and the suggested development
+  environment for working with Move.
+keywords:
+  - setup environment
+  - setup dev environment
+  - setup mono repo
+  - download mono repo
+  - monorepo
+  - fork sui repo
+  - how to contribute to sui repo
+  - contribute to sui
+  - develop sui locally
+goal:
+  description: >-
+    Contributor understands the environment setup requirements for the Sui
+    documentation
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is Sui Environment Setup in Sui?
+  - Where can I find the sui environment setup reference?
+  - How does sui environment setup work on Sui?
+answer: >-
+  Before you start developing with Sui and Move, you should familiarize yourself
+  with how to contribute to Sui, how Sui is structured, what tools and SDKs
+  exist, and what plugins are available to use in your IDE.
 ---
 
 Before you start developing with Sui and Move, you should familiarize yourself with how to contribute to Sui, how Sui is structured, what tools and SDKs exist, and what plugins are available to use in your IDE.
@@ -57,7 +93,7 @@ The following primary directories offer a good starting point for exploring the 
 
 - [move](https://github.com/MystenLabs/sui/tree/main/external-crates/move): Move VM, compiler, and tools.
 - [consensus](https://github.com/MystenLabs/sui/tree/main/consensus): Consensus engine.
-- [typescript-sdk](https://github.com/MystenLabs/ts-sdks/tree/main/packages/typescript/): Sui TypeScript SDK.
+- [typescript-sdk](https://github.com/MystenLabs/ts-sdks/tree/main/packages/sui): Sui TypeScript SDK.
 - [wallet](https://chromewebstore.google.com/detail/slush-%E2%80%94-a-sui-wallet/opcgpfmipidbgpenhmajoajpbobppdil): Chrome extension wallet for Sui.
 - [sui](https://github.com/MystenLabs/sui/tree/main/crates/sui): Sui command line tool.
 - [sui-core](https://github.com/MystenLabs/sui/tree/main/crates/sui-core): Core Sui components.
@@ -65,7 +101,7 @@ The following primary directories offer a good starting point for exploring the 
 - [sui-framework](https://github.com/MystenLabs/sui/tree/main/crates/sui-framework): Move system packages (0x1, 0x2, 0x3, 0xdee9).
 - [sui-network](https://github.com/MystenLabs/sui/tree/main/crates/sui-network): Networking interfaces.
 - [sui-node](https://github.com/MystenLabs/sui/tree/main/crates/sui-node): Validator and full node software.
-- [sui-protocol-config](https://github.com/MystenLabs/sui/tree/main/crates/sui-protocol-config): On-chain system configuration and limits.
+- [sui-protocol-config](https://github.com/MystenLabs/sui/tree/main/crates/sui-protocol-config): Onchain system configuration and limits.
 - [sui-rust-sdk](https://github.com/MystenLabs/sui-rust-sdk): Sui Rust SDK.
 - [sui-types](https://github.com/MystenLabs/sui/tree/main/crates/sui-types): Sui object types, such as coins and gas.
 
@@ -73,7 +109,7 @@ The following primary directories offer a good starting point for exploring the 
 
 The Sui repository includes four primary branches: `devnet`, `testnet`, `mainnet`, and `main`.
 
-The `devnet` branch includes the latest stable build of Sui. Choose the `devnet` branch if you want to build or test on Sui Devnet. If you encounter an issue or find a bug, it may already be fixed in the `main` branch. To submit a PR, you should push commits to your fork of the `main` branch.
+The `devnet` branch includes the latest stable build of Sui. Choose the `devnet` branch if you want to build or test on Sui Devnet. If you encounter an issue or find a bug, it might already be fixed in the `main` branch. To submit a PR, you should push commits to your fork of the `main` branch.
 
 The `testnet` branch includes the code running on the Sui Testnet network.
 

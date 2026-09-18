@@ -227,6 +227,37 @@ impl FullObjectRef {
 /// based on the object ID and start version.
 pub type ConsensusObjectSequenceKey = (ObjectID, SequenceNumber);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsensusObjectVersion {
+    pub initial_shared_version: SequenceNumber,
+    pub version: SequenceNumber,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemObjectVersions {
+    accumulator_version: Option<ConsensusObjectVersion>,
+}
+
+impl SystemObjectVersions {
+    pub fn new(accumulator_version: Option<ConsensusObjectVersion>) -> Self {
+        Self {
+            accumulator_version,
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self::new(None)
+    }
+
+    pub fn get(&self, object_id: &ObjectID) -> Option<ConsensusObjectVersion> {
+        if *object_id == crate::SUI_ACCUMULATOR_ROOT_OBJECT_ID {
+            self.accumulator_version
+        } else {
+            panic!("{object_id} is not an implicitly read system object")
+        }
+    }
+}
+
 /// Wrapper around StructTag with a space-efficient representation for common types like coins
 /// The StructTag for a gas coin is 84 bytes, so using 1 byte instead is a win.
 /// The inner representation is private to prevent incorrectly constructing an `Other` instead of
@@ -1116,6 +1147,14 @@ pub const RESOLVED_UTF8_STR: (&AccountAddress, &IdentStr, &IdentStr) = (
     STD_UTF8_STRUCT_NAME,
 );
 
+pub const STD_TYPE_NAME_MODULE_NAME: &IdentStr = ident_str!("type_name");
+pub const STD_TYPE_NAME_STRUCT_NAME: &IdentStr = ident_str!("TypeName");
+pub const RESOLVED_STD_TYPE_NAME: (&AccountAddress, &IdentStr, &IdentStr) = (
+    &MOVE_STDLIB_ADDRESS,
+    STD_TYPE_NAME_MODULE_NAME,
+    STD_TYPE_NAME_STRUCT_NAME,
+);
+
 pub const TX_CONTEXT_MODULE_NAME: &IdentStr = ident_str!("tx_context");
 pub const TX_CONTEXT_STRUCT_NAME: &IdentStr = ident_str!("TxContext");
 pub const RESOLVED_TX_CONTEXT: (&AccountAddress, &IdentStr, &IdentStr) = (
@@ -1171,6 +1210,21 @@ pub fn url_layout() -> A::MoveStructLayout {
         },
         fields: vec![A::MoveFieldLayout::new(
             ident_str!("url").to_owned(),
+            A::MoveTypeLayout::Struct(Box::new(move_ascii_str_layout())),
+        )],
+    }
+}
+
+pub fn type_name_layout() -> A::MoveStructLayout {
+    A::MoveStructLayout {
+        type_: StructTag {
+            address: MOVE_STDLIB_ADDRESS,
+            module: STD_TYPE_NAME_MODULE_NAME.to_owned(),
+            name: STD_TYPE_NAME_STRUCT_NAME.to_owned(),
+            type_params: vec![],
+        },
+        fields: vec![A::MoveFieldLayout::new(
+            ident_str!("name").into(),
             A::MoveTypeLayout::Struct(Box::new(move_ascii_str_layout())),
         )],
     }
@@ -1694,6 +1748,10 @@ impl ObjectID {
 
     pub fn is_clock(&self) -> bool {
         *self == SUI_CLOCK_OBJECT_ID
+    }
+
+    pub fn is_implicitly_read_system_object(&self) -> bool {
+        crate::IMPLICITLY_READ_SYSTEM_OBJECTS.contains(self)
     }
 }
 

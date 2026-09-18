@@ -6,6 +6,22 @@ processed 18 tasks
 init:
 A: object(0,0), B: object(0,1), C: object(0,2)
 
+// Transactions:
+//
+// 1. A sends to self
+// 2. A sends to B
+// 3. A sends to C
+// 4. A sends to B and C
+// 5. B sends to A
+//
+// RPC queries:
+//
+// 1. All Transactions
+// 2, 3, 4, 5, 6, 7. Transactions affecting and to A, B, C respectively (they
+//     mean the same thing in this RPC implementation).
+// 8, 9, 10. Transactions sent by A, B, C respectively.
+// 11. Transactions sent by A to B.
+
 task 1, lines 22-24:
 //# programmable --sender A --inputs 42 @A
 //> 0: SplitCoins(Gas, [Input(0)]);
@@ -59,32 +75,32 @@ Response: {
   "result": {
     "data": [
       {
-        "digest": "FBsAJD5LzzYgqMhTJXR73mf7G8BjRXBDZaBB34uekP8W",
+        "digest": "G7nq5tVG2CuHG9wmeq7JHDCN7q43PLBfC6W2D6eHffjT",
         "timestampMs": "0",
         "checkpoint": "0"
       },
       {
-        "digest": "7iu5PyhAHogqN2M3WQqMGWWXsiF43cchewkc7brPrCR4",
+        "digest": "84JYiTjfb1B5oF3t4kWDKqgUYxmHTMq7oiwsJRSufV1L",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "hpAU2AJypKUmYiXrhXP6Lu8Mfs92CpuinMx7Bh7ML7n",
+        "digest": "H2JCrEJaMkudGGnoxiwjpXbtfCTNjHtpiPu1MhApbwHj",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "8yhqUPDwJ9Ei93A9qithJa3kfPbuwAof2Yo5YFXAGeua",
+        "digest": "FWHihWG9u4VFFTDNxZafStbuQJdXndAAhuQrHXb5bhET",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "J8rYr2HMcDm2oUQ5tnKiH1VD4dTkvnVBLuNpi5Pj3opL",
+        "digest": "2F8o7RYkZXNcHGBuQVkKSBsdt5SEKNtyfY243Tewyen4",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "ExAZBweaedMiwd6VYov94MMrKuoaS8CgWMDh7maAcn5r",
+        "digest": "763A1gJgYUhFPTYMwsEBS8BYA9hnHetriUtwHwzXyHLD",
         "timestampMs": "0",
         "checkpoint": "1"
       },
@@ -107,32 +123,32 @@ Response: {
   "result": {
     "data": [
       {
-        "digest": "FBsAJD5LzzYgqMhTJXR73mf7G8BjRXBDZaBB34uekP8W",
+        "digest": "G7nq5tVG2CuHG9wmeq7JHDCN7q43PLBfC6W2D6eHffjT",
         "timestampMs": "0",
         "checkpoint": "0"
       },
       {
-        "digest": "7iu5PyhAHogqN2M3WQqMGWWXsiF43cchewkc7brPrCR4",
+        "digest": "84JYiTjfb1B5oF3t4kWDKqgUYxmHTMq7oiwsJRSufV1L",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "hpAU2AJypKUmYiXrhXP6Lu8Mfs92CpuinMx7Bh7ML7n",
+        "digest": "H2JCrEJaMkudGGnoxiwjpXbtfCTNjHtpiPu1MhApbwHj",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "8yhqUPDwJ9Ei93A9qithJa3kfPbuwAof2Yo5YFXAGeua",
+        "digest": "FWHihWG9u4VFFTDNxZafStbuQJdXndAAhuQrHXb5bhET",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "J8rYr2HMcDm2oUQ5tnKiH1VD4dTkvnVBLuNpi5Pj3opL",
+        "digest": "2F8o7RYkZXNcHGBuQVkKSBsdt5SEKNtyfY243Tewyen4",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "ExAZBweaedMiwd6VYov94MMrKuoaS8CgWMDh7maAcn5r",
+        "digest": "763A1gJgYUhFPTYMwsEBS8BYA9hnHetriUtwHwzXyHLD",
         "timestampMs": "0",
         "checkpoint": "1"
       }
@@ -150,32 +166,32 @@ Response: {
   "result": {
     "data": [
       {
-        "digest": "FBsAJD5LzzYgqMhTJXR73mf7G8BjRXBDZaBB34uekP8W",
+        "digest": "G7nq5tVG2CuHG9wmeq7JHDCN7q43PLBfC6W2D6eHffjT",
         "timestampMs": "0",
         "checkpoint": "0"
       },
       {
-        "digest": "7iu5PyhAHogqN2M3WQqMGWWXsiF43cchewkc7brPrCR4",
+        "digest": "84JYiTjfb1B5oF3t4kWDKqgUYxmHTMq7oiwsJRSufV1L",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "hpAU2AJypKUmYiXrhXP6Lu8Mfs92CpuinMx7Bh7ML7n",
+        "digest": "H2JCrEJaMkudGGnoxiwjpXbtfCTNjHtpiPu1MhApbwHj",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "8yhqUPDwJ9Ei93A9qithJa3kfPbuwAof2Yo5YFXAGeua",
+        "digest": "FWHihWG9u4VFFTDNxZafStbuQJdXndAAhuQrHXb5bhET",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "J8rYr2HMcDm2oUQ5tnKiH1VD4dTkvnVBLuNpi5Pj3opL",
+        "digest": "2F8o7RYkZXNcHGBuQVkKSBsdt5SEKNtyfY243Tewyen4",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "ExAZBweaedMiwd6VYov94MMrKuoaS8CgWMDh7maAcn5r",
+        "digest": "763A1gJgYUhFPTYMwsEBS8BYA9hnHetriUtwHwzXyHLD",
         "timestampMs": "0",
         "checkpoint": "1"
       }
@@ -193,22 +209,22 @@ Response: {
   "result": {
     "data": [
       {
-        "digest": "FBsAJD5LzzYgqMhTJXR73mf7G8BjRXBDZaBB34uekP8W",
+        "digest": "G7nq5tVG2CuHG9wmeq7JHDCN7q43PLBfC6W2D6eHffjT",
         "timestampMs": "0",
         "checkpoint": "0"
       },
       {
-        "digest": "hpAU2AJypKUmYiXrhXP6Lu8Mfs92CpuinMx7Bh7ML7n",
+        "digest": "H2JCrEJaMkudGGnoxiwjpXbtfCTNjHtpiPu1MhApbwHj",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "J8rYr2HMcDm2oUQ5tnKiH1VD4dTkvnVBLuNpi5Pj3opL",
+        "digest": "2F8o7RYkZXNcHGBuQVkKSBsdt5SEKNtyfY243Tewyen4",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "ExAZBweaedMiwd6VYov94MMrKuoaS8CgWMDh7maAcn5r",
+        "digest": "763A1gJgYUhFPTYMwsEBS8BYA9hnHetriUtwHwzXyHLD",
         "timestampMs": "0",
         "checkpoint": "1"
       }
@@ -226,22 +242,22 @@ Response: {
   "result": {
     "data": [
       {
-        "digest": "FBsAJD5LzzYgqMhTJXR73mf7G8BjRXBDZaBB34uekP8W",
+        "digest": "G7nq5tVG2CuHG9wmeq7JHDCN7q43PLBfC6W2D6eHffjT",
         "timestampMs": "0",
         "checkpoint": "0"
       },
       {
-        "digest": "hpAU2AJypKUmYiXrhXP6Lu8Mfs92CpuinMx7Bh7ML7n",
+        "digest": "H2JCrEJaMkudGGnoxiwjpXbtfCTNjHtpiPu1MhApbwHj",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "J8rYr2HMcDm2oUQ5tnKiH1VD4dTkvnVBLuNpi5Pj3opL",
+        "digest": "2F8o7RYkZXNcHGBuQVkKSBsdt5SEKNtyfY243Tewyen4",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "ExAZBweaedMiwd6VYov94MMrKuoaS8CgWMDh7maAcn5r",
+        "digest": "763A1gJgYUhFPTYMwsEBS8BYA9hnHetriUtwHwzXyHLD",
         "timestampMs": "0",
         "checkpoint": "1"
       }
@@ -259,17 +275,17 @@ Response: {
   "result": {
     "data": [
       {
-        "digest": "FBsAJD5LzzYgqMhTJXR73mf7G8BjRXBDZaBB34uekP8W",
+        "digest": "G7nq5tVG2CuHG9wmeq7JHDCN7q43PLBfC6W2D6eHffjT",
         "timestampMs": "0",
         "checkpoint": "0"
       },
       {
-        "digest": "8yhqUPDwJ9Ei93A9qithJa3kfPbuwAof2Yo5YFXAGeua",
+        "digest": "FWHihWG9u4VFFTDNxZafStbuQJdXndAAhuQrHXb5bhET",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "J8rYr2HMcDm2oUQ5tnKiH1VD4dTkvnVBLuNpi5Pj3opL",
+        "digest": "2F8o7RYkZXNcHGBuQVkKSBsdt5SEKNtyfY243Tewyen4",
         "timestampMs": "0",
         "checkpoint": "1"
       }
@@ -287,17 +303,17 @@ Response: {
   "result": {
     "data": [
       {
-        "digest": "FBsAJD5LzzYgqMhTJXR73mf7G8BjRXBDZaBB34uekP8W",
+        "digest": "G7nq5tVG2CuHG9wmeq7JHDCN7q43PLBfC6W2D6eHffjT",
         "timestampMs": "0",
         "checkpoint": "0"
       },
       {
-        "digest": "8yhqUPDwJ9Ei93A9qithJa3kfPbuwAof2Yo5YFXAGeua",
+        "digest": "FWHihWG9u4VFFTDNxZafStbuQJdXndAAhuQrHXb5bhET",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "J8rYr2HMcDm2oUQ5tnKiH1VD4dTkvnVBLuNpi5Pj3opL",
+        "digest": "2F8o7RYkZXNcHGBuQVkKSBsdt5SEKNtyfY243Tewyen4",
         "timestampMs": "0",
         "checkpoint": "1"
       }
@@ -315,22 +331,22 @@ Response: {
   "result": {
     "data": [
       {
-        "digest": "7iu5PyhAHogqN2M3WQqMGWWXsiF43cchewkc7brPrCR4",
+        "digest": "84JYiTjfb1B5oF3t4kWDKqgUYxmHTMq7oiwsJRSufV1L",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "hpAU2AJypKUmYiXrhXP6Lu8Mfs92CpuinMx7Bh7ML7n",
+        "digest": "H2JCrEJaMkudGGnoxiwjpXbtfCTNjHtpiPu1MhApbwHj",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "8yhqUPDwJ9Ei93A9qithJa3kfPbuwAof2Yo5YFXAGeua",
+        "digest": "FWHihWG9u4VFFTDNxZafStbuQJdXndAAhuQrHXb5bhET",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "J8rYr2HMcDm2oUQ5tnKiH1VD4dTkvnVBLuNpi5Pj3opL",
+        "digest": "2F8o7RYkZXNcHGBuQVkKSBsdt5SEKNtyfY243Tewyen4",
         "timestampMs": "0",
         "checkpoint": "1"
       }
@@ -348,7 +364,7 @@ Response: {
   "result": {
     "data": [
       {
-        "digest": "ExAZBweaedMiwd6VYov94MMrKuoaS8CgWMDh7maAcn5r",
+        "digest": "763A1gJgYUhFPTYMwsEBS8BYA9hnHetriUtwHwzXyHLD",
         "timestampMs": "0",
         "checkpoint": "1"
       }
@@ -378,12 +394,12 @@ Response: {
   "result": {
     "data": [
       {
-        "digest": "hpAU2AJypKUmYiXrhXP6Lu8Mfs92CpuinMx7Bh7ML7n",
+        "digest": "H2JCrEJaMkudGGnoxiwjpXbtfCTNjHtpiPu1MhApbwHj",
         "timestampMs": "0",
         "checkpoint": "1"
       },
       {
-        "digest": "J8rYr2HMcDm2oUQ5tnKiH1VD4dTkvnVBLuNpi5Pj3opL",
+        "digest": "2F8o7RYkZXNcHGBuQVkKSBsdt5SEKNtyfY243Tewyen4",
         "timestampMs": "0",
         "checkpoint": "1"
       }

@@ -6,17 +6,18 @@ license = "Apache-2.0"
 publish = false
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 sui-core.workspace = true
 sui-swarm-config.workspace = true
-sui-json-rpc-types.workspace = true
 sui-move-build.workspace = true
 sui-protocol-config.workspace = true
 sui-types.workspace = true
 test-cluster.workspace = true
 mysten-common.workspace = true
 
-async-trait.workspace = true
 bcs.workspace = true
 clap.workspace = true
 futures.workspace = true

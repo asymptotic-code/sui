@@ -82,6 +82,9 @@ pub struct TokenTransferData {
     token_id: u8,
     amount: u64,
     is_finalized: bool,
+    /// For V2 transfers, the timestamp (in ms) from the bridge message payload.
+    /// `None` for V1 transfers.
+    message_timestamp_ms: Option<u64>,
 }
 
 impl TokenTransfer {
@@ -113,6 +116,7 @@ impl TokenTransfer {
             token_id: data.token_id as i32,
             amount: data.amount as i64,
             is_finalized: data.is_finalized,
+            message_timestamp_ms: data.message_timestamp_ms.map(|ts| ts as i64),
         })
     }
 }
@@ -300,7 +304,7 @@ impl Tasks {
 
     pub fn backfill_tasks_ordered_desc(&self) -> Vec<Task> {
         let mut tasks = self.backfill_tasks.clone();
-        tasks.sort_by(|t1, t2| t2.start_checkpoint.cmp(&t1.start_checkpoint));
+        tasks.sort_by_key(|t2| std::cmp::Reverse(t2.start_checkpoint));
         tasks
     }
 }

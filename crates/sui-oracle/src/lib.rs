@@ -494,7 +494,10 @@ impl OnChainDataUploader {
         let effects = response.effects;
 
         // It's critical to update the gas object reference for next transaction
-        self.gas_obj_ref = effects.gas_object().0;
+        self.gas_obj_ref = effects
+            .gas_object()
+            .expect("oracle transaction always has a gas object")
+            .0;
 
         let success = effects.status().is_ok();
 
@@ -694,6 +697,10 @@ async fn get_object_arg(
             initial_shared_version,
         }
         | Owner::ConsensusAddressOwner {
+            start_version: initial_shared_version,
+            ..
+        }
+        | Owner::Party {
             start_version: initial_shared_version,
             ..
         } => ObjectArg::SharedObject {

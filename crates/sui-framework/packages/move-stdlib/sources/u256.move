@@ -31,8 +31,8 @@ public fun diff(x: u256, y: u256): u256 {
 }
 
 /// Calculate x / y, but round up the result.
-public fun divide_and_round_up(x: u256, y: u256): u256 {
-    std::macros::num_divide_and_round_up!(x, y)
+public fun div_ceil(x: u256, y: u256): u256 {
+    std::macros::num_div_ceil!(x, y)
 }
 
 /// Return the value of a base raised to a power
@@ -175,3 +175,10 @@ public use fun std::q128::from_u256 as u256.to_q128;
 public use fun std::q_wad::from_u256 as u256.to_q_wad;
 #[spec_only]
 public use fun std::q_ray::from_u256 as u256.to_q_ray;
+
+// === Deprecated ===
+
+#[deprecated(note = b"Renamed to `div_ceil` for consistency")]
+public fun divide_and_round_up(x: u256, y: u256): u256 {
+    x.div_ceil(y)
+}

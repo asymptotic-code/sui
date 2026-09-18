@@ -42,6 +42,9 @@ pub struct Test {
     /// Bound the amount of gas used by any one test.
     #[clap(name = "gas-limit", short = 'i', long = "gas-limit")]
     pub gas_limit: Option<u64>,
+    /// Bound the maximum size of a loaded package (in MB).
+    #[clap(name = "package-size", long = "package-size")]
+    pub package_size: Option<u64>,
     /// An optional filter string to determine which unit tests to run. A unit test will be run only if it
     /// contains this string in its fully qualified (<addr>::<module_name>::<fn_name>) name.
     #[clap(name = "filter")]
@@ -86,6 +89,7 @@ impl Test {
         self,
         path: Option<&Path>,
         config: BuildConfig,
+        flavor: F,
         vm_test_setup: V,
     ) -> anyhow::Result<()> {
         let rerooted_path = reroot_path(path)?;
@@ -96,6 +100,7 @@ impl Test {
             &rerooted_path,
             config,
             self.unit_test_config(None),
+            flavor,
             vm_test_setup,
             compute_coverage,
             save_disassembly,
@@ -113,6 +118,7 @@ impl Test {
     pub fn unit_test_config(self, default_execution_bound: Option<u64>) -> UnitTestingConfig {
         let Self {
             gas_limit,
+            package_size,
             filter,
             list,
             num_threads,
@@ -125,6 +131,7 @@ impl Test {
         } = self;
         UnitTestingConfig {
             gas_limit: gas_limit.or(default_execution_bound),
+            package_size,
             filter,
             list,
             num_threads,
@@ -149,6 +156,7 @@ pub async fn run_move_unit_tests<F: MoveFlavor, V: VMTestSetup + Sync, W: Write 
     pkg_path: &Path,
     mut build_config: move_package_alt_compilation::build_config::BuildConfig,
     mut unit_test_config: UnitTestingConfig,
+    flavor: F,
     vm_test_setup: V,
     compute_coverage: bool,
     save_disassembly: bool,
@@ -160,8 +168,11 @@ pub async fn run_move_unit_tests<F: MoveFlavor, V: VMTestSetup + Sync, W: Write 
 
     // Load the package (package graph diagnostics are only needed for CLI commands so
     // ignore them by passing a vector as the writer)
-    let env = find_env::<F>(pkg_path, &build_config)?;
-    let root_pkg: RootPackage<F> = build_config.package_loader(pkg_path, &env).load().await?;
+    let env = find_env::<F>(pkg_path, &build_config, &flavor)?;
+    let root_pkg: RootPackage<F> = build_config
+        .package_loader(pkg_path, &env, flavor)
+        .load()
+        .await?;
     let root_pkg_name = Symbol::from(root_pkg.name().as_str());
 
     let mut addresses: Vec<(String, NumericalAddress)> = vec![];

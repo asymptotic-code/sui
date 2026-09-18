@@ -51,7 +51,7 @@ use sui_system::sui_system_state_inner::{
     Self,
     SystemParameters,
     SuiSystemStateInner,
-    SuiSystemStateInnerV2
+    SuiSystemStateInnerV2,
 };
 use sui_system::validator::Validator;
 use sui_system::validator_cap::UnverifiedValidatorOperationCap;
@@ -555,6 +555,11 @@ public fun active_validator_addresses_ref(wrapper: &SuiSystemState): vector<addr
 /// Getter returns the voting power of the active validators, values are voting power in the scale of 10000.
 public fun active_validator_voting_powers(wrapper: &SuiSystemState): VecMap<address, u64> {
     wrapper.load_system_state_ref().active_validator_voting_powers()
+}
+
+/// Getter returns the total stake amount of a given validator.
+public fun active_validator_stake_amount(wrapper: &SuiSystemState, validator_addr: address): u64 {
+    wrapper.load_system_state_ref().validator_stake_amount(validator_addr)
 }
 
 /// Calculate the rewards for a given staked SUI object.

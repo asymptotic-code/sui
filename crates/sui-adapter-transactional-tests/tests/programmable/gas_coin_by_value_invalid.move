@@ -43,3 +43,9 @@ module test::m1 {
 //# programmable --sender A --inputs @A
 //> TransferObjects([Gas], Input(0));
 //> test::m1::t1<sui::coin::Coin<sui::sui::SUI>>(Gas)
+
+//# programmable --sender A --inputs @A
+// Similarly we try to use the gas coin both with send_funds and TransferObjects, and get an
+// error that the gas coin was already moved, even though the call is _valid_.
+//> TransferObjects([Gas], Input(0));
+//> sui::coin::send_funds<sui::sui::SUI>(Gas, Input(0))

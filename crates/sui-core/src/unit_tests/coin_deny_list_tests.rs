@@ -37,7 +37,7 @@ async fn test_regulated_coin_v1_creation() {
     let mut metadata_object = None;
     let mut regulated_metadata_object = None;
     for (oref, _owner) in env.publish_effects.created() {
-        let object = env.authority.get_object(&oref.0).await.unwrap();
+        let object = env.authority.get_object(&oref.0).unwrap();
         if object.is_package() {
             continue;
         }
@@ -113,7 +113,7 @@ async fn test_regulated_coin_v2_types() {
         ],
     )
     .build_and_sign(&env.keypair);
-    let (_, effects) = submit_and_execute_with_options(&env.authority, None, tx, true)
+    let (_, effects) = submit_and_execute_with_options(&env.authority, None, tx)
         .await
         .unwrap();
     if effects.status().is_err() {
@@ -186,7 +186,7 @@ async fn test_regulated_coin_v2_types() {
         ],
     )
     .build_and_sign(&env.keypair);
-    let (_, effects) = submit_and_execute_with_options(&env.authority, None, tx, true)
+    let (_, effects) = submit_and_execute_with_options(&env.authority, None, tx)
         .await
         .unwrap();
     if effects.status().is_err() {
@@ -243,12 +243,12 @@ async fn test_regulated_coin_v2_funds_withdraw_deny() {
             regulated_coin_type.clone(),
         )
         .build_and_sign(&env.keypair);
-        let effects = submit_and_execute_with_options(&env.authority, None, tx, true)
+        let effects = submit_and_execute_with_options(&env.authority, None, tx)
             .await
             .unwrap()
             .1;
         assert!(effects.status().is_ok(), "Funding should succeed");
-        env_gas_ref = effects.gas_object().0;
+        env_gas_ref = effects.gas_object().unwrap().0;
 
         env.authority
             .settle_accumulator_for_testing(std::slice::from_ref(&effects), None)
@@ -277,7 +277,7 @@ async fn test_regulated_coin_v2_funds_withdraw_deny() {
         ],
     )
     .build_and_sign(&env.keypair);
-    submit_and_execute_with_options(&env.authority, None, add_tx, true)
+    submit_and_execute_with_options(&env.authority, None, add_tx)
         .await
         .unwrap();
 
@@ -344,7 +344,6 @@ impl TestEnv {
     async fn get_latest_object_ref(&self, id: &ObjectID) -> ObjectRef {
         self.authority
             .get_object(id)
-            .await
             .unwrap()
             .compute_object_reference()
     }
@@ -355,7 +354,7 @@ impl TestEnv {
         let mut regulated_metadata_object = None;
         let mut package_id = None;
         for (oref, _owner) in self.publish_effects.created() {
-            let object = self.authority.get_object(&oref.0).await.unwrap();
+            let object = self.authority.get_object(&oref.0).unwrap();
             if object.is_package() {
                 package_id = Some(object.id());
                 continue;
@@ -422,7 +421,7 @@ async fn new_authority_and_publish(path: &str) -> TestEnv {
 
     let mut protocol_config =
         ProtocolConfig::get_for_version(ProtocolVersion::max(), Chain::Unknown);
-    protocol_config.enable_accumulators_for_testing();
+    protocol_config.set_enable_accumulators_for_testing(true);
 
     let authority = TestAuthorityBuilder::new()
         .with_starting_objects(&[gas_object])

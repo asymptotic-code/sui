@@ -33,6 +33,7 @@ use sui_types::object::Object;
 use tokio::join;
 
 use crate::context::Context;
+use crate::data::AddressBalanceCoin;
 use crate::data::load_live;
 use crate::error::InternalContext;
 use crate::error::RpcError;
@@ -49,18 +50,25 @@ pub(super) async fn live_object(
     object_id: ObjectID,
     options: &SuiObjectDataOptions,
 ) -> Result<SuiObjectResponse, RpcError> {
-    let Some(object) = load_live(ctx, object_id)
+    if let Some(object) = load_live(ctx, object_id)
         .await
         .context("Failed to load latest object")?
-    else {
-        return Ok(SuiObjectResponse::new_with_error(
+    {
+        Ok(SuiObjectResponse::new_with_data(
+            object_data_with_options(ctx, object, options).await?,
+        ))
+    } else if let Some(coin) = AddressBalanceCoin::by_object_id(ctx, object_id)
+        .await
+        .context("Failed to resolve address balance object")?
+    {
+        Ok(SuiObjectResponse::new_with_data(
+            coin.into_sui_object_data(ctx, options).await?,
+        ))
+    } else {
+        Ok(SuiObjectResponse::new_with_error(
             SuiObjectResponseError::NotExists { object_id },
-        ));
-    };
-
-    Ok(SuiObjectResponse::new_with_data(
-        object_data_with_options(ctx, object, options).await?,
-    ))
+        ))
+    }
 }
 
 /// Fetch the necessary data from the stores in `ctx` and transform it to build a response for a
@@ -236,11 +244,7 @@ async fn display_fields(
 
     if let Some(display_v2) = display_v2? {
         let store = DisplayStore::new(ctx);
-        let root = sui_display::v2::OwnedSlice {
-            bytes: object.contents().to_owned(),
-            layout,
-        };
-
+        let root = sui_display::v2::OwnedSlice::new(layout, object.contents().to_owned());
         let interpreter = sui_display::v2::Interpreter::new(root, store);
         let fields = sui_display::v2::Display::parse(config.display(), display_v2.fields())?
             .display(
@@ -321,10 +325,10 @@ impl<'c> DisplayStore<'c> {
 
 #[async_trait]
 impl sui_display::v2::Store for DisplayStore<'_> {
-    async fn object(
+    async fn latest(
         &self,
         id: move_core_types::account_address::AccountAddress,
-    ) -> anyhow::Result<Option<sui_display::v2::OwnedSlice>> {
+    ) -> anyhow::Result<Option<(move_core_types::annotated_value::MoveTypeLayout, Vec<u8>)>> {
         let Some(object) = load_live(self.ctx, id.into())
             .await
             .context("Failed to fetch object")?
@@ -344,9 +348,6 @@ impl sui_display::v2::Store for DisplayStore<'_> {
             .await
             .context("Failed to resolve type layout")?;
 
-        Ok(Some(sui_display::v2::OwnedSlice {
-            layout,
-            bytes: move_object.contents().to_owned(),
-        }))
+        Ok(Some((layout, move_object.contents().to_owned())))
     }
 }

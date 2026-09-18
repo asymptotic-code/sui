@@ -30,9 +30,24 @@ public fun diff(x: u64, y: u64): u64 {
     std::macros::num_diff!(x, y)
 }
 
+/// Calculate `x * y / z`, upcasting intermediate values to avoid overflow when possible.
+/// Aborts if `z` is `0`.
+/// Aborts if the result is larger than `MAX`.
+public fun mul_div(x: u64, y: u64, z: u64): u64 {
+    std::macros::num_mul_div!<_, u128>(x, y, z)
+}
+
+/// Calculate `x * y / z`, upcasting intermediate values to avoid overflow when possible.
+/// Rounds up the result if there is a remainder.
+/// Aborts if `z` is `0`.
+/// Aborts if the result is larger than `MAX`.
+public fun mul_div_ceil(x: u64, y: u64, z: u64): u64 {
+    std::macros::num_mul_div_ceil!<_, u128>(x, y, z)
+}
+
 /// Calculate x / y, but round up the result.
-public fun divide_and_round_up(x: u64, y: u64): u64 {
-    std::macros::num_divide_and_round_up!(x, y)
+public fun div_ceil(x: u64, y: u64): u64 {
+    std::macros::num_div_ceil!(x, y)
 }
 
 /// Return the value of a base raised to a power
@@ -205,3 +220,9 @@ public use fun std::q_wad::from_u64 as u64.to_q_wad;
 #[spec_only]
 public use fun std::q_ray::from_u64 as u64.to_q_ray;
 
+// === Deprecated ===
+
+#[deprecated(note = b"Renamed to `div_ceil` for consistency")]
+public fun divide_and_round_up(x: u64, y: u64): u64 {
+    x.div_ceil(y)
+}

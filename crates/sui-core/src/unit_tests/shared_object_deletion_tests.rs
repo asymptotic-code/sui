@@ -62,7 +62,7 @@ impl TestRunner {
         for _ in 0..20 {
             let gas_object_id = ObjectID::random();
             let gas_object = Object::with_id_owner_for_testing(gas_object_id, sender);
-            authority_state.insert_genesis_object(gas_object).await;
+            authority_state.insert_genesis_object(gas_object);
             gas_object_ids.push(gas_object_id);
         }
 
@@ -569,7 +569,7 @@ async fn test_delete_shared_object() {
 
     // assert the shared object was deleted
     let deleted_obj_id = effects.deleted()[0].0;
-    let shared_obj_id = effects.input_consensus_objects()[0].id_and_version().0;
+    let shared_obj_id = effects.accessed_consensus_objects()[0].id_and_version().0;
     assert_eq!(deleted_obj_id, shared_obj_id);
 
     // assert the version of the deleted shared object was incremented
@@ -688,7 +688,7 @@ async fn test_delete_shared_object_immut_mut_mut_interleave() {
 
     // assert the shared object was deleted
     let deleted_obj_id = effects.deleted()[0].0;
-    let shared_obj_id = effects.input_consensus_objects()[0].id_and_version().0;
+    let shared_obj_id = effects.accessed_consensus_objects()[0].id_and_version().0;
     assert_eq!(deleted_obj_id, shared_obj_id);
 
     // assert the version of the deleted shared object was incremented
@@ -786,7 +786,7 @@ async fn test_delete_shared_object_immut_mut_immut_interleave() {
 
     // assert the shared object was deleted
     let deleted_obj_id = effects.deleted()[0].0;
-    let shared_obj_id = effects.input_consensus_objects()[0].id_and_version().0;
+    let shared_obj_id = effects.accessed_consensus_objects()[0].id_and_version().0;
     assert_eq!(deleted_obj_id, shared_obj_id);
 
     // assert the version of the deleted shared object was incremented

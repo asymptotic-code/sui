@@ -30,7 +30,7 @@ enum_dispatch.workspace = true
 eyre.workspace = true
 futures.workspace = true
 governor.workspace = true
-im.workspace = true
+imbl.workspace = true
 itertools.workspace = true
 lru.workspace = true
 mockall.workspace = true
@@ -80,16 +80,19 @@ mysten-metrics.workspace = true
 prost.workspace = true
 shared-crypto.workspace = true
 sui-config.workspace = true
+sui-consistent-store.workspace = true
 sui-rpc.workspace = true
 sui-authority-aggregation.workspace = true
 sui-execution.workspace = true
 sui-framework.workspace = true
 sui-swarm-config.workspace = true
 sui-genesis-builder.workspace = true
+sui-indexer-alt-framework = { workspace = true, default-features = false }
 sui-json-rpc-types.workspace = true
 sui-macros.workspace = true
 sui-network.workspace = true
 sui-protocol-config.workspace = true
+sui-rpc-store.workspace = true
 sui-transaction-checks.workspace = true
 sui-simulator.workspace = true
 sui-storage.workspace = true
@@ -134,9 +137,5 @@ prost-build.workspace = true
 protox.workspace = true
 
 [[bench]]
-name = "verified_cert_cache_bench"
-harness = false
-
-[[bench]]
-name = "batch_verification_bench"
+name = "verified_digest_cache_bench"
 harness = false

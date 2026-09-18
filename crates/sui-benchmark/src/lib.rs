@@ -7,10 +7,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::bail;
 use async_trait::async_trait;
 use fullnode_reconfig_observer::FullNodeReconfigObserver;
 use futures::TryStreamExt;
-use mysten_common::{fatal, random::get_rng};
+use mysten_common::{fatal, in_antithesis, random::get_rng};
 use rand::{Rng, seq::IteratorRandom};
 use sui_config::genesis::Genesis;
 use sui_core::{
@@ -58,10 +59,11 @@ use sui_types::{
     execution_status::{ExecutionErrorKind, ExecutionFailure, ExecutionStatus},
 };
 use sui_types::{gas_coin::GAS, sui_system_state::sui_system_state_summary::SuiSystemStateSummary};
-use tokio::time::sleep;
+use tokio::task::JoinSet;
+use tokio::time::{sleep, timeout};
 use tracing::{debug, info, instrument, warn};
 
-use crate::drivers::bench_driver::ClientType;
+use crate::drivers::{SubmissionAmplification, SubmissionAmplificationSample, ValidatorSelection};
 
 pub mod bank;
 
@@ -152,10 +154,32 @@ impl ExecutionEffects {
     pub fn gas_object(&self) -> (ObjectRef, Owner) {
         match self {
             ExecutionEffects::FinalizedTransactionEffects(effects, ..) => {
+                effects.data().gas_object().unwrap()
+            }
+            ExecutionEffects::ExecutedTransaction(txn) => txn.effects.gas_object().unwrap(),
+        }
+    }
+
+    /// Find the post-execution `ObjectRef` of a specific tracked object — typically the
+    /// gas coin a workload is chaining transactions off. Prefer this over `gas_object()`
+    /// in code paths that may see the IFFW short-circuit: those transactions return
+    /// `effects.gas_object() == None` (the executor never builds gas-charge metadata),
+    /// but the input gas coin is still version-bumped via `ensure_active_inputs_mutated`
+    /// and shows up in `mutated()`.
+    pub fn updated_gas(&self, prev_id: ObjectID) -> Option<ObjectRef> {
+        if let Some((obj_ref, _)) = match self {
+            ExecutionEffects::FinalizedTransactionEffects(effects, ..) => {
                 effects.data().gas_object()
             }
             ExecutionEffects::ExecutedTransaction(txn) => txn.effects.gas_object(),
+        } && obj_ref.0 == prev_id
+        {
+            return Some(obj_ref);
         }
+        self.mutated()
+            .into_iter()
+            .find(|(obj_ref, _)| obj_ref.0 == prev_id)
+            .map(|(obj_ref, _)| obj_ref)
     }
 
     pub fn sender(&self) -> SuiAddress {
@@ -164,7 +188,8 @@ impl ExecutionEffects {
             Owner::ObjectOwner(_)
             | Owner::Shared { .. }
             | Owner::Immutable
-            | Owner::ConsensusAddressOwner { .. } => unreachable!(), // owner of gas object is always an address
+            | Owner::ConsensusAddressOwner { .. }
+            | Owner::Party { .. } => unreachable!(), // owner of gas object is always an address
         }
     }
 
@@ -202,26 +227,21 @@ impl ExecutionEffects {
     }
 
     pub fn is_insufficient_funds(&self) -> bool {
-        match self {
-            ExecutionEffects::FinalizedTransactionEffects(effects, ..) => {
-                match effects.data().status() {
-                    ExecutionStatus::Success => false,
-                    ExecutionStatus::Failure(ExecutionFailure {
-                        error: ExecutionErrorKind::InsufficientFundsForWithdraw,
-                        ..
-                    }) => true,
-                    _ => false,
-                }
-            }
-            ExecutionEffects::ExecutedTransaction(txn) => match txn.effects.status() {
-                ExecutionStatus::Success => false,
-                ExecutionStatus::Failure(ExecutionFailure {
-                    error: ExecutionErrorKind::InsufficientFundsForWithdraw,
-                    ..
-                }) => true,
-                _ => false,
-            },
-        }
+        let status = match self {
+            ExecutionEffects::FinalizedTransactionEffects(effects, ..) => effects.data().status(),
+            ExecutionEffects::ExecutedTransaction(txn) => txn.effects.status(),
+        };
+        matches!(
+            status,
+            ExecutionStatus::Failure(ExecutionFailure {
+                error: ExecutionErrorKind::InsufficientFundsForWithdraw,
+                ..
+            })
+        ) || matches!(
+            status,
+            ExecutionStatus::Failure(ExecutionFailure { error, .. })
+                if sui_types::funds_accumulator::is_object_funds_insufficient_abort(error)
+        )
     }
 
     pub fn is_invalid_transaction(&self) -> bool {
@@ -330,19 +350,20 @@ pub trait ValidatorProxy {
 
     async fn get_latest_system_state_object(&self) -> Result<SuiSystemStateSummary, anyhow::Error>;
 
-    async fn execute_transaction_block(
-        &self,
-        tx: Transaction,
-    ) -> (ClientType, anyhow::Result<ExecutionEffects>);
+    async fn execute_transaction_block(&self, tx: Transaction) -> anyhow::Result<ExecutionEffects>;
 
-    /// Submit a transaction to multiple validators to cause consensus amplification.
-    /// Used to test the unpaid amplification deferral logic.
-    /// Default implementation just calls execute_transaction_block.
-    async fn execute_transaction_block_with_amplification(
+    /// Submit a transaction with optional duplicate/amplified validator traffic.
+    /// Only the local validator proxy supports this direct validator submission path.
+    async fn execute_transaction_block_with_submission_amplification(
         &self,
         tx: Transaction,
-        _num_validators: usize,
-    ) -> (ClientType, anyhow::Result<ExecutionEffects>) {
+        submission_amplification: SubmissionAmplification,
+    ) -> anyhow::Result<ExecutionEffects> {
+        if submission_amplification.is_enabled() {
+            bail!(
+                "duplicate/amplified validator submissions are only supported by LocalValidatorAggregatorProxy"
+            );
+        }
         self.execute_transaction_block(tx).await
     }
 
@@ -471,37 +492,100 @@ impl LocalValidatorAggregatorProxy {
         ))
     }
 
-    /// Submit a transaction to multiple validators to cause consensus amplification.
-    /// This is used to test the unpaid amplification deferral logic.
-    ///
-    /// `num_validators` specifies how many additional validators to submit to beyond
-    /// the normal submission path. For example, if `num_validators == 2`, the transaction
-    /// will be submitted to 2 validators directly, plus once via the normal driver path.
-    pub async fn submit_transaction_with_amplification(
+    async fn submit_transaction_with_submission_amplification(
         &self,
         tx: Transaction,
-        num_validators: usize,
+        submission_amplification: SubmissionAmplification,
     ) -> anyhow::Result<ExecutionEffects> {
         use sui_core::authority_client::AuthorityAPI;
-        use sui_types::messages_grpc::SubmitTxRequest;
 
-        // Submit to multiple validators in parallel
-        let validators: Vec<_> = self.clients.values().take(num_validators).collect();
+        const EXTRA_SUBMIT_TIMEOUT: Duration = Duration::from_secs(2);
+        const PREFERRED_VALIDATOR_LATENCY_DELTA: f64 = 0.02;
+
+        let sample = {
+            let mut rng = rand::thread_rng();
+            submission_amplification.sample(&mut rng)
+        };
+        if sample.total_submissions() == 1 {
+            return self.submit_transaction_block(tx).await;
+        }
+
+        let tx_digest = *tx.digest();
+        let validators = self.select_validators_for_submission_amplification(
+            sample,
+            PREFERRED_VALIDATOR_LATENCY_DELTA,
+        )?;
         let request = SubmitTxRequest::new_transaction(tx.clone());
+        let mut additional_requests = JoinSet::new();
 
-        let futures: Vec<_> = validators
-            .iter()
-            .map(|client| {
+        for (validator_name, client) in validators.iter() {
+            for _ in 0..sample.copies_per_validator {
                 let req = request.clone();
-                async move { client.submit_transaction(req, None).await }
+                let client = client.clone();
+                additional_requests.spawn(async move {
+                    let _ =
+                        timeout(EXTRA_SUBMIT_TIMEOUT, client.submit_transaction(req, None)).await;
+                });
+            }
+            debug!(
+                ?tx_digest,
+                ?validator_name,
+                copies_per_validator = sample.copies_per_validator,
+                "spawned direct validator submissions for amplification"
+            );
+        }
+
+        debug!(
+            ?tx_digest,
+            ?sample,
+            "submitting transaction with extra direct validator amplification"
+        );
+
+        let result = self.submit_transaction_block(tx).await;
+        additional_requests.abort_all();
+        result
+    }
+
+    fn select_validators_for_submission_amplification(
+        &self,
+        sample: SubmissionAmplificationSample,
+        preferred_validator_latency_delta: f64,
+    ) -> anyhow::Result<Vec<(AuthorityName, NetworkAuthorityClient)>> {
+        let num_validators = sample
+            .validators_per_tx
+            .min(self.committee.num_members())
+            .min(self.clients.len());
+
+        let validator_names = match sample.validator_selection {
+            ValidatorSelection::Random => {
+                let mut rng = rand::thread_rng();
+                self.clients
+                    .keys()
+                    .copied()
+                    .choose_multiple(&mut rng, num_validators)
+            }
+            ValidatorSelection::HighestPerformance => self
+                .td
+                .select_preferred_validators(preferred_validator_latency_delta)
+                .into_iter()
+                .filter(|name| self.clients.contains_key(name))
+                .take(num_validators)
+                .collect(),
+        };
+
+        let validators = validator_names
+            .into_iter()
+            .filter_map(|name| {
+                self.clients
+                    .get(&name)
+                    .cloned()
+                    .map(|client| (name, client))
             })
-            .collect();
-
-        // Fire off all submissions but don't wait for responses
-        let _ = futures::future::join_all(futures).await;
-
-        // Use the normal path to get the final result
-        self.submit_transaction_block(tx).await
+            .collect::<Vec<_>>();
+        if validators.is_empty() {
+            bail!("No validators available for submission amplification");
+        }
+        Ok(validators)
     }
 }
 
@@ -533,28 +617,19 @@ impl ValidatorProxy for LocalValidatorAggregatorProxy {
             .into_sui_system_state_summary())
     }
 
-    async fn execute_transaction_block(
-        &self,
-        tx: Transaction,
-    ) -> (ClientType, anyhow::Result<ExecutionEffects>) {
+    async fn execute_transaction_block(&self, tx: Transaction) -> anyhow::Result<ExecutionEffects> {
         let tx_digest = *tx.digest();
         debug!("Using TransactionDriver for transaction {:?}", tx_digest);
-        (
-            ClientType::TransactionDriver,
-            self.submit_transaction_block(tx).await,
-        )
+        self.submit_transaction_block(tx).await
     }
 
-    async fn execute_transaction_block_with_amplification(
+    async fn execute_transaction_block_with_submission_amplification(
         &self,
         tx: Transaction,
-        num_validators: usize,
-    ) -> (ClientType, anyhow::Result<ExecutionEffects>) {
-        (
-            ClientType::TransactionDriver,
-            self.submit_transaction_with_amplification(tx, num_validators)
-                .await,
-        )
+        submission_amplification: SubmissionAmplification,
+    ) -> anyhow::Result<ExecutionEffects> {
+        self.submit_transaction_with_submission_amplification(tx, submission_amplification)
+            .await
     }
 
     fn clone_committee(&self) -> Arc<Committee> {
@@ -606,6 +681,23 @@ impl ValidatorProxy for LocalValidatorAggregatorProxy {
     }
 }
 
+async fn warn_and_backoff_for_retry(
+    digests: &[TransactionDigest],
+    retry_cnt: &mut u32,
+    reason: impl std::fmt::Display,
+) {
+    let delay = Duration::from_millis(rand::thread_rng().gen_range(100..1000));
+    warn!(
+        ?digests,
+        retry_cnt = *retry_cnt,
+        "Soft bundle retry: {}. Sleeping for {:?} ...",
+        reason,
+        delay,
+    );
+    *retry_cnt += 1;
+    sleep(delay).await;
+}
+
 #[instrument(level = "debug", skip_all, fields(digests = ?txs.iter().map(|tx| *tx.digest()).collect::<Vec<_>>()))]
 async fn execute_soft_bundle_with_retries(
     td: &TransactionDriver<NetworkAuthorityClient>,
@@ -645,16 +737,12 @@ async fn execute_soft_bundle_with_retries(
                 if err.is_retryable().0
                     && (retry_cnt < max_retries || start.elapsed() < min_retry_duration)
                 {
-                    let delay = Duration::from_millis(rand::thread_rng().gen_range(100..1000));
-                    warn!(
-                        ?digests,
-                        retry_cnt,
-                        "Failed to get validator client with retriable error: {:?}. Sleeping for {:?} ...",
-                        err,
-                        delay,
-                    );
-                    retry_cnt += 1;
-                    sleep(delay).await;
+                    warn_and_backoff_for_retry(
+                        &digests,
+                        &mut retry_cnt,
+                        format!("get validator client failed: {err:?}"),
+                    )
+                    .await;
                     continue;
                 }
                 return Err(err.into());
@@ -676,16 +764,12 @@ async fn execute_soft_bundle_with_retries(
                 if sui_error.is_retryable().0
                     && (retry_cnt < max_retries || start.elapsed() < min_retry_duration)
                 {
-                    let delay = Duration::from_millis(rand::thread_rng().gen_range(100..1000));
-                    warn!(
-                        ?digests,
-                        retry_cnt,
-                        "Soft bundle submission failed with retriable error: {:?}. Sleeping for {:?} ...",
-                        sui_error,
-                        delay,
-                    );
-                    retry_cnt += 1;
-                    sleep(delay).await;
+                    warn_and_backoff_for_retry(
+                        &digests,
+                        &mut retry_cnt,
+                        format!("submission failed: {sui_error:?}"),
+                    )
+                    .await;
                     continue;
                 }
                 return Err(sui_error.into());
@@ -720,14 +804,12 @@ async fn execute_soft_bundle_with_retries(
                 SubmitTxResult::Executed {
                     effects_digest,
                     details,
-                    fast_path,
                 } => {
                     // Transaction was already executed - return the effects directly
                     outcomes.push(SubmissionOutcome::ImmediateResponse(
                         WaitForEffectsResponse::Executed {
                             effects_digest,
                             details,
-                            fast_path,
                         },
                     ));
                 }
@@ -750,16 +832,12 @@ async fn execute_soft_bundle_with_retries(
         }
 
         if should_retry {
-            let delay = Duration::from_millis(rand::thread_rng().gen_range(100..1000));
-            warn!(
-                ?digests,
-                retry_cnt,
-                "Soft bundle rejected with retriable error: {:?}. Sleeping for {:?} ...",
-                last_error,
-                delay,
-            );
-            retry_cnt += 1;
-            sleep(delay).await;
+            warn_and_backoff_for_retry(
+                &digests,
+                &mut retry_cnt,
+                format!("submission rejected: {last_error:?}"),
+            )
+            .await;
             continue;
         }
 
@@ -791,6 +869,32 @@ async fn execute_soft_bundle_with_retries(
             .collect();
 
         let wait_responses = futures::future::join_all(wait_futures).await;
+
+        // Re-submit if any wait_for_effects returned a retriable signal (Rejected
+        // with a retriable reason, or Expired) — the tx was never ordered.
+        // TODO: when error is None, poll other validators for a reject reason
+        // before giving up — our chosen validator didn't vote reject so won't
+        // have one cached, but a different validator may.
+        let retriable_wait_failure = wait_responses.iter().find_map(|r| match r {
+            Ok(WaitForEffectsResponse::Rejected { error: Some(e) }) if e.is_retryable().0 => {
+                Some(format!("rejected: {e:?}"))
+            }
+            Ok(WaitForEffectsResponse::Expired { epoch, round }) => {
+                Some(format!("expired (epoch {epoch}, round {round:?})"))
+            }
+            _ => None,
+        });
+        if let Some(reason) = retriable_wait_failure
+            && (retry_cnt < max_retries || start.elapsed() < min_retry_duration)
+        {
+            warn_and_backoff_for_retry(
+                &digests,
+                &mut retry_cnt,
+                format!("wait_for_effects retriable failure: {reason}"),
+            )
+            .await;
+            continue;
+        }
 
         // Build final results by combining immediate responses with waited responses
         let mut wait_response_iter = wait_responses.into_iter();
@@ -889,6 +993,43 @@ impl FullNodeProxy {
             td,
         })
     }
+
+    /// Wait for the effects of a transaction that may already have executed.
+    ///
+    /// A transaction can commit while the client is unable to observe the response - the
+    /// checkpoint wait times out, or the connection drops after submission. Resubmitting then
+    /// fails input checks against objects the transaction itself consumed, which is reported as
+    /// a non-retriable error even though the transaction succeeded.
+    ///
+    /// GetTransaction only serves transactions that have been checkpointed, so one that
+    /// committed moments ago reads as not found. Poll until it lands or the budget expires.
+    async fn await_executed_effects(&self, digest: &TransactionDigest) -> Option<ExecutionEffects> {
+        let budget = rpc_retry_budget();
+        let start = Instant::now();
+        loop {
+            match self.sui_client.clone().get_transaction(digest).await {
+                Ok(txn) => return Some(ExecutionEffects::ExecutedTransaction(txn)),
+                Err(status) => {
+                    if start.elapsed() >= budget {
+                        debug!(
+                            ?digest,
+                            "transaction not observed within {:?}: {:?}", budget, status
+                        );
+                        return None;
+                    }
+                    sleep(retry_delay()).await;
+                }
+            }
+        }
+    }
+}
+
+/// A non-retriable error reporting the transaction's own inputs as consumed is the signature of
+/// a resubmission: the transaction committed, but the client never saw the result.
+fn indicates_already_executed(err: &impl std::fmt::Debug) -> bool {
+    let err_str = format!("{:?}", err);
+    err_str.contains("Error checking transaction input objects")
+        || err_str.contains("is unavailable for consumption")
 }
 
 fn is_retryable_sdk_error(err: &impl std::fmt::Debug) -> bool {
@@ -896,8 +1037,26 @@ fn is_retryable_sdk_error(err: &impl std::fmt::Debug) -> bool {
     !(err_str.contains("Error checking transaction input objects")
         || err_str.contains("Transaction Expired")
         || err_str.contains("already locked by a different transaction")
-        || err_str.contains("is not available for consumption"))
+        || err_str.contains("is unavailable for consumption"))
         || err_str.contains("Transaction executed but checkpoint wait timed out")
+}
+
+fn max_rpc_retries() -> usize {
+    if in_antithesis() { 20 } else { 10 }
+}
+
+/// Antithesis stops and partitions nodes for stretches that routinely outlast the default
+/// budget, so the client gives up while the fault is still in effect.
+fn rpc_retry_budget() -> Duration {
+    if in_antithesis() {
+        Duration::from_secs(300)
+    } else {
+        Duration::from_secs(60)
+    }
+}
+
+fn retry_delay() -> Duration {
+    Duration::from_millis(get_rng().gen_range(100..1000))
 }
 
 #[async_trait]
@@ -909,11 +1068,34 @@ impl ValidatorProxy for FullNodeProxy {
     }
 
     async fn get_object(&self, object_id: ObjectID) -> Result<Object, anyhow::Error> {
-        self.sui_client
-            .clone()
-            .get_object(object_id)
-            .await
-            .map_err(Into::into)
+        // Workload init reads objects before it can generate any load, and an unretried
+        // transport failure here aborts the process. Give reads the same budget as writes.
+        let start = Instant::now();
+        let mut retry_cnt = 0;
+        let mut last_err = None;
+        while retry_cnt < max_rpc_retries() || start.elapsed() < rpc_retry_budget() {
+            match self.sui_client.clone().get_object(object_id).await {
+                Ok(object) => return Ok(object),
+                Err(err) => {
+                    let delay = retry_delay();
+                    warn!(
+                        ?object_id,
+                        retry_cnt,
+                        "get_object failed with err: {:?}. Sleeping for {:?} ...",
+                        err,
+                        delay,
+                    );
+                    last_err = Some(err);
+                    retry_cnt += 1;
+                    sleep(delay).await;
+                }
+            }
+        }
+        Err(anyhow::anyhow!(
+            "get_object {:?} failed for {retry_cnt} times, last error: {:?}",
+            object_id,
+            last_err
+        ))
     }
 
     async fn get_owned_objects(
@@ -940,14 +1122,14 @@ impl ValidatorProxy for FullNodeProxy {
         Ok(self.sui_client.get_system_state_summary(None).await?)
     }
 
-    async fn execute_transaction_block(
-        &self,
-        tx: Transaction,
-    ) -> (ClientType, anyhow::Result<ExecutionEffects>) {
+    async fn execute_transaction_block(&self, tx: Transaction) -> anyhow::Result<ExecutionEffects> {
         let tx_digest = *tx.digest();
         let start = Instant::now();
         let mut retry_cnt = 0;
-        while retry_cnt < 10 || start.elapsed() < Duration::from_secs(60) {
+        // Set once an attempt fails without telling us whether the transaction landed.
+        let mut outcome_unknown = false;
+        let max_retries = max_rpc_retries();
+        while retry_cnt < max_retries || start.elapsed() < rpc_retry_budget() {
             // Fullnode could time out after WAIT_FOR_FINALITY_TIMEOUT (30s) in TransactionOrchestrator
             // SuiClient times out after 60s
             match self
@@ -957,23 +1139,27 @@ impl ValidatorProxy for FullNodeProxy {
                 .await
             {
                 Ok(resp) => {
-                    return (
-                        ClientType::QuorumDriver,
-                        Ok(ExecutionEffects::ExecutedTransaction(resp)),
-                    );
+                    return Ok(ExecutionEffects::ExecutedTransaction(resp));
                 }
                 Err(err) => {
                     if !is_retryable_sdk_error(&err) {
-                        return (
-                            ClientType::QuorumDriver,
-                            Err(anyhow::anyhow!(
-                                "Transaction {:?} failed with non-retriable error: {:?}",
-                                tx_digest,
-                                err
-                            )),
-                        );
+                        // Only worth looking up when an earlier attempt left the outcome unknown.
+                        // Workloads submit conflicting transactions on purpose, so a first-attempt
+                        // rejection is the transaction being refused, not a lost response.
+                        if outcome_unknown
+                            && indicates_already_executed(&err)
+                            && let Some(effects) = self.await_executed_effects(&tx_digest).await
+                        {
+                            return Ok(effects);
+                        }
+                        return Err(anyhow::anyhow!(
+                            "Transaction {:?} failed with non-retriable error: {:?}",
+                            tx_digest,
+                            err
+                        ));
                     }
-                    let delay = Duration::from_millis(rand::thread_rng().gen_range(100..1000));
+                    outcome_unknown = true;
+                    let delay = retry_delay();
                     warn!(
                         ?tx_digest,
                         retry_cnt,
@@ -986,13 +1172,10 @@ impl ValidatorProxy for FullNodeProxy {
                 }
             }
         }
-        (
-            ClientType::QuorumDriver,
-            Err(anyhow::anyhow!(
-                "Transaction {:?} failed for {retry_cnt} times",
-                tx_digest
-            )),
-        )
+        Err(anyhow::anyhow!(
+            "Transaction {:?} failed for {retry_cnt} times",
+            tx_digest
+        ))
     }
 
     fn clone_committee(&self) -> Arc<Committee> {

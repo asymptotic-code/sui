@@ -13,7 +13,6 @@ use anyhow::Result;
 use colored::*;
 
 use move_binary_format::{
-    binary_config::BinaryConfig,
     errors::{Location, VMResult},
     file_format::CompiledModule,
 };
@@ -35,7 +34,10 @@ use move_trace_format::{
     format::{MoveTraceBuilder, TRACE_FILE_EXTENSION},
     tracers::function_only::FunctionOnlyTracer,
 };
-use move_vm_runtime::{dev_utils::storage::StoredPackage, shared::gas::GasMeter};
+use move_vm_runtime::{
+    dev_utils::storage::StoredPackage,
+    shared::{gas::GasMeter, linkage_context},
+};
 use move_vm_runtime::{
     dev_utils::{
         in_memory_test_adapter::InMemoryTestAdapter, storage::InMemoryStorage,
@@ -113,8 +115,17 @@ fn setup_test_storage<'a>(
             .or_insert_with(Vec::new);
         entry.push(module.clone());
     }
+
+    let linkage_table = packages.keys().copied().map(|addr| (addr, addr)).collect();
+    let linkage_context = linkage_context::LinkageContext::new(linkage_table).unwrap();
+
     for (addr, modules) in packages {
-        let package = StoredPackage::from_modules_for_testing(addr, modules).unwrap();
+        let package = StoredPackage::from_module_for_testing_with_linkage(
+            addr,
+            linkage_context.clone(),
+            modules,
+        )
+        .unwrap();
         adapter.insert_package_into_storage(package);
     }
     Ok(())
@@ -151,6 +162,7 @@ fn convert_clever_move_abort_error(
 impl<V: VMTestSetup + Sync> TestRunner<V> {
     pub fn new(
         execution_bound: u64,
+        arena_size: Option<u64>,
         num_threads: usize,
         report_stacktrace_on_abort: bool,
         prng_seed: Option<u64>,
@@ -172,11 +184,9 @@ impl<V: VMTestSetup + Sync> TestRunner<V> {
         };
 
         let native_functions = NativeFunctions::new(vm_test_setup.native_function_table())?;
-        // Allow loading of unpublishable modules for the purpose of running tests.
-        let vm_config = move_vm_config::runtime::VMConfig {
-            binary_config: BinaryConfig::new_unpublishable(),
-            ..Default::default()
-        };
+        let vm_config = move_vm_config::runtime::VMConfig::new_for_test(
+            /* allow_unpublishable_code_execution */ true, arena_size,
+        );
         let runtime = MoveRuntime::new(native_functions, vm_config);
 
         let mut vm_test_adapter = InMemoryTestAdapter::new_with_runtime(runtime);

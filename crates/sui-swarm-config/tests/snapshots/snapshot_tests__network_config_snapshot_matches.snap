@@ -22,8 +22,6 @@ validator_configs:
       db-retention-epochs: ~
       db-pruner-period-secs: ~
       max-pending-transactions: ~
-      max-submit-position: ~
-      submit-delay-step-override-millis: ~
       parameters: ~
     enable-index-processing: true
     sync-post-process-one-tx: false
@@ -56,13 +54,20 @@ validator_configs:
       force-disable-state-consistency-check: false
       enable-secondary-index-checks: false
     transaction-deny-config:
+      object-deny-list: []
+      package-deny-list: []
+      address-deny-list: []
       package-publish-disabled: false
       package-upgrade-disabled: false
       shared-object-disabled: false
       user-transaction-disabled: false
+      gasless-disabled: false
       receiving-objects-disabled: false
       zklogin-sig-disabled: false
       zklogin-disabled-providers: []
+    peer-deny-sync-config:
+      broadcast-on-startup: false
+      broadcast-on-epoch-change: false
     dev-inspect-disabled: false
     certificate-deny-config: {}
     state-debug-dump-config: {}
@@ -80,6 +85,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -96,6 +103,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -112,8 +121,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_K3XgRburu"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_rz7IVMOR5"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -128,6 +137,7 @@ validator_configs:
         - Slack
         - TestEveFrontier
         - TestIssuer
+        - TestIssuerKey8192
         - Threedos
         - Twitch
     authority-overload-config:
@@ -149,6 +159,11 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 2000
+      admission-queue-capacity-fraction: 0.5
+      admission-queue-enabled: true
+      admission-queue-failover-timeout:
+        secs: 30
+        nanos: 0
     execution-cache:
       writeback-cache:
         max_cache_size: ~
@@ -164,6 +179,7 @@ validator_configs:
         backpressure_threshold: ~
         backpressure_threshold_for_rpc: ~
     enable-soft-bundle: true
+    enable-simulate-allowed-proposers: true
     verifier-signing-config:
       max-per-fun-meter-units: ~
       max-per-mod-meter-units: ~
@@ -192,8 +208,6 @@ validator_configs:
       db-retention-epochs: ~
       db-pruner-period-secs: ~
       max-pending-transactions: ~
-      max-submit-position: ~
-      submit-delay-step-override-millis: ~
       parameters: ~
     enable-index-processing: true
     sync-post-process-one-tx: false
@@ -226,13 +240,20 @@ validator_configs:
       force-disable-state-consistency-check: false
       enable-secondary-index-checks: false
     transaction-deny-config:
+      object-deny-list: []
+      package-deny-list: []
+      address-deny-list: []
       package-publish-disabled: false
       package-upgrade-disabled: false
       shared-object-disabled: false
       user-transaction-disabled: false
+      gasless-disabled: false
       receiving-objects-disabled: false
       zklogin-sig-disabled: false
       zklogin-disabled-providers: []
+    peer-deny-sync-config:
+      broadcast-on-startup: false
+      broadcast-on-epoch-change: false
     dev-inspect-disabled: false
     certificate-deny-config: {}
     state-debug-dump-config: {}
@@ -250,6 +271,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -266,6 +289,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -282,8 +307,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_K3XgRburu"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_rz7IVMOR5"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -298,6 +323,7 @@ validator_configs:
         - Slack
         - TestEveFrontier
         - TestIssuer
+        - TestIssuerKey8192
         - Threedos
         - Twitch
     authority-overload-config:
@@ -319,6 +345,11 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 2000
+      admission-queue-capacity-fraction: 0.5
+      admission-queue-enabled: true
+      admission-queue-failover-timeout:
+        secs: 30
+        nanos: 0
     execution-cache:
       writeback-cache:
         max_cache_size: ~
@@ -334,6 +365,7 @@ validator_configs:
         backpressure_threshold: ~
         backpressure_threshold_for_rpc: ~
     enable-soft-bundle: true
+    enable-simulate-allowed-proposers: true
     verifier-signing-config:
       max-per-fun-meter-units: ~
       max-per-mod-meter-units: ~
@@ -362,8 +394,6 @@ validator_configs:
       db-retention-epochs: ~
       db-pruner-period-secs: ~
       max-pending-transactions: ~
-      max-submit-position: ~
-      submit-delay-step-override-millis: ~
       parameters: ~
     enable-index-processing: true
     sync-post-process-one-tx: false
@@ -396,13 +426,20 @@ validator_configs:
       force-disable-state-consistency-check: false
       enable-secondary-index-checks: false
     transaction-deny-config:
+      object-deny-list: []
+      package-deny-list: []
+      address-deny-list: []
       package-publish-disabled: false
       package-upgrade-disabled: false
       shared-object-disabled: false
       user-transaction-disabled: false
+      gasless-disabled: false
       receiving-objects-disabled: false
       zklogin-sig-disabled: false
       zklogin-disabled-providers: []
+    peer-deny-sync-config:
+      broadcast-on-startup: false
+      broadcast-on-epoch-change: false
     dev-inspect-disabled: false
     certificate-deny-config: {}
     state-debug-dump-config: {}
@@ -420,6 +457,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -436,6 +475,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -452,8 +493,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_K3XgRburu"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_rz7IVMOR5"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -468,6 +509,7 @@ validator_configs:
         - Slack
         - TestEveFrontier
         - TestIssuer
+        - TestIssuerKey8192
         - Threedos
         - Twitch
     authority-overload-config:
@@ -489,6 +531,11 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 2000
+      admission-queue-capacity-fraction: 0.5
+      admission-queue-enabled: true
+      admission-queue-failover-timeout:
+        secs: 30
+        nanos: 0
     execution-cache:
       writeback-cache:
         max_cache_size: ~
@@ -504,6 +551,7 @@ validator_configs:
         backpressure_threshold: ~
         backpressure_threshold_for_rpc: ~
     enable-soft-bundle: true
+    enable-simulate-allowed-proposers: true
     verifier-signing-config:
       max-per-fun-meter-units: ~
       max-per-mod-meter-units: ~
@@ -532,8 +580,6 @@ validator_configs:
       db-retention-epochs: ~
       db-pruner-period-secs: ~
       max-pending-transactions: ~
-      max-submit-position: ~
-      submit-delay-step-override-millis: ~
       parameters: ~
     enable-index-processing: true
     sync-post-process-one-tx: false
@@ -566,13 +612,20 @@ validator_configs:
       force-disable-state-consistency-check: false
       enable-secondary-index-checks: false
     transaction-deny-config:
+      object-deny-list: []
+      package-deny-list: []
+      address-deny-list: []
       package-publish-disabled: false
       package-upgrade-disabled: false
       shared-object-disabled: false
       user-transaction-disabled: false
+      gasless-disabled: false
       receiving-objects-disabled: false
       zklogin-sig-disabled: false
       zklogin-disabled-providers: []
+    peer-deny-sync-config:
+      broadcast-on-startup: false
+      broadcast-on-epoch-change: false
     dev-inspect-disabled: false
     certificate-deny-config: {}
     state-debug-dump-config: {}
@@ -590,6 +643,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -606,6 +661,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -622,8 +679,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_K3XgRburu"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_rz7IVMOR5"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -638,6 +695,7 @@ validator_configs:
         - Slack
         - TestEveFrontier
         - TestIssuer
+        - TestIssuerKey8192
         - Threedos
         - Twitch
     authority-overload-config:
@@ -659,6 +717,11 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 2000
+      admission-queue-capacity-fraction: 0.5
+      admission-queue-enabled: true
+      admission-queue-failover-timeout:
+        secs: 30
+        nanos: 0
     execution-cache:
       writeback-cache:
         max_cache_size: ~
@@ -674,6 +737,7 @@ validator_configs:
         backpressure_threshold: ~
         backpressure_threshold_for_rpc: ~
     enable-soft-bundle: true
+    enable-simulate-allowed-proposers: true
     verifier-signing-config:
       max-per-fun-meter-units: ~
       max-per-mod-meter-units: ~
@@ -702,8 +766,6 @@ validator_configs:
       db-retention-epochs: ~
       db-pruner-period-secs: ~
       max-pending-transactions: ~
-      max-submit-position: ~
-      submit-delay-step-override-millis: ~
       parameters: ~
     enable-index-processing: true
     sync-post-process-one-tx: false
@@ -736,13 +798,20 @@ validator_configs:
       force-disable-state-consistency-check: false
       enable-secondary-index-checks: false
     transaction-deny-config:
+      object-deny-list: []
+      package-deny-list: []
+      address-deny-list: []
       package-publish-disabled: false
       package-upgrade-disabled: false
       shared-object-disabled: false
       user-transaction-disabled: false
+      gasless-disabled: false
       receiving-objects-disabled: false
       zklogin-sig-disabled: false
       zklogin-disabled-providers: []
+    peer-deny-sync-config:
+      broadcast-on-startup: false
+      broadcast-on-epoch-change: false
     dev-inspect-disabled: false
     certificate-deny-config: {}
     state-debug-dump-config: {}
@@ -760,6 +829,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -776,6 +847,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -792,8 +865,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_K3XgRburu"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_rz7IVMOR5"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -808,6 +881,7 @@ validator_configs:
         - Slack
         - TestEveFrontier
         - TestIssuer
+        - TestIssuerKey8192
         - Threedos
         - Twitch
     authority-overload-config:
@@ -829,6 +903,11 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 2000
+      admission-queue-capacity-fraction: 0.5
+      admission-queue-enabled: true
+      admission-queue-failover-timeout:
+        secs: 30
+        nanos: 0
     execution-cache:
       writeback-cache:
         max_cache_size: ~
@@ -844,6 +923,7 @@ validator_configs:
         backpressure_threshold: ~
         backpressure_threshold_for_rpc: ~
     enable-soft-bundle: true
+    enable-simulate-allowed-proposers: true
     verifier-signing-config:
       max-per-fun-meter-units: ~
       max-per-mod-meter-units: ~
@@ -872,8 +952,6 @@ validator_configs:
       db-retention-epochs: ~
       db-pruner-period-secs: ~
       max-pending-transactions: ~
-      max-submit-position: ~
-      submit-delay-step-override-millis: ~
       parameters: ~
     enable-index-processing: true
     sync-post-process-one-tx: false
@@ -906,13 +984,20 @@ validator_configs:
       force-disable-state-consistency-check: false
       enable-secondary-index-checks: false
     transaction-deny-config:
+      object-deny-list: []
+      package-deny-list: []
+      address-deny-list: []
       package-publish-disabled: false
       package-upgrade-disabled: false
       shared-object-disabled: false
       user-transaction-disabled: false
+      gasless-disabled: false
       receiving-objects-disabled: false
       zklogin-sig-disabled: false
       zklogin-disabled-providers: []
+    peer-deny-sync-config:
+      broadcast-on-startup: false
+      broadcast-on-epoch-change: false
     dev-inspect-disabled: false
     certificate-deny-config: {}
     state-debug-dump-config: {}
@@ -930,6 +1015,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -946,6 +1033,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -962,8 +1051,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_K3XgRburu"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_rz7IVMOR5"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -978,6 +1067,7 @@ validator_configs:
         - Slack
         - TestEveFrontier
         - TestIssuer
+        - TestIssuerKey8192
         - Threedos
         - Twitch
     authority-overload-config:
@@ -999,6 +1089,11 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 2000
+      admission-queue-capacity-fraction: 0.5
+      admission-queue-enabled: true
+      admission-queue-failover-timeout:
+        secs: 30
+        nanos: 0
     execution-cache:
       writeback-cache:
         max_cache_size: ~
@@ -1014,6 +1109,7 @@ validator_configs:
         backpressure_threshold: ~
         backpressure_threshold_for_rpc: ~
     enable-soft-bundle: true
+    enable-simulate-allowed-proposers: true
     verifier-signing-config:
       max-per-fun-meter-units: ~
       max-per-mod-meter-units: ~
@@ -1042,8 +1138,6 @@ validator_configs:
       db-retention-epochs: ~
       db-pruner-period-secs: ~
       max-pending-transactions: ~
-      max-submit-position: ~
-      submit-delay-step-override-millis: ~
       parameters: ~
     enable-index-processing: true
     sync-post-process-one-tx: false
@@ -1076,13 +1170,20 @@ validator_configs:
       force-disable-state-consistency-check: false
       enable-secondary-index-checks: false
     transaction-deny-config:
+      object-deny-list: []
+      package-deny-list: []
+      address-deny-list: []
       package-publish-disabled: false
       package-upgrade-disabled: false
       shared-object-disabled: false
       user-transaction-disabled: false
+      gasless-disabled: false
       receiving-objects-disabled: false
       zklogin-sig-disabled: false
       zklogin-disabled-providers: []
+    peer-deny-sync-config:
+      broadcast-on-startup: false
+      broadcast-on-epoch-change: false
     dev-inspect-disabled: false
     certificate-deny-config: {}
     state-debug-dump-config: {}
@@ -1100,6 +1201,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -1116,6 +1219,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -1132,8 +1237,8 @@ validator_configs:
         - Apple
         - Arden
         - "AwsTenant-region:ap-southeast-1-tenant_id:ap-southeast-1_2QQPyQXDz"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_K3XgRburu"
-        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_rz7IVMOR5"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_4HdQTpt3E"
+        - "AwsTenant-region:eu-north-1-tenant_id:eu-north-1_Bpct2JyBg"
         - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - Credenza3
         - EveFrontier
@@ -1148,6 +1253,7 @@ validator_configs:
         - Slack
         - TestEveFrontier
         - TestIssuer
+        - TestIssuerKey8192
         - Threedos
         - Twitch
     authority-overload-config:
@@ -1169,6 +1275,11 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 2000
+      admission-queue-capacity-fraction: 0.5
+      admission-queue-enabled: true
+      admission-queue-failover-timeout:
+        secs: 30
+        nanos: 0
     execution-cache:
       writeback-cache:
         max_cache_size: ~
@@ -1184,6 +1295,7 @@ validator_configs:
         backpressure_threshold: ~
         backpressure_threshold_for_rpc: ~
     enable-soft-bundle: true
+    enable-simulate-allowed-proposers: true
     verifier-signing-config:
       max-per-fun-meter-units: ~
       max-per-mod-meter-units: ~

@@ -6,6 +6,9 @@ license = "Apache-2.0"
 publish = false
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -16,6 +19,5 @@ move-binary-format.workspace = true
 sui-json-rpc-types.workspace = true
 sui-types.workspace = true
 sui-json.workspace = true
-sui-protocol-config.workspace = true
 
 move-core-types.workspace = true

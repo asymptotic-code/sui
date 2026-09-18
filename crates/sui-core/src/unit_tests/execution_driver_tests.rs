@@ -12,7 +12,7 @@ use crate::authority_server::{ValidatorService, ValidatorServiceMetrics};
 use crate::checkpoints::CheckpointStore;
 use crate::consensus_adapter::ConsensusAdapter;
 use crate::consensus_adapter::ConsensusAdapterMetrics;
-use crate::consensus_adapter::{ConnectionMonitorStatusForTests, MockConsensusClient};
+use crate::consensus_adapter::MockConsensusClient;
 use crate::safe_client::SafeClient;
 use crate::test_authority_clients::LocalAuthorityClient;
 use crate::test_utils::{make_transfer_object_move_transaction, make_transfer_object_transaction};
@@ -293,17 +293,25 @@ async fn execute_owned_on_first_three_authorities(
         );
     }
 
-    // Wait for execution on the third authority and return effects
-    let effects = authority_clients[2]
-        .authority_client()
-        .state
-        .get_transaction_cache_reader()
-        .notify_read_executed_effects("", &[*executable.digest()])
-        .await
-        .pop()
-        .unwrap();
+    // Wait for all three authorities before using any of them to construct the next transaction.
+    let mut effects = None;
+    for client in authority_clients.iter().take(3) {
+        let current_effects = client
+            .authority_client()
+            .state
+            .get_transaction_cache_reader()
+            .notify_read_executed_effects("", &[*executable.digest()])
+            .await
+            .pop()
+            .unwrap();
+        if let Some(expected_effects) = &effects {
+            assert_eq!(expected_effects, &current_effects);
+        } else {
+            effects = Some(current_effects);
+        }
+    }
 
-    (executable, effects)
+    (executable, effects.unwrap())
 }
 
 // Helper to execute a shared object transaction via consensus.
@@ -772,23 +780,17 @@ async fn test_authority_txn_validation_pushback() {
         .with_authority_overload_config(overload_config)
         .build()
         .await;
-    authority_state
-        .insert_genesis_objects(&[gas_object1.clone(), gas_object2.clone()])
-        .await;
+    authority_state.insert_genesis_objects(&[gas_object1.clone(), gas_object2.clone()]);
 
     // Create a validator service around the `authority_state`.
-    let epoch_store = authority_state.epoch_store_for_testing();
     let consensus_adapter = Arc::new(ConsensusAdapter::new(
         Arc::new(MockConsensusClient::new()),
         CheckpointStore::new_for_tests(),
         authority_state.name,
-        Arc::new(ConnectionMonitorStatusForTests {}),
         100_000,
         100_000,
-        None,
-        None,
         ConsensusAdapterMetrics::new_test(),
-        epoch_store.protocol_config().clone(),
+        Arc::new(tokio::sync::Notify::new()),
     ));
     let validator_service = Arc::new(ValidatorService::new_for_tests(
         authority_state.clone(),

@@ -6,6 +6,9 @@ license = "Apache-2.0"
 publish = false
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = { version = "1.0.64", features = ["backtrace"] }
 clap.workspace = true
@@ -34,4 +37,4 @@ sui-move-build.workspace = true
 shared-crypto.workspace = true
 bcs = "0.1.5"
 rand = "0.8.5"
-dirs = "4.0.0"
+dirs.workspace = true

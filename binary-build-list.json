@@ -6,14 +6,13 @@
         "sui-faucet",
         "sui-bridge",
         "sui-bridge-cli",
-        "sui-test-validator",
+        "sui-fork",
         "move-analyzer"
     ],
     "internal_binaries": [
         "stress",
         "sui-proxy",
         "sui-metric-checker",
-        "sui-analytics-indexer",
-        "sui-security-watchdog"
+        "sui-analytics-indexer"
 	]
 }

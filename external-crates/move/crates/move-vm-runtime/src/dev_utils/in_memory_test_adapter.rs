@@ -37,7 +37,8 @@ impl InMemoryTestAdapter {
     pub fn new() -> Self {
         let storage = InMemoryStorage::new();
         let native_functions = NativeFunctions::empty_for_testing().unwrap();
-        let vm_config = VMConfig::default();
+        let vm_config =
+            VMConfig::new_for_test(/* allow_unpublishable_code_execution */ false, None);
         let runtime = MoveRuntime::new(native_functions, vm_config);
         Self { runtime, storage }
     }
@@ -199,7 +200,7 @@ impl VMTestAdapter<InMemoryStorage> for InMemoryTestAdapter {
                     continue;
                 }
                 let new_dependencies = self.transitive_dependencies(dep)?;
-                all_dependencies.extend(new_dependencies.into_iter());
+                all_dependencies.extend(new_dependencies);
             }
         }
         // Consider making tehse into VM errors on failure instead.

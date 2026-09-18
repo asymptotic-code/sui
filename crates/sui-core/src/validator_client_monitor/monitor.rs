@@ -199,8 +199,8 @@ impl<A: Clone> ValidatorClientMonitor<A> {
             OperationType::Submit => "submit",
             OperationType::Effects => "effects",
             OperationType::HealthCheck => "health_check",
-            OperationType::FastPath => "fast_path",
-            OperationType::Consensus => "consensus",
+            OperationType::SingleWriterFinality => "single_writer_finality",
+            OperationType::SharedObjectFinality => "shared_object_finality",
         };
         let ping_label = if feedback.ping_type.is_some() {
             "true"
@@ -229,6 +229,13 @@ impl<A: Clone> ValidatorClientMonitor<A> {
 
         let mut client_stats = self.client_stats.write();
         client_stats.record_interaction_result(feedback);
+    }
+
+    /// Whether any latency has been observed yet. Until then
+    /// `select_shuffled_preferred_validators` returns an arbitrary shuffle rather than a real
+    /// preference.
+    pub fn has_observed_latencies(&self) -> bool {
+        !self.cached_latencies.read().is_empty()
     }
 
     /// Select validators based on client-observed performance for the given transaction type.

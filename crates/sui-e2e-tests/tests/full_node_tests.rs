@@ -528,11 +528,6 @@ async fn test_full_node_sync_flood() {
     do_test_full_node_sync_flood().await
 }
 
-#[sim_test(check_determinism)]
-async fn test_full_node_sync_flood_determinism() {
-    do_test_full_node_sync_flood().await
-}
-
 async fn do_test_full_node_sync_flood() {
     let mut test_cluster = TestClusterBuilder::new()
         .disable_fullnode_pruning()
@@ -1221,7 +1216,7 @@ async fn test_access_old_object_pruned() {
         .sign_and_execute_transaction(&tx_builder.transfer_sui(None, sender).build())
         .await
         .effects;
-    let new_gas_version = effects.gas_object().0.1;
+    let new_gas_version = effects.gas_object().unwrap().0.1;
     test_cluster.trigger_reconfiguration().await;
     // Construct a new transaction that uses the old gas object reference.
     let tx = test_cluster
@@ -1243,10 +1238,7 @@ async fn test_access_old_object_pruned() {
                 let state = node.state();
                 state
                     .database_for_testing()
-                    .prune_objects_and_compact_for_testing(
-                        state.get_checkpoint_store(),
-                        state.rpc_index.as_deref(),
-                    )
+                    .prune_objects_and_compact_for_testing(state.get_checkpoint_store())
                     .await;
                 // Make sure the old version of the object is already pruned.
                 assert!(

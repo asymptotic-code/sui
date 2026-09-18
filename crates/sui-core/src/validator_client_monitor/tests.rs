@@ -69,7 +69,7 @@ mod client_stats_tests {
         stats.record_interaction_result(OperationFeedback {
             authority_name: validator1,
             display_name: validator1.concise().to_string(),
-            operation: OperationType::Consensus,
+            operation: OperationType::SharedObjectFinality,
             ping_type: None,
             result: Ok(Duration::from_millis(50)),
         });
@@ -78,7 +78,7 @@ mod client_stats_tests {
         stats.record_interaction_result(OperationFeedback {
             authority_name: validator2,
             display_name: validator2.concise().to_string(),
-            operation: OperationType::Consensus,
+            operation: OperationType::SharedObjectFinality,
             ping_type: None,
             result: Ok(Duration::from_millis(200)),
         });
@@ -316,7 +316,7 @@ mod client_stats_tests {
             stats.record_interaction_result(OperationFeedback {
                 authority_name: validator1,
                 display_name: validator1.concise().to_string(),
-                operation: OperationType::Consensus,
+                operation: OperationType::SharedObjectFinality,
                 ping_type: None,
                 result: Ok(Duration::from_millis(100)), // 0.1s
             });
@@ -334,7 +334,7 @@ mod client_stats_tests {
             stats.record_interaction_result(OperationFeedback {
                 authority_name: validator2,
                 display_name: validator2.concise().to_string(),
-                operation: OperationType::Consensus,
+                operation: OperationType::SharedObjectFinality,
                 ping_type: None,
                 result: Ok(Duration::from_millis(100)),
             });
@@ -413,7 +413,7 @@ mod client_stats_tests {
             stats.record_interaction_result(OperationFeedback {
                 authority_name: validator,
                 display_name: validator.concise().to_string(),
-                operation: OperationType::Consensus,
+                operation: OperationType::SharedObjectFinality,
                 ping_type: None,
                 result: Ok(Duration::from_millis(100)), // 0.1s
             });
@@ -448,7 +448,7 @@ mod client_stats_tests {
             stats.record_interaction_result(OperationFeedback {
                 authority_name: validator,
                 display_name: validator.concise().to_string(),
-                operation: OperationType::Consensus,
+                operation: OperationType::SharedObjectFinality,
                 ping_type: None,
                 result: Ok(Duration::from_millis(100)),
             });
@@ -505,7 +505,7 @@ mod client_monitor_tests {
             monitor.record_interaction_result(OperationFeedback {
                 authority_name: *validator,
                 display_name: auth_agg.get_display_name(validator),
-                operation: OperationType::Consensus,
+                operation: OperationType::SharedObjectFinality,
                 ping_type: None,
                 result: Ok(Duration::from_millis((i as u64 + 1) * 50)),
             });
@@ -543,7 +543,7 @@ mod client_monitor_tests {
             monitor.record_interaction_result(OperationFeedback {
                 authority_name: *validator,
                 display_name: auth_agg.get_display_name(validator),
-                operation: OperationType::Consensus,
+                operation: OperationType::SharedObjectFinality,
                 ping_type: None,
                 result: if i < 2 {
                     Ok(Duration::from_millis((i as u64 + 1) * 50))
@@ -674,7 +674,7 @@ mod client_monitor_tests {
             monitor.record_interaction_result(OperationFeedback {
                 authority_name: *validator,
                 display_name: auth_agg.get_display_name(validator),
-                operation: OperationType::Consensus,
+                operation: OperationType::SharedObjectFinality,
                 ping_type: None,
                 result: Ok(Duration::from_millis((i as u64 + 1) * 50)),
             });
@@ -852,5 +852,44 @@ mod client_monitor_tests {
             assert!(monitor.has_validator_stats(validator));
         }
         assert!(monitor.has_validator_stats(&new_validator));
+    }
+
+    /// Before any latency has been measured, health-check results are the only signal we have.
+    /// A validator that is failing health checks must rank below one we simply haven't measured,
+    /// so cold-start selection never prefers a validator we already know is down.
+    #[tokio::test]
+    async fn test_unmeasured_validators_ranked_by_reliability() {
+        let auth_agg = get_authority_aggregator(4);
+        let monitor = ValidatorClientMonitor::new_for_test(auth_agg.clone());
+        let committee = auth_agg.committee.clone();
+        let validators = committee.names().cloned().collect::<Vec<_>>();
+
+        // No validator has latency measurements. One is failing its health checks.
+        for _ in 0..5 {
+            monitor.record_interaction_result(OperationFeedback {
+                authority_name: validators[0],
+                display_name: auth_agg.get_display_name(&validators[0]),
+                operation: OperationType::HealthCheck,
+                ping_type: None,
+                result: Err(()),
+            });
+        }
+        // Another is passing them.
+        monitor.record_interaction_result(OperationFeedback {
+            authority_name: validators[1],
+            display_name: auth_agg.get_display_name(&validators[1]),
+            operation: OperationType::HealthCheck,
+            ping_type: None,
+            result: Ok(Duration::from_millis(50)),
+        });
+        monitor.force_update_cached_latencies(&auth_agg);
+
+        // The failing validator must come last; use delta 0 so equal scores stay grouped.
+        let selected = monitor.select_shuffled_preferred_validators(&committee, 0.0);
+        assert_eq!(selected.len(), 4);
+        assert_eq!(
+            selected[3], validators[0],
+            "validator known to be failing health checks should rank last"
+        );
     }
 }

@@ -105,6 +105,11 @@ pub enum PackageError {
     #[error("Unable to create ephemeral publication file `{file}`: {err:?}")]
     InvalidEphemeralFile { file: PathBuf, err: std::io::Error },
 
+    #[error(
+        "Ephemeral publication file refers to a local package `{path}`, but the directory at `{path}` cannot be accessed."
+    )]
+    InvalidEphemeralPath { path: PathBuf },
+
     #[error("Multiple entries with `source = {{ {dep} }}` exist in the publication file")]
     MultipleEphemeralEntries { dep: String },
 
@@ -125,6 +130,12 @@ pub enum PackageError {
         "Packages with old-style Move.toml files cannot depend on new-style packages. See https://docs.sui.io/references/package-managers/package-manager-migration for instructions."
     )]
     LegacyDependsOnModern,
+
+    #[error(
+        "On-chain dependency `{name}` needs an address. Add a \
+         `[dep-replacements.{env}.{name}]` entry with `on-chain = \"0x...\"`."
+    )]
+    OnChainDepMissingAddress { name: String, env: String },
 }
 
 /// Truncate `s` to the first `head` characters and the last `tail` characters of `s`, separated by

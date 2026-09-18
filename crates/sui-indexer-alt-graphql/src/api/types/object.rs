@@ -45,6 +45,7 @@ use crate::api::scalars::base64::Base64;
 use crate::api::scalars::big_int::BigInt;
 use crate::api::scalars::cursor::BcsCursor;
 use crate::api::scalars::cursor::JsonCursor;
+use crate::api::scalars::digest::Digest;
 use crate::api::scalars::id::Id;
 use crate::api::scalars::owner_kind::OwnerKind;
 use crate::api::scalars::sui_address::SuiAddress;
@@ -57,6 +58,7 @@ use crate::api::types::balance;
 use crate::api::types::balance::Balance;
 use crate::api::types::coin_metadata::CoinMetadata;
 use crate::api::types::dynamic_field;
+use crate::api::types::dynamic_field::DerivedObjectKey;
 use crate::api::types::dynamic_field::DynamicField;
 use crate::api::types::dynamic_field::DynamicFieldName;
 use crate::api::types::move_object::MoveObject;
@@ -68,6 +70,7 @@ use crate::api::types::owner::Owner;
 use crate::api::types::transaction::CTransaction;
 use crate::api::types::transaction::Transaction;
 use crate::api::types::transaction::filter::TransactionFilter;
+use crate::api::types::transaction_object::TransactionObject;
 use crate::error::RpcError;
 use crate::error::bad_user_input;
 use crate::error::feature_unavailable;
@@ -77,6 +80,7 @@ use crate::intersect;
 use crate::pagination::Page;
 use crate::pagination::PageLimits;
 use crate::pagination::PaginationConfig;
+use crate::pagination::StreamConnection;
 use crate::scope::Scope;
 use crate::task::watermark::Watermarks;
 
@@ -150,7 +154,7 @@ use crate::task::watermark::Watermarks;
         arg(name = "last", ty = "Option<u64>"),
         arg(name = "before", ty = "Option<CTransaction>"),
         arg(name = "filter", ty = "Option<TransactionFilter>"),
-        ty = "Option<Result<Connection<String, Transaction>, RpcError>>",
+        ty = "Option<Result<StreamConnection<Transaction>, RpcError>>",
         desc = "The transactions that sent objects to this object."
     )
 )]
@@ -310,9 +314,27 @@ impl Object {
         MovePackage::from_object(self, ctx).await.transpose()
     }
 
-    /// Fetch the total balance for coins with marker type `coinType` (e.g. `0x2::sui::SUI`), owned by this address.
+    /// How this object was referenced by a specific transaction.
     ///
-    /// If the address does not own any coins of that type, a balance of zero is returned.
+    /// Returns `null` if the object was not referenced, or was present only as a non-object marker variant of unchanged consensus input (e.g. cancelled, stream-ended, per-epoch).
+    ///
+    /// The `transactionDigest` argument may be omitted when the query is scoped under a transaction context (e.g. a parent `Transaction`, `TransactionEffects`, or `Event`); the field then resolves against the in-scope transaction.
+    ///
+    /// Passing an explicit `transactionDigest` other than the in-scope transaction in subscription context is not supported; for arbitrary transaction lookups, use the indexed Query API.
+    pub(crate) async fn as_transaction_object(
+        &self,
+        ctx: &Context<'_>,
+        transaction_digest: Option<Digest>,
+    ) -> Option<Result<TransactionObject, RpcError>> {
+        self.super_
+            .as_transaction_object(ctx, transaction_digest)
+            .await
+            .ok()?
+    }
+
+    /// Fetch the balance for `coinType` (e.g. `0x2::sui::SUI`) owned by this address.
+    ///
+    /// The result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator. If this address has no balance of that type, all three values are zero.
     pub(crate) async fn balance(
         &self,
         ctx: &Context<'_>,
@@ -321,7 +343,9 @@ impl Object {
         self.super_.balance(ctx, coin_type).await.ok()?
     }
 
-    /// Total balance across coins owned by this address, grouped by coin type.
+    /// Balances held by this address, grouped by coin type.
+    ///
+    /// Each result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator.
     pub(crate) async fn balances(
         &self,
         ctx: &Context<'_>,
@@ -342,6 +366,25 @@ impl Object {
         ctx: &Context<'_>,
     ) -> Option<Result<NameRecord, RpcError<Error>>> {
         self.super_.default_name_record(ctx).await.ok()?
+    }
+
+    /// Access a derived object using its key.
+    ///
+    /// The object can be bounded by at most one of `version`, `rootVersion`, or `atCheckpoint`, with the same semantics as `Query.object`.
+    ///
+    /// Returns `null` if the derived object has not been claimed, has been deleted, or is not available in the store.
+    pub(crate) async fn derived_object(
+        &self,
+        ctx: &Context<'_>,
+        name: DynamicFieldName,
+        version: Option<UInt53>,
+        root_version: Option<UInt53>,
+        at_checkpoint: Option<UInt53>,
+    ) -> Option<Result<MoveObject, RpcError<dynamic_field::Error>>> {
+        self.super_
+            .derived_object(ctx, name, version, root_version, at_checkpoint)
+            .await
+            .ok()?
     }
 
     /// Access a dynamic field on an object using its type and BCS-encoded name.
@@ -404,6 +447,17 @@ impl Object {
         .await
     }
 
+    /// Access derived objects using their keys and optional version bounds.
+    ///
+    /// Each key can specify at most one of `version`, `rootVersion`, or `atCheckpoint`, with the same semantics as `Query.object`. Returns a list that is guaranteed to be the same length as `keys`. If a derived object has not been claimed, has been deleted, or is not available in the store, its corresponding entry is `null`.
+    pub(crate) async fn multi_get_derived_objects(
+        &self,
+        ctx: &Context<'_>,
+        keys: Vec<DerivedObjectKey>,
+    ) -> Result<Vec<Option<MoveObject>>, RpcError<dynamic_field::Error>> {
+        self.super_.multi_get_derived_objects(ctx, keys).await
+    }
+
     /// Access dynamic fields on an object using their types and BCS-encoded names.
     ///
     /// Returns a list of dynamic fields that is guaranteed to be the same length as `keys`. If a dynamic field in `keys` could not be found in the store, its corresponding entry in the result will be `null`.
@@ -444,10 +498,9 @@ impl Object {
         .await
     }
 
-    /// Fetch the total balances keyed by coin types (e.g. `0x2::sui::SUI`) owned by this address.
+    /// Fetch balances keyed by coin types (e.g. `0x2::sui::SUI`) owned by this address.
     ///
-    /// Returns `None` when no checkpoint is set in scope (e.g. execution scope).
-    /// If the address does not own any coins of a given type, a balance of zero is returned for that type.
+    /// Each result includes the total balance, the balance held in coin objects, and the balance held in the address's balance accumulator. Returns `null` when no checkpoint is set in scope (e.g. execution scope). If this address has no balance of a given type, all three values are zero for that type.
     pub(crate) async fn multi_get_balances(
         &self,
         ctx: &Context<'_>,
@@ -644,7 +697,7 @@ impl Object {
         last: Option<u64>,
         before: Option<CTransaction>,
         filter: Option<TransactionFilter>,
-    ) -> Option<Result<Connection<String, Transaction>, RpcError>> {
+    ) -> Option<Result<StreamConnection<Transaction>, RpcError>> {
         let result = async {
             let pagination: &PaginationConfig = ctx.data()?;
             let limits = pagination.limits("IObject", "receivedTransactions");
@@ -658,7 +711,7 @@ impl Object {
 
             // Intersect with user-provided filter
             let Some(filter) = filter.unwrap_or_default().intersect(address_filter) else {
-                return Ok(Connection::new(false, false));
+                return Ok(Connection::new(false, false).into());
             };
 
             Transaction::paginate(ctx, self.super_.scope.clone(), page, filter).await
@@ -944,7 +997,7 @@ impl Object {
         let pg_reader: &PgReader = ctx.data()?;
 
         let mut query = v::obj_versions
-            .filter(v::object_id.eq(address.to_vec()))
+            .filter(v::object_id.eq(address.to_inner()))
             .filter(v::object_digest.is_not_null())
             .filter(sql!(as Bool,
                 r#"
@@ -1202,13 +1255,19 @@ impl Object {
                     return Ok(None);
                 };
 
-                // Check execution context cache first and return if available
-                if let Some(cached_object) = self
-                    .super_
-                    .scope
-                    .execution_output_object(self.super_.address.into(), version.into())
+                // Serve from in-memory sources before the KV backend: the execution output cache
+                // (mutation/simulation output), then the streamed object store (a live subscription
+                // may reach an object from an earlier streamed checkpoint, still ahead of the index).
+                let scope = &self.super_.scope;
+                if let Some(executed) =
+                    scope.execution_output_object(self.super_.address.into(), version.into())
                 {
-                    Ok(Some(cached_object.clone()))
+                    Ok(Some(executed.clone()))
+                } else if let Some(streamed) = scope
+                    .streamed_object_store()
+                    .and_then(|store| store.get(self.super_.address.into(), version.into()))
+                {
+                    Ok(Some(streamed))
                 } else {
                     Ok(kv_loader
                         .load_one_object(self.super_.address.into(), version.into())

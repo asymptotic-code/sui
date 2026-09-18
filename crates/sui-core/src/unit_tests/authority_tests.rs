@@ -14,6 +14,7 @@ use move_core_types::language_storage::StructTag;
 use move_core_types::{
     account_address::AccountAddress, ident_str, identifier::Identifier, language_storage::TypeTag,
 };
+use mysten_common::ZipDebugEqIteratorExt;
 use rand::seq::SliceRandom;
 use rand::{SeedableRng, prelude::StdRng};
 use serde_json::json;
@@ -62,6 +63,7 @@ use sui_types::{
 use sui_types::{SUI_CLOCK_OBJECT_SHARED_VERSION, digests::Digest};
 use sui_types::{dynamic_field::DynamicFieldType, messages_consensus::ConsensusTransaction};
 
+use crate::authority::authority_store::ObjectLockStatus;
 use crate::authority::shared_object_congestion_tracker::SharedObjectCongestionTracker;
 use crate::authority::test_authority_builder::TestAuthorityBuilder;
 use crate::authority::transaction_deferral::DeferralKey;
@@ -137,7 +139,7 @@ impl TestCallArg {
     }
 
     async fn call_arg_from_id(object_id: ObjectID, state: &AuthorityState) -> ObjectArg {
-        let object = state.get_object(&object_id).await.unwrap();
+        let object = state.get_object(&object_id).unwrap();
         match &object.owner {
             Owner::AddressOwner(_) | Owner::ObjectOwner(_) | Owner::Immutable => {
                 ObjectArg::ImmOrOwnedObject(object.compute_object_reference())
@@ -146,6 +148,17 @@ impl TestCallArg {
                 initial_shared_version,
             }
             | Owner::ConsensusAddressOwner {
+                start_version: initial_shared_version,
+                ..
+            } => ObjectArg::SharedObject {
+                id: object_id,
+                initial_shared_version: *initial_shared_version,
+                mutability: SharedObjectMutability::Mutable,
+            },
+            // TODO(Party WIP) This would benefit from either having the `mutability` passed
+            // in, or the sender so the mutability could be computed from the party's
+            // permissions.
+            Owner::Party {
                 start_version: initial_shared_version,
                 ..
             } => ObjectArg::SharedObject {
@@ -186,13 +199,12 @@ async fn construct_shared_object_transaction_with_sequence_number(
             "share",
             vec![],
             vec![],
-            true,
         )
         .await
         .unwrap();
         effects.status().unwrap();
         let shared_object_id = effects.created()[0].0.0;
-        let mut shared_object = authority.get_object(&shared_object_id).await.unwrap();
+        let mut shared_object = authority.get_object(&shared_object_id).unwrap();
         if let Some(initial_shared_version) = initial_shared_version_override {
             shared_object
                 .data
@@ -211,10 +223,10 @@ async fn construct_shared_object_transaction_with_sequence_number(
     // Make a sample transaction.
     let (validator, fullnode, package) =
         init_state_with_ids_and_object_basics_with_fullnode(vec![(sender, gas_object_id)]).await;
-    validator.insert_genesis_object(shared_object.clone()).await;
-    fullnode.insert_genesis_object(shared_object.clone()).await;
+    validator.insert_genesis_object(shared_object.clone());
+    fullnode.insert_genesis_object(shared_object.clone());
     let rgp = validator.reference_gas_price_for_testing().unwrap();
-    let gas_object = validator.get_object(&gas_object_id).await;
+    let gas_object = validator.get_object(&gas_object_id);
     let gas_object_ref = gas_object.unwrap().compute_object_reference();
     let data = TransactionData::new_move_call(
         sender,
@@ -249,32 +261,19 @@ async fn construct_shared_object_transaction_with_sequence_number(
 async fn test_dry_run_transaction_block() {
     let (validator, fullnode, transaction, gas_object_id, shared_object_id) =
         construct_shared_object_transaction_with_sequence_number(None).await;
-    let initial_shared_object_version = validator
-        .get_object(&shared_object_id)
-        .await
-        .unwrap()
-        .version();
-
-    let transaction_digest = *transaction.digest();
+    let initial_shared_object_version = validator.get_object(&shared_object_id).unwrap().version();
 
     let (response, _, _, _) = fullnode
-        .dry_exec_transaction(
-            transaction.data().intent_message().value.clone(),
-            transaction_digest,
-        )
+        .dry_exec_transaction(transaction.data().intent_message().value.clone())
         .await
         .unwrap();
     assert_eq!(*response.effects.status(), SuiExecutionStatus::Success);
     let gas_usage = response.effects.gas_cost_summary();
 
     // Make sure that objects are not mutated after dry run.
-    let gas_object_version = fullnode.get_object(&gas_object_id).await.unwrap().version();
+    let gas_object_version = fullnode.get_object(&gas_object_id).unwrap().version();
     assert_eq!(gas_object_version, OBJECT_START_VERSION);
-    let shared_object_version = fullnode
-        .get_object(&shared_object_id)
-        .await
-        .unwrap()
-        .version();
+    let shared_object_version = fullnode.get_object(&shared_object_id).unwrap().version();
     assert_eq!(shared_object_version, initial_shared_object_version);
 
     let txn_data = &transaction.data().intent_message().value;
@@ -285,10 +284,7 @@ async fn test_dry_run_transaction_block() {
         txn_data.gas_budget(),
         txn_data.gas_price(),
     );
-    let (response, _, _, _) = fullnode
-        .dry_exec_transaction(txn_data, transaction_digest)
-        .await
-        .unwrap();
+    let (response, _, _, _) = fullnode.dry_exec_transaction(txn_data).await.unwrap();
     let gas_usage_no_gas = response.effects.gas_cost_summary();
     assert_eq!(*response.effects.status(), SuiExecutionStatus::Success);
     assert_eq!(gas_usage, gas_usage_no_gas);
@@ -317,10 +313,7 @@ async fn test_dry_run_no_gas_big_transfer() {
     let signed = to_sender_signed_transaction(data, &sender_key);
 
     let (dry_run_res, _, _, _) = fullnode
-        .dry_exec_transaction(
-            signed.data().intent_message().value.clone(),
-            *signed.digest(),
-        )
+        .dry_exec_transaction(signed.data().intent_message().value.clone())
         .await
         .unwrap();
     assert_eq!(*dry_run_res.effects.status(), SuiExecutionStatus::Success);
@@ -381,12 +374,11 @@ async fn test_dev_inspect_object_by_bytes() {
             TestCallArg::Pure(bcs::to_bytes(&(16_u64)).unwrap()),
             TestCallArg::Pure(bcs::to_bytes(&sender).unwrap()),
         ],
-        false,
     )
     .await
     .unwrap();
     let created_object_id = effects.created()[0].0.0;
-    let created_object = validator.get_object(&created_object_id).await.unwrap();
+    let created_object = validator.get_object(&created_object_id).unwrap();
     let created_object_bytes = created_object
         .data
         .try_as_move()
@@ -446,7 +438,6 @@ async fn test_dev_inspect_object_by_bytes() {
             TestCallArg::Object(created_object_id),
             TestCallArg::Pure(bcs::to_bytes(&100_u64).unwrap()),
         ],
-        false,
     )
     .await
     .unwrap();
@@ -456,7 +447,7 @@ async fn test_dev_inspect_object_by_bytes() {
     assert!(effects.unwrapped_then_deleted().is_empty());
 
     // compare the bytes
-    let updated_object = validator.get_object(&created_object_id).await.unwrap();
+    let updated_object = validator.get_object(&created_object_id).unwrap();
     let updated_object_bytes = updated_object.data.try_as_move().unwrap().contents();
     assert_eq!(updated_object_bytes, updated_reference_bytes)
 }
@@ -484,12 +475,11 @@ async fn test_dev_inspect_unowned_object() {
             TestCallArg::Pure(bcs::to_bytes(&(16_u64)).unwrap()),
             TestCallArg::Pure(bcs::to_bytes(&bob).unwrap()),
         ],
-        false,
     )
     .await
     .unwrap();
     let created_object_id = effects.created()[0].0.0;
-    let created_object = validator.get_object(&created_object_id).await.unwrap();
+    let created_object = validator.get_object(&created_object_id).unwrap();
     assert!(alice != bob);
     assert_eq!(created_object.owner, Owner::AddressOwner(bob));
 
@@ -551,13 +541,12 @@ async fn test_dev_inspect_dynamic_field() {
                         TestCallArg::Pure(bcs::to_bytes(&(16_u64)).unwrap()),
                         TestCallArg::Pure(bcs::to_bytes(&sender).unwrap()),
                     ],
-                    false,
                 )
                 .await
                 .unwrap();
                 assert!(effects.status().is_ok(), "{:#?}", effects.status());
                 let created_object_id = effects.created()[0].0.0;
-                let created_object = validator.get_object(&created_object_id).await.unwrap();
+                let created_object = validator.get_object(&created_object_id).unwrap();
                 created_object
                     .data
                     .try_as_move()
@@ -658,12 +647,11 @@ async fn test_dev_inspect_return_values() {
             TestCallArg::Pure(bcs::to_bytes(&(init_value)).unwrap()),
             TestCallArg::Pure(bcs::to_bytes(&sender).unwrap()),
         ],
-        false,
     )
     .await
     .unwrap();
     let created_object_id = effects.created()[0].0.0;
-    let created_object = validator.get_object(&created_object_id).await.unwrap();
+    let created_object = validator.get_object(&created_object_id).unwrap();
     let created_object_bytes = created_object
         .data
         .try_as_move()
@@ -764,7 +752,6 @@ async fn test_dev_inspect_return_values() {
         "wrap_object",
         vec![],
         vec![TestCallArg::Object(created_object_id)],
-        false,
     )
     .await
     .unwrap();
@@ -993,12 +980,8 @@ async fn test_dev_inspect_on_validator() {
 async fn test_dry_run_on_validator() {
     let (validator, _fullnode, transaction, _gas_object_id, _shared_object_id) =
         construct_shared_object_transaction_with_sequence_number(None).await;
-    let transaction_digest = *transaction.digest();
     let response = validator
-        .dry_exec_transaction(
-            transaction.data().intent_message().value.clone(),
-            transaction_digest,
-        )
+        .dry_exec_transaction(transaction.data().intent_message().value.clone())
         .await;
     assert!(response.is_err());
 }
@@ -1014,8 +997,8 @@ async fn test_dry_run_dev_inspect_dynamic_field_too_new() {
     let (fullnode, _object_basics) = publish_object_basics(fullnode).await;
     let gas_object = Object::with_id_owner_for_testing(gas_object_id, sender);
     let gas_object_ref = gas_object.compute_object_reference();
-    validator.insert_genesis_object(gas_object.clone()).await;
-    fullnode.insert_genesis_object(gas_object).await;
+    validator.insert_genesis_object(gas_object.clone());
+    fullnode.insert_genesis_object(gas_object);
     // create the parent
     let effects = call_move_(
         &validator,
@@ -1031,7 +1014,6 @@ async fn test_dry_run_dev_inspect_dynamic_field_too_new() {
             TestCallArg::Pure(bcs::to_bytes(&(16_u64)).unwrap()),
             TestCallArg::Pure(bcs::to_bytes(&sender).unwrap()),
         ],
-        false,
     )
     .await
     .unwrap();
@@ -1054,7 +1036,6 @@ async fn test_dry_run_dev_inspect_dynamic_field_too_new() {
             TestCallArg::Pure(bcs::to_bytes(&(32_u64)).unwrap()),
             TestCallArg::Pure(bcs::to_bytes(&sender).unwrap()),
         ],
-        false,
     )
     .await
     .unwrap();
@@ -1074,7 +1055,6 @@ async fn test_dry_run_dev_inspect_dynamic_field_too_new() {
         "add_field",
         vec![],
         vec![TestCallArg::Object(parent.0), TestCallArg::Object(child.0)],
-        false,
     )
     .await
     .unwrap();
@@ -1082,7 +1062,7 @@ async fn test_dry_run_dev_inspect_dynamic_field_too_new() {
     assert_eq!(effects.created().len(), 1);
 
     // make sure the parent was updated
-    let new_parent = fullnode.get_object(&parent.0).await.unwrap();
+    let new_parent = fullnode.get_object(&parent.0).unwrap();
     assert!(parent.1 < new_parent.version());
 
     // no child to delete since we are using the old version of the parent
@@ -1113,13 +1093,11 @@ async fn test_dry_run_dev_inspect_dynamic_field_too_new() {
         rgp * TEST_ONLY_GAS_UNIT_FOR_OBJECT_BASICS,
         rgp,
     );
-    let transaction = to_sender_signed_transaction(data.clone(), &sender_key);
-    let digest = *transaction.digest();
     let DryRunTransactionBlockResponse {
         effects,
         execution_error_source,
         ..
-    } = fullnode.dry_exec_transaction(data, digest).await.unwrap().0;
+    } = fullnode.dry_exec_transaction(data).await.unwrap().0;
 
     assert_eq!(effects.deleted().len(), 0);
     assert!(execution_error_source.is_some());
@@ -1136,7 +1114,7 @@ async fn test_dry_run_dev_inspect_dynamic_field_too_new() {
 // tests using a gas coin with version MAX - 1
 #[tokio::test]
 async fn test_dry_run_dev_inspect_max_gas_version() {
-    let (sender, sender_key): (_, AccountKeyPair) = get_key_pair();
+    let (sender, _sender_key): (_, AccountKeyPair) = get_key_pair();
     let gas_object_id = ObjectID::random();
     let (validator, fullnode) = init_state_validator_with_fullnode().await;
     let (validator, object_basics) = publish_object_basics(validator).await;
@@ -1147,8 +1125,8 @@ async fn test_dry_run_dev_inspect_max_gas_version() {
         Owner::AddressOwner(sender),
     );
     let gas_object_ref = gas_object.compute_object_reference();
-    validator.insert_genesis_object(gas_object.clone()).await;
-    fullnode.insert_genesis_object(gas_object).await;
+    validator.insert_genesis_object(gas_object.clone());
+    fullnode.insert_genesis_object(gas_object);
     let rgp = fullnode.reference_gas_price_for_testing().unwrap();
     let pt = ProgrammableTransaction {
         inputs: vec![
@@ -1179,10 +1157,8 @@ async fn test_dry_run_dev_inspect_max_gas_version() {
         rgp * TEST_ONLY_GAS_UNIT_FOR_OBJECT_BASICS,
         rgp,
     );
-    let transaction = to_sender_signed_transaction(data.clone(), &sender_key);
-    let digest = *transaction.digest();
     let DryRunTransactionBlockResponse { effects, .. } =
-        fullnode.dry_exec_transaction(data, digest).await.unwrap().0;
+        fullnode.dry_exec_transaction(data).await.unwrap().0;
     assert_eq!(effects.status(), &SuiExecutionStatus::Success);
 }
 
@@ -1195,8 +1171,8 @@ async fn test_handle_transfer_transaction_bad_signature() {
     let authority_state =
         init_state_with_ids(vec![(sender, object_id), (sender, gas_object_id)]).await;
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
     let transfer_transaction = init_transfer_transaction(
         &authority_state,
         sender,
@@ -1224,27 +1200,16 @@ async fn test_handle_transfer_transaction_bad_signature() {
     // verify_user_input (transaction.rs)
     // assert_eq!(metrics.signature_errors.get(), 1);
 
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    assert!(
+    let object = authority_state.get_object(&object_id).unwrap();
+    assert_eq!(
         authority_state
-            .get_transaction_lock(
-                &object.compute_object_reference(),
+            .get_object_cache_reader()
+            .get_lock(
+                object.compute_object_reference(),
                 &authority_state.epoch_store_for_testing()
             )
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    assert!(
-        authority_state
-            .get_transaction_lock(
-                &object.compute_object_reference(),
-                &authority_state.epoch_store_for_testing()
-            )
-            .await
-            .unwrap()
-            .is_none()
+            .unwrap(),
+        ObjectLockStatus::Initialized
     );
 }
 
@@ -1260,8 +1225,8 @@ async fn test_handle_transfer_transaction_with_max_sequence_number() {
     ])
     .await;
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
     let transfer_transaction = init_transfer_transaction(
         &authority_state,
         sender,
@@ -1303,8 +1268,8 @@ async fn test_handle_transfer_transaction_unknown_sender() {
         init_state_with_ids(vec![(sender, object_id), (sender, gas_object_id)]).await;
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
 
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
 
     let unknown_sender_transfer_transaction = init_transfer_transaction(
         &authority_state,
@@ -1321,27 +1286,16 @@ async fn test_handle_transfer_transaction_unknown_sender() {
         handle_transaction_for_test(&authority_state, unknown_sender_transfer_transaction).is_err()
     );
 
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    assert!(
+    let object = authority_state.get_object(&object_id).unwrap();
+    assert_eq!(
         authority_state
-            .get_transaction_lock(
-                &object.compute_object_reference(),
+            .get_object_cache_reader()
+            .get_lock(
+                object.compute_object_reference(),
                 &authority_state.epoch_store_for_testing()
             )
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    assert!(
-        authority_state
-            .get_transaction_lock(
-                &object.compute_object_reference(),
-                &authority_state.epoch_store_for_testing()
-            )
-            .await
-            .unwrap()
-            .is_none()
+            .unwrap(),
+        ObjectLockStatus::Initialized
     );
 }
 
@@ -1357,8 +1311,8 @@ async fn test_handle_transfer_transaction_ok() {
 
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
 
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
 
     let before_object_version = object.version();
     let after_object_version =
@@ -1385,7 +1339,7 @@ async fn test_handle_transfer_transaction_ok() {
     assert!(effects.status().is_ok());
 
     // Verify the object was transferred to the recipient
-    let transferred_object = authority_state.get_object(&object_id).await.unwrap();
+    let transferred_object = authority_state.get_object(&object_id).unwrap();
     assert_eq!(transferred_object.version(), after_object_version);
     assert_eq!(transferred_object.owner, Owner::AddressOwner(recipient));
 }
@@ -1402,8 +1356,8 @@ async fn test_handle_sponsored_transaction() {
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
     let epoch_store = authority_state.load_epoch_store_one_call_per_task();
 
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
 
     let pt = {
         let mut builder = ProgrammableTransactionBuilder::new();
@@ -1527,11 +1481,8 @@ async fn test_transfer_package() {
     let object_id = ObjectID::random();
     let authority_state = init_state_with_ids(vec![(sender, object_id)]).await;
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
-    let gas_object = authority_state.get_object(&object_id).await.unwrap();
-    let package_object_ref = authority_state
-        .get_sui_system_package_object_ref()
-        .await
-        .unwrap();
+    let gas_object = authority_state.get_object(&object_id).unwrap();
+    let package_object_ref = authority_state.get_sui_system_package_object_ref().unwrap();
     // We are trying to transfer the genesis package object, which is immutable.
     let transfer_transaction = init_transfer_transaction(
         &authority_state,
@@ -1558,10 +1509,8 @@ async fn test_immutable_gas() {
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
     let imm_object_id = ObjectID::random();
     let imm_object = Object::immutable_with_id_for_testing(imm_object_id);
-    authority_state
-        .insert_genesis_object(imm_object.clone())
-        .await;
-    let mut_object = authority_state.get_object(&mut_object_id).await.unwrap();
+    authority_state.insert_genesis_object(imm_object.clone());
+    let mut_object = authority_state.get_object(&mut_object_id).unwrap();
     let transfer_transaction = init_transfer_transaction(
         &authority_state,
         sender,
@@ -1590,9 +1539,7 @@ async fn test_objected_owned_gas() {
     let epoch_store = authority_state.load_epoch_store_one_call_per_task();
     let child_object_id = ObjectID::random();
     let child_object = Object::with_object_owner_for_testing(child_object_id, parent_object_id);
-    authority_state
-        .insert_genesis_object(child_object.clone())
-        .await;
+    authority_state.insert_genesis_object(child_object.clone());
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
     let data = TransactionData::new_transfer_sui(
         recipient,
@@ -1690,12 +1637,12 @@ async fn test_publish_dependent_module_ok() {
     .fresh_id();
 
     // Object does not exist
-    assert!(authority.get_object(&dependent_module_id).await.is_none());
+    assert!(authority.get_object(&dependent_module_id).is_none());
     let signed_effects = submit_and_execute(&authority, transaction).await.unwrap().1;
     signed_effects.into_data().status().unwrap();
 
     // check that the dependent module got published
-    assert!(authority.get_object(&dependent_module_id).await.is_some());
+    assert!(authority.get_object(&dependent_module_id).is_some());
 }
 
 // Test that publishing a module with no dependencies works
@@ -1712,7 +1659,7 @@ async fn test_publish_module_no_dependencies_ok() {
     let gas_payment_object =
         Object::with_id_owner_gas_for_testing(gas_payment_object_id, sender, gas_balance);
     let gas_payment_object_ref = gas_payment_object.compute_object_reference();
-    authority.insert_genesis_object(gas_payment_object).await;
+    authority.insert_genesis_object(gas_payment_object);
 
     let module = file_format::empty_module();
     let mut module_bytes = Vec::new();
@@ -1811,7 +1758,6 @@ async fn test_publish_non_existing_dependent_module() {
     assert_eq!(
         authority
             .get_object(&gas_payment_object_id)
-            .await
             .unwrap()
             .version(),
         gas_payment_object_ref.1
@@ -1883,7 +1829,7 @@ async fn test_publish_module_with_unpublishable_magic() {
     let gas_payment_object =
         Object::with_id_owner_gas_for_testing(gas_payment_object_id, sender, gas_balance);
     let gas_payment_object_ref = gas_payment_object.compute_object_reference();
-    authority.insert_genesis_object(gas_payment_object).await;
+    authority.insert_genesis_object(gas_payment_object);
 
     let module = file_format::empty_unpublishable_module();
     let mut module_bytes = Vec::new();
@@ -1927,7 +1873,7 @@ async fn test_publish_module_with_unpublishable_magic_swapped() {
     let gas_payment_object =
         Object::with_id_owner_gas_for_testing(gas_payment_object_id, sender, gas_balance);
     let gas_payment_object_ref = gas_payment_object.compute_object_reference();
-    authority.insert_genesis_object(gas_payment_object).await;
+    authority.insert_genesis_object(gas_payment_object);
 
     let module = file_format::empty_unpublishable_module();
     let mut module_bytes = Vec::new();
@@ -1980,10 +1926,7 @@ async fn test_handle_move_transaction() {
 
     let created_object_id = effects.created()[0].0.0;
     // check that transaction actually created an object with the expected ID, owner
-    let created_obj = authority_state
-        .get_object(&created_object_id)
-        .await
-        .unwrap();
+    let created_obj = authority_state.get_object(&created_object_id).unwrap();
     assert_eq!(
         created_obj.owner.get_address_owner_address().unwrap(),
         sender
@@ -2001,8 +1944,8 @@ async fn test_handle_transfer_transaction_double_spend() {
         init_state_with_ids(vec![(sender, object_id), (sender, gas_object_id)]).await;
 
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
     let transfer_transaction = init_transfer_transaction(
         &authority_state,
         sender,
@@ -2026,7 +1969,7 @@ async fn test_handle_transfer_sui_with_amount_insufficient_gas() {
     let object_id = ObjectID::random();
     let authority_state = init_state_with_ids(vec![(sender, object_id)]).await;
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
-    let object = authority_state.get_object(&object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
     let data = TransactionData::new_transfer_sui(
         recipient,
         sender,
@@ -2057,7 +2000,7 @@ async fn test_missing_package() {
         init_state_with_ids_and_object_basics(vec![(sender, gas_object_id)]).await;
     let epoch_store = authority_state.load_epoch_store_one_call_per_task();
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
     let non_existent_package = ObjectID::MAX;
     let gas_object_ref = gas_object.compute_object_reference();
     let data = TransactionData::new_move_call(
@@ -2097,15 +2040,15 @@ async fn test_type_argument_dependencies() {
     let epoch_store = authority_state.load_epoch_store_one_call_per_task();
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
     let gas1 = {
-        let o = authority_state.get_object(&gas1).await.unwrap();
+        let o = authority_state.get_object(&gas1).unwrap();
         o.compute_object_reference()
     };
     let gas2 = {
-        let o = authority_state.get_object(&gas2).await.unwrap();
+        let o = authority_state.get_object(&gas2).unwrap();
         o.compute_object_reference()
     };
     let gas3 = {
-        let o = authority_state.get_object(&gas3).await.unwrap();
+        let o = authority_state.get_object(&gas3).unwrap();
         o.compute_object_reference()
     };
     // primitive type tag succeeds
@@ -2189,8 +2132,8 @@ async fn test_handle_confirmation_transaction_receiver_equal_sender() {
     let gas_object_id = ObjectID::random();
     let authority_state =
         init_state_with_ids(vec![(address, object_id), (address, gas_object_id)]).await;
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
 
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
     let transfer_transaction = init_transfer_transaction(
@@ -2217,8 +2160,8 @@ async fn test_handle_confirmation_transaction_ok() {
     let gas_object_id = ObjectID::random();
     let authority_state =
         init_state_with_ids(vec![(sender, object_id), (sender, gas_object_id)]).await;
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
 
     let next_sequence_number =
         SequenceNumber::lamport_increment([object.version(), gas_object.version()]);
@@ -2235,7 +2178,7 @@ async fn test_handle_confirmation_transaction_ok() {
         rgp,
     );
 
-    let old_account = authority_state.get_object(&object_id).await.unwrap();
+    let old_account = authority_state.get_object(&object_id).unwrap();
 
     let (_, signed_effects) =
         submit_and_execute(&authority_state, transfer_transaction.into_inner())
@@ -2244,7 +2187,7 @@ async fn test_handle_confirmation_transaction_ok() {
     signed_effects.data().status().unwrap();
     // Key check: the ownership has changed
 
-    let new_account = authority_state.get_object(&object_id).await.unwrap();
+    let new_account = authority_state.get_object(&object_id).unwrap();
     assert_eq!(
         new_account.owner.get_address_owner_address().unwrap(),
         recipient
@@ -2252,24 +2195,27 @@ async fn test_handle_confirmation_transaction_ok() {
     assert_eq!(next_sequence_number, new_account.version());
 
     // Check locks are set and archived correctly
-    assert!(
+    assert_eq!(
         authority_state
-            .get_transaction_lock(
-                &(object_id, 1.into(), old_account.digest()),
+            .get_object_cache_reader()
+            .get_lock(
+                (object_id, 1.into(), old_account.digest()),
                 &authority_state.epoch_store_for_testing()
             )
-            .await
-            .is_err()
+            .unwrap(),
+        ObjectLockStatus::LockedAtDifferentVersion {
+            locked_ref: (object_id, 2.into(), new_account.digest())
+        }
     );
-    assert!(
+    assert_eq!(
         authority_state
-            .get_transaction_lock(
-                &(object_id, 2.into(), new_account.digest()),
+            .get_object_cache_reader()
+            .get_lock(
+                (object_id, 2.into(), new_account.digest()),
                 &authority_state.epoch_store_for_testing()
             )
-            .await
-            .expect("Exists")
-            .is_none()
+            .unwrap(),
+        ObjectLockStatus::Initialized
     );
 }
 
@@ -2281,8 +2227,8 @@ async fn test_handle_confirmation_transaction_idempotent() {
     let gas_object_id = ObjectID::random();
     let authority_state =
         init_state_with_ids(vec![(sender, object_id), (sender, gas_object_id)]).await;
-    let object = authority_state.get_object(&object_id).await.unwrap();
-    let gas_object = authority_state.get_object(&gas_object_id).await.unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
 
     let rgp = authority_state.reference_gas_price_for_testing().unwrap();
     let transfer_transaction = init_transfer_transaction(
@@ -2358,7 +2304,6 @@ async fn test_move_call_mutable_object_not_mutated() {
 
     let gas_version = authority_state
         .get_object(&gas_object_id)
-        .await
         .unwrap()
         .version();
 
@@ -2386,7 +2331,6 @@ async fn test_move_call_mutable_object_not_mutated() {
     assert_eq!(
         authority_state
             .get_object(&new_object_id1)
-            .await
             .unwrap()
             .version(),
         next_object_version
@@ -2394,7 +2338,6 @@ async fn test_move_call_mutable_object_not_mutated() {
     assert_eq!(
         authority_state
             .get_object(&new_object_id2)
-            .await
             .unwrap()
             .version(),
         next_object_version
@@ -2428,12 +2371,10 @@ async fn test_move_call_insufficient_gas() {
         recipient,
         authority_state
             .get_object(&object_id)
-            .await
             .unwrap()
             .compute_object_reference(),
         authority_state
             .get_object(&gas_object_id1)
-            .await
             .unwrap()
             .compute_object_reference(),
         rgp * TEST_ONLY_GAS_UNIT_FOR_TRANSFER,
@@ -2448,13 +2389,11 @@ async fn test_move_call_insufficient_gas() {
 
     let obj_ref = authority_state
         .get_object(&object_id)
-        .await
         .unwrap()
         .compute_object_reference();
 
     let gas_ref = authority_state
         .get_object(&gas_object_id2)
-        .await
         .unwrap()
         .compute_object_reference();
 
@@ -2487,7 +2426,7 @@ async fn test_move_call_insufficient_gas() {
         .1;
     let effects = signed_effects.into_data();
     assert!(effects.status().is_err());
-    let obj = authority_state.get_object(&object_id).await.unwrap();
+    let obj = authority_state.get_object(&object_id).unwrap();
     assert_eq!(obj.previous_transaction, tx_digest);
     assert_eq!(obj.version(), next_object_version);
     assert_eq!(obj.owner.get_address_owner_address().unwrap(), recipient);
@@ -2571,7 +2510,6 @@ async fn test_get_latest_parent_entry_genesis() {
     assert!(
         authority_state
             .get_object_or_tombstone(ObjectID::ZERO)
-            .await
             .is_none()
     );
 }
@@ -2605,7 +2543,8 @@ async fn test_get_latest_parent_entry() {
     .unwrap();
     let (new_object_id2, seq2, _) = effects.created()[0].0;
 
-    let update_version = SequenceNumber::lamport_increment([seq1, seq2, effects.gas_object().0.1]);
+    let update_version =
+        SequenceNumber::lamport_increment([seq1, seq2, effects.gas_object().unwrap().0.1]);
 
     let effects = call_move(
         &authority_state,
@@ -2627,12 +2566,12 @@ async fn test_get_latest_parent_entry() {
     // Check entry for object to be deleted is returned
     let obj_ref = authority_state
         .get_object_or_tombstone(new_object_id1)
-        .await
         .unwrap();
     assert_eq!(obj_ref.0, new_object_id1);
     assert_eq!(obj_ref.1, update_version);
 
-    let delete_version = SequenceNumber::lamport_increment([obj_ref.1, effects.gas_object().0.1]);
+    let delete_version =
+        SequenceNumber::lamport_increment([obj_ref.1, effects.gas_object().unwrap().0.1]);
 
     let _effects = call_move(
         &authority_state,
@@ -2659,14 +2598,12 @@ async fn test_get_latest_parent_entry() {
     assert!(
         authority_state
             .get_object_or_tombstone(unknown_object_id)
-            .await
             .is_none()
     );
 
     // Check gas object is returned.
     let obj_ref = authority_state
         .get_object_or_tombstone(gas_object_id)
-        .await
         .unwrap();
     assert_eq!(obj_ref.0, gas_object_id);
     assert_eq!(obj_ref.1, delete_version);
@@ -2674,7 +2611,6 @@ async fn test_get_latest_parent_entry() {
     // Check entry for deleted object is returned
     let obj_ref = authority_state
         .get_object_or_tombstone(new_object_id1)
-        .await
         .unwrap();
     assert_eq!(obj_ref.0, new_object_id1);
     assert_eq!(obj_ref.1, delete_version);
@@ -2687,7 +2623,7 @@ async fn test_account_state_ok() {
     let object_id = dbg_object_id(1);
 
     let authority_state = init_state_with_object_id(sender, object_id).await;
-    authority_state.get_object(&object_id).await.unwrap();
+    authority_state.get_object(&object_id).unwrap();
 }
 
 #[tokio::test]
@@ -2695,7 +2631,7 @@ async fn test_account_state_unknown_account() {
     let sender = dbg_addr(1);
     let unknown_address = dbg_object_id(99);
     let authority_state = init_state_with_object_id(sender, ObjectID::random()).await;
-    assert!(authority_state.get_object(&unknown_address).await.is_none());
+    assert!(authority_state.get_object(&unknown_address).is_none());
 }
 
 #[tokio::test]
@@ -2737,7 +2673,7 @@ async fn test_authority_persist() {
     let obj = Object::with_id_owner_for_testing(object_id, recipient);
 
     // Store an object
-    authority.insert_genesis_object(obj).await;
+    authority.insert_genesis_object(obj);
 
     // Close the authority
     drop(authority);
@@ -2756,7 +2692,7 @@ async fn test_authority_persist() {
             .await
             .unwrap();
     let authority2 = init_state(&genesis, authority_key, store).await;
-    let obj2 = authority2.get_object(&object_id).await.unwrap();
+    let obj2 = authority2.get_object(&object_id).unwrap();
 
     // Check the object is present
     assert_eq!(obj2.id(), object_id);
@@ -2991,7 +2927,6 @@ async fn test_genesis_sui_system_state_object() {
     let authority_state = TestAuthorityBuilder::new().build().await;
     let wrapper = authority_state
         .get_object(&SUI_SYSTEM_STATE_OBJECT_ID)
-        .await
         .unwrap();
     assert_eq!(wrapper.version(), SequenceNumber::from(1));
     let move_object = wrapper.data.try_as_move().unwrap();
@@ -3045,10 +2980,13 @@ async fn test_transfer_sui_no_amount() {
     // and got transferred. Also check on its version and new balance.
     assert!(effects.status().is_ok());
     assert!(effects.mutated_excluding_gas().is_empty());
-    assert!(gas_ref.1 < effects.gas_object().0.1);
-    assert_eq!(effects.gas_object().1, Owner::AddressOwner(recipient));
+    assert!(gas_ref.1 < effects.gas_object().unwrap().0.1);
+    assert_eq!(
+        effects.gas_object().unwrap().1,
+        Owner::AddressOwner(recipient)
+    );
     let new_balance =
-        sui_types::gas::get_gas_balance(&authority_state.get_object(&gas_object_id).await.unwrap())
+        sui_types::gas::get_gas_balance(&authority_state.get_object(&gas_object_id).unwrap())
             .unwrap();
     assert_eq!(
         new_balance as i64 + effects.gas_cost_summary().net_gas_usage(),
@@ -3088,13 +3026,12 @@ async fn test_transfer_sui_with_amount() {
     assert_eq!(effects.created()[0].1, Owner::AddressOwner(recipient));
     let new_gas = authority_state
         .get_object(&effects.created()[0].0.0)
-        .await
         .unwrap();
     assert_eq!(sui_types::gas::get_gas_balance(&new_gas).unwrap(), 500);
-    assert!(gas_ref.1 < effects.gas_object().0.1);
-    assert_eq!(effects.gas_object().1, Owner::AddressOwner(sender));
+    assert!(gas_ref.1 < effects.gas_object().unwrap().0.1);
+    assert_eq!(effects.gas_object().unwrap().1, Owner::AddressOwner(sender));
     let new_balance =
-        sui_types::gas::get_gas_balance(&authority_state.get_object(&gas_object_id).await.unwrap())
+        sui_types::gas::get_gas_balance(&authority_state.get_object(&gas_object_id).unwrap())
             .unwrap();
     assert_eq!(
         new_balance as i64 + effects.gas_cost_summary().net_gas_usage() + 500,
@@ -3192,7 +3129,7 @@ async fn test_clear_cache_reverts_wrap_move_call() {
             ident_str!("object_basics").to_owned(),
             ident_str!("wrap").to_owned(),
             vec![],
-            create_effects.gas_object().0,
+            create_effects.gas_object().unwrap().0,
             vec![CallArg::Object(ObjectArg::ImmOrOwnedObject(object_v0))],
             TEST_ONLY_GAS_UNIT_FOR_OBJECT_BASICS * rgp,
             rgp,
@@ -3227,7 +3164,7 @@ async fn test_clear_cache_reverts_wrap_move_call() {
 
     // The gas is uncharged
     let gas = cache.get_object(&gas_object_id).unwrap();
-    assert_eq!(gas.version(), create_effects.gas_object().0.1);
+    assert_eq!(gas.version(), create_effects.gas_object().unwrap().0.1);
 }
 
 #[tokio::test]
@@ -3287,7 +3224,7 @@ async fn test_clear_cache_reverts_unwrap_move_call() {
             ident_str!("object_basics").to_owned(),
             ident_str!("unwrap").to_owned(),
             vec![],
-            wrap_effects.gas_object().0,
+            wrap_effects.gas_object().unwrap().0,
             vec![CallArg::Object(ObjectArg::ImmOrOwnedObject(wrapper_v0))],
             TEST_ONLY_GAS_UNIT_FOR_OBJECT_BASICS * rgp,
             rgp,
@@ -3322,7 +3259,7 @@ async fn test_clear_cache_reverts_unwrap_move_call() {
 
     // The gas is uncharged
     let gas = cache.get_object(&gas_object_id).unwrap();
-    assert_eq!(gas.version(), wrap_effects.gas_object().0.1);
+    assert_eq!(gas.version(), wrap_effects.gas_object().unwrap().0.1);
 }
 
 #[tokio::test]
@@ -3389,7 +3326,7 @@ async fn create_and_retrieve_df_info(function: &IdentStr) -> (SuiAddress, Vec<Dy
             ident_str!("object_basics").to_owned(),
             function.to_owned(),
             vec![],
-            create_inner_effects.gas_object().0,
+            create_inner_effects.gas_object().unwrap().0,
             vec![
                 CallArg::Object(ObjectArg::ImmOrOwnedObject(outer_v0)),
                 CallArg::Object(ObjectArg::ImmOrOwnedObject(inner_v0)),
@@ -3551,7 +3488,7 @@ async fn test_clear_cache_removes_added_ofield() {
             ident_str!("object_basics").to_owned(),
             ident_str!("add_ofield").to_owned(),
             vec![],
-            create_inner_effects.gas_object().0,
+            create_inner_effects.gas_object().unwrap().0,
             vec![
                 CallArg::Object(ObjectArg::ImmOrOwnedObject(outer_v0)),
                 CallArg::Object(ObjectArg::ImmOrOwnedObject(inner_v0)),
@@ -3673,7 +3610,7 @@ async fn test_clear_cache_reverts_removed_ofield() {
             ident_str!("object_basics").to_owned(),
             ident_str!("remove_ofield").to_owned(),
             vec![],
-            add_effects.gas_object().0,
+            add_effects.gas_object().unwrap().0,
             vec![CallArg::Object(ObjectArg::ImmOrOwnedObject(outer_v1))],
             TEST_ONLY_GAS_UNIT_FOR_OBJECT_BASICS * rgp,
             rgp,
@@ -3734,8 +3671,8 @@ async fn test_iter_live_object_set() {
         })
         .collect();
 
-    let gas_obj = authority.get_object(&gas).await.unwrap();
-    let obj = authority.get_object(&obj_id).await.unwrap();
+    let gas_obj = authority.get_object(&gas).unwrap();
+    let obj = authority.get_object(&obj_id).unwrap();
 
     let rgp = authority.reference_gas_price_for_testing().unwrap();
     let transfer_transaction = init_transfer_transaction(
@@ -3895,7 +3832,7 @@ async fn test_iter_live_object_set() {
 
 #[tokio::test]
 async fn test_clever_abort_error() {
-    let (sender, sender_key): (_, AccountKeyPair) = get_key_pair();
+    let (sender, _sender_key): (_, AccountKeyPair) = get_key_pair();
     let gas_object_id = ObjectID::random();
     let (validator, fullnode) = init_state_validator_with_fullnode().await;
     let (validator, aborts) = publish_aborts(validator).await;
@@ -3905,8 +3842,8 @@ async fn test_clever_abort_error() {
         SequenceNumber::from_u64(SequenceNumber::MAX.value() - 1),
         Owner::AddressOwner(sender),
     );
-    validator.insert_genesis_object(gas_object.clone()).await;
-    fullnode.insert_genesis_object(gas_object).await;
+    validator.insert_genesis_object(gas_object.clone());
+    fullnode.insert_genesis_object(gas_object);
 
     let rgp = fullnode.reference_gas_price_for_testing().unwrap();
 
@@ -3930,17 +3867,11 @@ async fn test_clever_abort_error() {
         rgp,
     );
 
-    let transaction = to_sender_signed_transaction(txn_data.clone(), &sender_key);
-    let digest = *transaction.digest();
     let DryRunTransactionBlockResponse {
         effects,
         execution_error_source,
         ..
-    } = fullnode
-        .dry_exec_transaction(txn_data, digest)
-        .await
-        .unwrap()
-        .0;
+    } = fullnode.dry_exec_transaction(txn_data).await.unwrap().0;
 
     assert!(matches!(
         effects.status(),
@@ -3977,17 +3908,11 @@ async fn test_clever_abort_error() {
         rgp,
     );
 
-    let transaction = to_sender_signed_transaction(txn_data.clone(), &sender_key);
-    let digest = *transaction.digest();
     let DryRunTransactionBlockResponse {
         effects,
         execution_error_source,
         ..
-    } = fullnode
-        .dry_exec_transaction(txn_data, digest)
-        .await
-        .unwrap()
-        .0;
+    } = fullnode.dry_exec_transaction(txn_data).await.unwrap().0;
 
     assert!(matches!(
         effects.status(),
@@ -4026,17 +3951,11 @@ async fn test_clever_abort_error() {
         rgp,
     );
 
-    let transaction = to_sender_signed_transaction(txn_data.clone(), &sender_key);
-    let digest = *transaction.digest();
     let DryRunTransactionBlockResponse {
         effects,
         execution_error_source,
         ..
-    } = fullnode
-        .dry_exec_transaction(txn_data, digest)
-        .await
-        .unwrap()
-        .0;
+    } = fullnode.dry_exec_transaction(txn_data).await.unwrap().0;
 
     assert!(matches!(
         effects.status(),
@@ -4074,17 +3993,11 @@ async fn test_clever_abort_error() {
         rgp,
     );
 
-    let transaction = to_sender_signed_transaction(txn_data.clone(), &sender_key);
-    let digest = *transaction.digest();
     let DryRunTransactionBlockResponse {
         effects,
         execution_error_source,
         ..
-    } = fullnode
-        .dry_exec_transaction(txn_data, digest)
-        .await
-        .unwrap()
-        .0;
+    } = fullnode.dry_exec_transaction(txn_data).await.unwrap().0;
 
     assert!(matches!(
         effects.status(),
@@ -4143,7 +4056,7 @@ pub async fn init_state_with_objects_and_object_basics<I: IntoIterator<Item = Ob
 ) -> (Arc<AuthorityState>, ObjectRef) {
     let state = TestAuthorityBuilder::new().build().await;
     for obj in objects {
-        state.insert_genesis_object(obj).await;
+        state.insert_genesis_object(obj);
     }
     publish_object_basics(state).await
 }
@@ -4157,7 +4070,7 @@ pub async fn init_state_with_ids_and_object_basics<
     let state = TestAuthorityBuilder::new().build().await;
     for (address, object_id) in objects {
         let obj = Object::with_id_owner_for_testing(object_id, address);
-        state.insert_genesis_object(obj).await;
+        state.insert_genesis_object(obj);
     }
     publish_object_basics(state).await
 }
@@ -4181,7 +4094,7 @@ pub async fn publish_object_basics(state: Arc<AuthorityState>) -> (Arc<Authority
     )
     .unwrap();
     let pkg_ref = pkg.compute_object_reference();
-    state.insert_genesis_object(pkg).await;
+    state.insert_genesis_object(pkg);
     (state, pkg_ref)
 }
 
@@ -4203,7 +4116,7 @@ pub async fn publish_aborts(state: Arc<AuthorityState>) -> (Arc<AuthorityState>,
     )
     .unwrap();
     let pkg_ref = pkg.compute_object_reference();
-    state.insert_genesis_object(pkg).await;
+    state.insert_genesis_object(pkg);
     (state, pkg_ref)
 }
 
@@ -4216,8 +4129,8 @@ pub async fn init_state_with_ids_and_object_basics_with_fullnode<
     let (validator, fullnode) = init_state_validator_with_fullnode().await;
     for (address, object_id) in objects {
         let obj = Object::with_id_owner_for_testing(object_id, address);
-        validator.insert_genesis_object(obj.clone()).await;
-        fullnode.insert_genesis_object(obj).await;
+        validator.insert_genesis_object(obj.clone());
+        fullnode.insert_genesis_object(obj);
     }
 
     // add object_basics package object to genesis, since lots of test use it
@@ -4238,8 +4151,8 @@ pub async fn init_state_with_ids_and_object_basics_with_fullnode<
     )
     .unwrap();
     let pkg_ref = pkg.compute_object_reference();
-    validator.insert_genesis_object(pkg.clone()).await;
-    fullnode.insert_genesis_object(pkg).await;
+    validator.insert_genesis_object(pkg.clone());
+    fullnode.insert_genesis_object(pkg);
     (validator, fullnode, pkg_ref)
 }
 
@@ -4265,7 +4178,6 @@ pub async fn call_move(
         function,
         type_args,
         test_args,
-        false, // no shared objects
     )
     .await
 }
@@ -4281,9 +4193,8 @@ pub async fn call_move_(
     function: &'_ str,
     type_args: Vec<TypeTag>,
     test_args: Vec<TestCallArg>,
-    with_shared: bool, // Move call includes shared objects
 ) -> SuiResult<TransactionEffects> {
-    let gas_object = authority.get_object(gas_object_id).await;
+    let gas_object = authority.get_object(gas_object_id);
     let gas_object_ref = gas_object.unwrap().compute_object_reference();
     let mut builder = ProgrammableTransactionBuilder::new();
     let mut args = vec![];
@@ -4307,10 +4218,9 @@ pub async fn call_move_(
     );
 
     let transaction = to_sender_signed_transaction(data, sender_key);
-    let signed_effects =
-        submit_and_execute_with_options(authority, fullnode, transaction, with_shared)
-            .await?
-            .1;
+    let signed_effects = submit_and_execute_with_options(authority, fullnode, transaction)
+        .await?
+        .1;
     Ok(signed_effects.into_data())
 }
 
@@ -4329,7 +4239,6 @@ pub async fn execute_programmable_transaction(
         sender,
         sender_key,
         pt,
-        /* with_shared */ false,
         gas_unit,
     )
     .await
@@ -4350,7 +4259,6 @@ pub async fn execute_programmable_transaction_with_shared(
         sender,
         sender_key,
         pt,
-        /* with_shared */ true,
         gas_unit,
     )
     .await
@@ -4365,7 +4273,7 @@ pub async fn build_programmable_transaction(
     gas_unit: u64,
 ) -> SuiResult<Transaction> {
     let rgp = authority.reference_gas_price_for_testing().unwrap();
-    let gas_object = authority.get_object(gas_object_id).await;
+    let gas_object = authority.get_object(gas_object_id);
     let gas_object_ref = gas_object.unwrap().compute_object_reference();
     let data =
         TransactionData::new_programmable(*sender, vec![gas_object_ref], pt, rgp * gas_unit, rgp);
@@ -4380,20 +4288,18 @@ async fn execute_programmable_transaction_(
     sender: &SuiAddress,
     sender_key: &AccountKeyPair,
     pt: ProgrammableTransaction,
-    with_shared: bool, // Move call includes shared objects
     gas_unit: u64,
 ) -> SuiResult<TransactionEffects> {
     let rgp = authority.reference_gas_price_for_testing().unwrap();
-    let gas_object = authority.get_object(gas_object_id).await;
+    let gas_object = authority.get_object(gas_object_id);
     let gas_object_ref = gas_object.unwrap().compute_object_reference();
     let data =
         TransactionData::new_programmable(*sender, vec![gas_object_ref], pt, rgp * gas_unit, rgp);
 
     let transaction = to_sender_signed_transaction(data, sender_key);
-    let signed_effects =
-        submit_and_execute_with_options(authority, fullnode, transaction, with_shared)
-            .await?
-            .1;
+    let signed_effects = submit_and_execute_with_options(authority, fullnode, transaction)
+        .await?
+        .1;
     Ok(signed_effects.into_data())
 }
 
@@ -4409,11 +4315,10 @@ async fn call_move_with_gas_coins(
     function: &'_ str,
     type_args: Vec<TypeTag>,
     test_args: Vec<TestCallArg>,
-    with_shared: bool, // Move call includes shared objects
 ) -> SuiResult<TransactionEffects> {
     let mut gas_object_refs = vec![];
     for obj_id in gas_object_ids {
-        let gas_object = authority.get_object(obj_id).await;
+        let gas_object = authority.get_object(obj_id);
         let gas_ref = gas_object.unwrap().compute_object_reference();
         gas_object_refs.push(gas_ref);
     }
@@ -4439,10 +4344,9 @@ async fn call_move_with_gas_coins(
     );
 
     let transaction = to_sender_signed_transaction(data, sender_key);
-    let signed_effects =
-        submit_and_execute_with_options(authority, fullnode, transaction, with_shared)
-            .await?
-            .1;
+    let signed_effects = submit_and_execute_with_options(authority, fullnode, transaction)
+        .await?
+        .1;
     Ok(signed_effects.into_data())
 }
 
@@ -4493,7 +4397,6 @@ async fn create_move_object_with_gas_coins(
             TestCallArg::Pure(bcs::to_bytes(&(16_u64)).unwrap()),
             TestCallArg::Pure(bcs::to_bytes(sender).unwrap()),
         ],
-        false,
     )
     .await
 }
@@ -4777,11 +4680,7 @@ async fn test_shared_object_transaction_ok() {
         .await;
 
     // Ensure shared object sequence number increased.
-    let shared_object_version = authority
-        .get_object(&shared_object_id)
-        .await
-        .unwrap()
-        .version();
+    let shared_object_version = authority.get_object(&shared_object_id).unwrap().version();
     assert_eq!(shared_object_version, SequenceNumber::from(2));
 }
 
@@ -5246,7 +5145,7 @@ async fn test_gas_smashing() {
             assert!(effects.status().is_err());
         }
         // gas object in effects is first coin in vector of coins
-        assert_eq!(gas_coin_ids[0], effects.gas_object().0.0);
+        assert_eq!(gas_coin_ids[0], effects.gas_object().unwrap().0.0);
         // object is created on success and gas at position 0 mutated
         let created = usize::from(success);
         assert_eq!(
@@ -5265,8 +5164,7 @@ async fn test_gas_smashing() {
         }
         // balance on first coin is correct
         let balance =
-            sui_types::gas::get_gas_balance(&state.get_object(&gas_coin_ids[0]).await.unwrap())
-                .unwrap();
+            sui_types::gas::get_gas_balance(&state.get_object(&gas_coin_ids[0]).unwrap()).unwrap();
         let gas_used = effects.gas_cost_summary().gas_used();
         assert!(reference_gas_used > balance);
         assert_eq!(reference_gas_used, balance + gas_used);
@@ -5370,10 +5268,7 @@ async fn test_for_inc_201_dry_run() {
         _,
         _,
     ) = fullnode
-        .dry_exec_transaction(
-            signed.data().intent_message().value.clone(),
-            *signed.digest(),
-        )
+        .dry_exec_transaction(signed.data().intent_message().value.clone())
         .await
         .unwrap();
     assert_eq!(effects.status(), &SuiExecutionStatus::Success);
@@ -5425,10 +5320,7 @@ async fn test_function_not_found() {
         _,
         _,
     ) = fullnode
-        .dry_exec_transaction(
-            signed.data().intent_message().value.clone(),
-            *signed.digest(),
-        )
+        .dry_exec_transaction(signed.data().intent_message().value.clone())
         .await
         .unwrap();
     assert_eq!(
@@ -5482,10 +5374,7 @@ async fn test_arity_mismatch() {
         _,
         _,
     ) = authority
-        .dry_exec_transaction(
-            signed.data().intent_message().value.clone(),
-            *signed.digest(),
-        )
+        .dry_exec_transaction(signed.data().intent_message().value.clone())
         .await
         .unwrap();
     assert_eq!(
@@ -5509,7 +5398,7 @@ async fn test_publish_transitive_dependencies_ok() {
     let rgp = state.reference_gas_price_for_testing().unwrap();
 
     // Get gas object
-    let gas_object = state.get_object(&gas_id).await.unwrap();
+    let gas_object = state.get_object(&gas_id).unwrap();
     let gas_ref = gas_object.compute_object_reference();
 
     // Publish `package C`
@@ -5548,7 +5437,7 @@ async fn test_publish_transitive_dependencies_ok() {
         .1
         .into_data();
     let ((package_c_id, _, _), _) = txn_effects.created()[0];
-    let gas_ref = txn_effects.gas_object().0;
+    let gas_ref = txn_effects.gas_object().unwrap().0;
 
     // Publish `package B`
     let mut package_b_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -5584,7 +5473,7 @@ async fn test_publish_transitive_dependencies_ok() {
         .1
         .into_data();
     let ((package_b_id, _, _), _) = txn_effects.created()[0];
-    let gas_ref = txn_effects.gas_object().0;
+    let gas_ref = txn_effects.gas_object().unwrap().0;
 
     // Publish `package A`
     let mut package_a_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -5621,7 +5510,7 @@ async fn test_publish_transitive_dependencies_ok() {
         .1
         .into_data();
     let ((package_a_id, _, _), _) = txn_effects.created()[0];
-    let gas_ref = txn_effects.gas_object().0;
+    let gas_ref = txn_effects.gas_object().unwrap().0;
 
     // Publish `package root`
     let mut package_root_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -5679,7 +5568,7 @@ async fn test_publish_missing_dependency() {
     let state = init_state_with_ids(vec![(sender, gas_id)]).await;
 
     // Get gas object
-    let gas_object = state.get_object(&gas_id).await.unwrap();
+    let gas_object = state.get_object(&gas_id).unwrap();
     let gas_ref = gas_object.compute_object_reference();
 
     // Module bytes
@@ -5723,7 +5612,7 @@ async fn test_publish_missing_transitive_dependency() {
     let state = init_state_with_ids(vec![(sender, gas_id)]).await;
 
     // Get gas object
-    let gas_object = state.get_object(&gas_id).await.unwrap();
+    let gas_object = state.get_object(&gas_id).unwrap();
     let gas_ref = gas_object.compute_object_reference();
 
     // Module bytes
@@ -5767,7 +5656,7 @@ async fn test_publish_not_a_package_dependency() {
     let state = init_state_with_ids(vec![(sender, gas_id)]).await;
 
     // Get gas object
-    let gas_object = state.get_object(&gas_id).await.unwrap();
+    let gas_object = state.get_object(&gas_id).unwrap();
     let gas_ref = gas_object.compute_object_reference();
 
     // Module bytes
@@ -5870,7 +5759,9 @@ where
         TestConsensusCommit::new(consensus_txns, round, epoch_start_ms + (1000 * round), 0);
 
     // Process through the consensus handler
-    consensus_handler.handle_consensus_commit(commit).await;
+    consensus_handler
+        .handle_consensus_commit_for_test(commit)
+        .await;
 
     // Give a bit of time for the async capture to complete
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -5898,7 +5789,11 @@ where
         }
 
         let (schedulables, versions): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
-        let assigned_versions = schedulables.iter().map(|s| s.key()).zip(versions).collect();
+        let assigned_versions = schedulables
+            .iter()
+            .map(|s| s.key())
+            .zip_debug_eq(versions)
+            .collect();
         (schedulables, assigned_versions)
     }
 }
@@ -5978,7 +5873,7 @@ async fn test_consensus_handler_per_object_congestion_control() {
         stored_observations_limit: u64::MAX,
         stake_weighted_median_threshold: 0,
         default_none_duration_for_new_keys: false,
-        observations_chunk_size: None,
+        observations_chunk_size: Some(18),
     };
 
     let mut protocol_config =
@@ -5995,7 +5890,7 @@ async fn test_consensus_handler_per_object_congestion_control() {
     let mut genesis_objects = gas_objects_commit_1.clone();
     genesis_objects.extend(gas_objects_commit_2.clone());
     genesis_objects.extend(shared_objects.clone());
-    authority.insert_genesis_objects(&genesis_objects).await;
+    authority.insert_genesis_objects(&genesis_objects);
 
     // Register failpoint to seed initial congestion on shared_objects[0].
     // This gives obj 0 a high initial accumulated cost that limits throughput,
@@ -6250,7 +6145,7 @@ async fn test_consensus_handler_congestion_control_transaction_cancellation() {
         stored_observations_limit: u64::MAX,
         stake_weighted_median_threshold: 0,
         default_none_duration_for_new_keys: false,
-        observations_chunk_size: None,
+        observations_chunk_size: Some(18),
     };
 
     let mut protocol_config =
@@ -6269,7 +6164,7 @@ async fn test_consensus_handler_congestion_control_transaction_cancellation() {
     genesis_objects.extend(gas_objects_cancelled_txn.clone());
     genesis_objects.extend(shared_objects.clone());
     genesis_objects.extend(owned_objects_cancelled_txn.clone());
-    authority.insert_genesis_objects(&genesis_objects).await;
+    authority.insert_genesis_objects(&genesis_objects);
 
     // Register failpoint to seed initial congestion tracker with very high accumulated cost
     // for shared_objects[0]. This causes immediate congestion, ensuring transactions are
@@ -6544,7 +6439,6 @@ async fn test_insufficient_balance_for_withdraw_early_error() {
     // Test that the transaction fails with InsufficientFundsForWithdraw error
     let (effects, execution_error) = state
         .try_execute_immediately(&certificate, execution_env, &epoch_store)
-        .await
         .unwrap();
 
     // Check that we got an execution error due to insufficient balance
@@ -6595,9 +6489,7 @@ async fn test_should_wait_for_dependency_object() {
     let test_object = Object::with_id_owner_for_testing(test_obj_id, sender);
     let current_version = test_object.version();
     let current_ref = test_object.compute_object_reference();
-    authority_state
-        .insert_genesis_object(test_object.clone())
-        .await;
+    authority_state.insert_genesis_object(test_object.clone());
 
     // Test case: Current version - should not wait
     let result = authority_state.should_wait_for_dependency_object(current_ref);
@@ -6634,9 +6526,93 @@ async fn test_should_wait_for_dependency_object() {
         ObjectDigest::OBJECT_DIGEST_DELETED,
     );
     let deleted_obj = Object::with_id_owner_for_testing(deleted_obj_id, sender);
-    authority_state
-        .insert_genesis_object(deleted_obj.clone())
-        .await;
+    authority_state.insert_genesis_object(deleted_obj.clone());
     let result = authority_state.should_wait_for_dependency_object(deleted_obj_ref);
     assert!(result.is_none(), "Should not wait for deleted object");
+}
+
+#[tokio::test]
+async fn test_effects_equivocation_prevented_at_signing_not_execution() {
+    let (sender, sender_key): (_, AccountKeyPair) = get_key_pair();
+    let recipient = dbg_addr(2);
+    let object_id = ObjectID::random();
+    let gas_object_id = ObjectID::random();
+    let authority_state =
+        init_state_with_ids(vec![(sender, object_id), (sender, gas_object_id)]).await;
+    let rgp = authority_state.reference_gas_price_for_testing().unwrap();
+    let object = authority_state.get_object(&object_id).unwrap();
+    let gas_object = authority_state.get_object(&gas_object_id).unwrap();
+
+    let transfer_transaction = init_transfer_transaction(
+        &authority_state,
+        sender,
+        &sender_key,
+        recipient,
+        object.compute_object_reference(),
+        gas_object.compute_object_reference(),
+        rgp * TEST_ONLY_GAS_UNIT_FOR_TRANSFER,
+        rgp,
+    );
+
+    let epoch_store = authority_state.load_epoch_store_one_call_per_task();
+    let verified_tx = vote_transaction(&authority_state, transfer_transaction.into()).unwrap();
+    let executable =
+        VerifiedExecutableTransaction::new_from_consensus(verified_tx, epoch_store.epoch());
+    let tx_digest = *executable.digest();
+
+    // Simulate having previously signed different effects for this transaction, as could
+    // happen if a divergent re-execution occurs after signed effects were returned to a
+    // client but before the transaction was committed to a checkpoint.
+    let previously_signed_digest = TransactionEffectsDigest::random();
+    let previously_signed_sig = AuthoritySignInfo::new(
+        epoch_store.epoch(),
+        &TransactionEffects::default(),
+        Intent::sui_app(IntentScope::TransactionEffects),
+        authority_state.name,
+        &*authority_state.secret,
+    );
+    epoch_store
+        .insert_effects_digest_and_signature(
+            &tx_digest,
+            &previously_signed_digest,
+            &previously_signed_sig,
+        )
+        .unwrap();
+
+    // Execution must not consult previously signed effects: it succeeds even though the
+    // resulting effects differ from the previously signed digest.
+    let (effects, execution_error) = authority_state
+        .try_execute_immediately(&executable, ExecutionEnv::new(), &epoch_store)
+        .unwrap();
+    assert!(execution_error.is_none());
+    assert_ne!(effects.digest(), previously_signed_digest);
+
+    // Signing must refuse to contradict the previously signed effects.
+    let err = authority_state
+        .get_signed_effects_and_maybe_resign(&tx_digest, &epoch_store)
+        .unwrap_err();
+    assert!(matches!(
+        err.as_inner(),
+        SuiErrorKind::GenericAuthorityError { error }
+            if error.contains("differs from previously signed effects digest")
+    ));
+
+    // Recording a conflicting digest for the same transaction is rejected.
+    let err = epoch_store
+        .insert_effects_digest_and_signature(&tx_digest, &effects.digest(), &previously_signed_sig)
+        .unwrap_err();
+    assert!(matches!(
+        err.as_inner(),
+        SuiErrorKind::GenericAuthorityError { error }
+            if error.contains("differs from previously signed effects digest")
+    ));
+
+    // Re-recording the same digest remains idempotent.
+    epoch_store
+        .insert_effects_digest_and_signature(
+            &tx_digest,
+            &previously_signed_digest,
+            &previously_signed_sig,
+        )
+        .unwrap();
 }

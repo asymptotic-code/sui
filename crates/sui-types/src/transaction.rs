@@ -3,9 +3,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{SUI_BRIDGE_OBJECT_ID, base_types::*, error::*};
-use crate::accumulator_root::{AccumulatorObjId, AccumulatorValue};
+use crate::accumulator_root::{AccumulatorObjId, AccumulatorValue, check_accumulator_type_bounds};
+use crate::allowance::{ResolvedAllowance, parse_allowance_object};
 use crate::authenticator_state::ActiveJwk;
-use crate::balance::Balance;
+use crate::balance::{
+    BALANCE_MODULE_NAME, BALANCE_REDEEM_FUNDS_FUNCTION_NAME, BALANCE_SEND_FUNDS_FUNCTION_NAME,
+    BALANCE_SPLIT_FUNCTION_NAME, BALANCE_ZERO_FUNCTION_NAME, Balance,
+};
+use crate::coin::{
+    COIN_MODULE_NAME, INTO_BALANCE_FUNC_NAME, PUT_FUNC_NAME, REDEEM_FUNDS_FUNC_NAME,
+    SEND_FUNDS_FUNC_NAME,
+};
 use crate::coin_reservation::{
     CoinReservationResolverTrait, ParsedDigest, ParsedObjectRefWithdrawal,
 };
@@ -15,9 +23,10 @@ use crate::crypto::{
     DefaultHash, Ed25519SuiSignature, EmptySignInfo, RandomnessRound, Signature, Signer,
     SuiSignatureInner, ToFromBytes, default_hash,
 };
-use crate::digests::{AdditionalConsensusStateDigest, CertificateDigest, SenderSignedDataDigest};
-use crate::digests::{ChainIdentifier, ConsensusCommitDigest, ZKLoginInputsDigest};
+use crate::digests::{AdditionalConsensusStateDigest, SenderSignedDataDigest};
+use crate::digests::{ChainIdentifier, ConsensusCommitDigest};
 use crate::execution::{ExecutionTimeObservationKey, SharedInput};
+use crate::funds_accumulator::{FUNDS_ACCUMULATOR_MODULE_NAME, WITHDRAWAL_SPLIT_FUNC_NAME};
 use crate::gas_coin::GAS;
 use crate::gas_model::gas_predicates::check_for_gas_price_too_high;
 use crate::gas_model::gas_v2::SuiCostTable;
@@ -36,21 +45,26 @@ use crate::signature_verification::{
 use crate::type_input::TypeInput;
 use crate::{
     SUI_ACCUMULATOR_ROOT_OBJECT_ID, SUI_AUTHENTICATOR_STATE_OBJECT_ID, SUI_CLOCK_OBJECT_ID,
-    SUI_CLOCK_OBJECT_SHARED_VERSION, SUI_FRAMEWORK_PACKAGE_ID, SUI_RANDOMNESS_STATE_OBJECT_ID,
-    SUI_SYSTEM_STATE_OBJECT_ID, SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
+    SUI_CLOCK_OBJECT_SHARED_VERSION, SUI_FRAMEWORK_ADDRESS, SUI_FRAMEWORK_PACKAGE_ID,
+    SUI_RANDOMNESS_STATE_OBJECT_ID, SUI_SYSTEM_STATE_OBJECT_ID,
+    SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
 };
 use enum_dispatch::enum_dispatch;
 use fastcrypto::{encoding::Base64, hash::HashFunction};
 use itertools::{Either, Itertools};
+use move_core_types::account_address::AccountAddress;
+use move_core_types::identifier::IdentStr;
 use move_core_types::{ident_str, identifier};
 use move_core_types::{identifier::Identifier, language_storage::TypeTag};
+use mysten_common::{ZipDebugEqIteratorExt, assert_reachable, debug_fatal};
 use nonempty::{NonEmpty, nonempty};
 use serde::{Deserialize, Serialize};
 use shared_crypto::intent::{Intent, IntentMessage, IntentScope};
+use std::collections::btree_map::Entry;
 use std::fmt::Write;
 use std::fmt::{Debug, Display, Formatter};
-use std::iter::once;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -99,6 +113,10 @@ mod address_balance_gas_tests;
 #[cfg(test)]
 #[path = "unit_tests/transaction_claims_tests.rs"]
 mod transaction_claims_tests;
+
+#[cfg(test)]
+#[path = "unit_tests/allowed_proposers_tests.rs"]
+mod allowed_proposers_tests;
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub enum CallArg {
@@ -188,6 +206,11 @@ pub enum WithdrawFrom {
     Sender,
     /// Withdraw from the sponsor of the transaction (gas owner).
     Sponsor,
+    /// Withdraw from `funder`'s balance under an `Allowance` granted to the sender.
+    SenderAllowance {
+        funder: SuiAddress,
+        allowance: ObjectID,
+    },
     // TODO(address-balances): Add more options here, such as multi-party withdraws.
 }
 
@@ -210,10 +233,27 @@ impl FundsWithdrawalArg {
         }
     }
 
+    /// Withdraws from `Balance<balance_type>` in `funder`'s address, gated by the
+    /// allowance object.
+    pub fn balance_from_allowance(
+        amount: u64,
+        balance_type: TypeTag,
+        funder: SuiAddress,
+        allowance: ObjectID,
+    ) -> Self {
+        Self {
+            reservation: Reservation::MaxAmountU64(amount),
+            type_arg: WithdrawalTypeArg::Balance(balance_type),
+            withdraw_from: WithdrawFrom::SenderAllowance { funder, allowance },
+        }
+    }
+
+    /// The account debited by this withdrawal
     pub fn owner_for_withdrawal(&self, tx: &impl TransactionDataAPI) -> SuiAddress {
-        match self.withdraw_from {
+        match &self.withdraw_from {
             WithdrawFrom::Sender => tx.sender(),
             WithdrawFrom::Sponsor => tx.gas_owner(),
+            WithdrawFrom::SenderAllowance { funder, .. } => *funder,
         }
     }
 }
@@ -495,6 +535,7 @@ pub enum EndOfEpochTransactionKind {
     DisplayRegistryCreate,
     AddressAliasStateCreate,
     WriteAccumulatorStorageCost(WriteAccumulatorStorageCost),
+    ForwardingAddressRegistryCreate,
 }
 
 impl EndOfEpochTransactionKind {
@@ -556,6 +597,10 @@ impl EndOfEpochTransactionKind {
 
     pub fn new_address_alias_state_create() -> Self {
         Self::AddressAliasStateCreate
+    }
+
+    pub fn new_forwarding_address_registry_create() -> Self {
+        Self::ForwardingAddressRegistryCreate
     }
 
     pub fn new_bridge_create(chain_identifier: ChainIdentifier) -> Self {
@@ -626,6 +671,7 @@ impl EndOfEpochTransactionKind {
                     mutability: SharedObjectMutability::Mutable,
                 }]
             }
+            Self::ForwardingAddressRegistryCreate => vec![],
         }
     }
 
@@ -667,6 +713,7 @@ impl EndOfEpochTransactionKind {
             Self::WriteAccumulatorStorageCost(_) => {
                 Either::Left(vec![SharedInputObject::SUI_SYSTEM_OBJ].into_iter())
             }
+            Self::ForwardingAddressRegistryCreate => Either::Right(iter::empty()),
         }
     }
 
@@ -688,21 +735,21 @@ impl EndOfEpochTransactionKind {
                 }
             }
             Self::DenyListStateCreate => {
-                if !config.enable_coin_deny_list_v1() {
+                if !config.enable_coin_deny_list() {
                     return Err(UserInputError::Unsupported(
                         "coin deny list not enabled".to_string(),
                     ));
                 }
             }
             Self::BridgeStateCreate(_) => {
-                if !config.enable_bridge() {
+                if !config.bridge() {
                     return Err(UserInputError::Unsupported(
                         "bridge not enabled".to_string(),
                     ));
                 }
             }
             Self::BridgeCommitteeInit(_) => {
-                if !config.enable_bridge() {
+                if !config.bridge() {
                     return Err(UserInputError::Unsupported(
                         "bridge not enabled".to_string(),
                     ));
@@ -755,6 +802,13 @@ impl EndOfEpochTransactionKind {
                 if !config.enable_accumulators() {
                     return Err(UserInputError::Unsupported(
                         "accumulators not enabled".to_string(),
+                    ));
+                }
+            }
+            Self::ForwardingAddressRegistryCreate => {
+                if !config.create_forwarding_address_registry() {
+                    return Err(UserInputError::Unsupported(
+                        "forwarding address registry not enabled".to_string(),
                     ));
                 }
             }
@@ -839,7 +893,7 @@ impl CallArg {
                 },
 
                 ObjectArg::Receiving(_) => {
-                    if !config.receiving_objects_supported() {
+                    if !config.receive_objects() {
                         return Err(UserInputError::Unsupported(format!(
                             "receiving objects is not supported at {:?}",
                             config.version
@@ -847,7 +901,15 @@ impl CallArg {
                     }
                 }
             },
-            CallArg::FundsWithdrawal(_) => {}
+            CallArg::FundsWithdrawal(w) => {
+                fp_ensure!(
+                    check_accumulator_type_bounds(config, &w.type_arg.to_type_tag()),
+                    UserInputError::SizeLimitExceeded {
+                        limit: "maximum type nodes in a funds accumulator type".to_string(),
+                        value: config.max_accumulator_type_nodes().to_string()
+                    }
+                );
+            }
         }
         Ok(())
     }
@@ -958,12 +1020,201 @@ pub struct ProgrammableTransaction {
     pub commands: Vec<Command>,
 }
 
+#[cfg(feature = "testing")]
+static GASLESS_TOKENS_FOR_TESTING: RwLock<Vec<(String, u64)>> = RwLock::new(Vec::new());
+
+#[cfg(feature = "testing")]
+pub fn add_gasless_token_for_testing(type_string: String, min_transfer: u64) {
+    GASLESS_TOKENS_FOR_TESTING
+        .write()
+        .unwrap()
+        .push((type_string, min_transfer));
+}
+
+#[cfg(feature = "testing")]
+pub fn clear_gasless_tokens_for_testing() {
+    GASLESS_TOKENS_FOR_TESTING.write().unwrap().clear();
+}
+
 impl ProgrammableTransaction {
+    pub fn validate_argument_indices(&self) -> UserInputResult {
+        for (command_idx, command) in self.commands.iter().enumerate() {
+            for (argument_idx, argument) in command.arguments().enumerate() {
+                let index = match argument {
+                    Argument::Input(index) if *index as usize >= self.inputs.len() => *index,
+                    Argument::Result(index) | Argument::NestedResult(index, _)
+                        if *index as usize >= command_idx =>
+                    {
+                        *index
+                    }
+                    Argument::GasCoin
+                    | Argument::Input(_)
+                    | Argument::Result(_)
+                    | Argument::NestedResult(_, _) => continue,
+                };
+                return Err(UserInputError::InvalidArgumentIndex {
+                    command_idx,
+                    argument_idx,
+                    index,
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn has_shared_inputs(&self) -> bool {
         self.inputs
             .iter()
             .any(|input| matches!(input, CallArg::Object(ObjectArg::SharedObject { .. })))
     }
+
+    pub fn validate_gasless_transaction(&self, config: &ProtocolConfig) -> UserInputResult {
+        fp_ensure!(
+            !self.commands.is_empty(),
+            UserInputError::Unsupported(
+                "Gasless transactions must have at least one command".to_string()
+            )
+        );
+
+        for input in &self.inputs {
+            match input {
+                CallArg::Pure(_) | CallArg::FundsWithdrawal(_) => {}
+                CallArg::Object(
+                    ObjectArg::ImmOrOwnedObject(_) | ObjectArg::SharedObject { .. },
+                ) => {}
+                CallArg::Object(ObjectArg::Receiving(_)) => {
+                    return Err(UserInputError::Unsupported(
+                        "Gasless transactions do not support Receiving object inputs".to_string(),
+                    ));
+                }
+            }
+        }
+
+        let allowed_token_types = get_gasless_allowed_token_types(config);
+
+        for command in &self.commands {
+            command.validate_gasless_transaction(&allowed_token_types)?;
+        }
+
+        self.validate_gasless_inputs(config)?;
+
+        Ok(())
+    }
+
+    fn validate_gasless_inputs(&self, config: &ProtocolConfig) -> UserInputResult {
+        let mut used_inputs = vec![false; self.inputs.len()];
+        for idx in self.commands.iter().flat_map(|cmd| cmd.input_arguments()) {
+            if let Some(slot) = used_inputs.get_mut(idx as usize) {
+                *slot = true;
+            }
+        }
+
+        let max_unused_pure = config.get_gasless_max_unused_inputs();
+        let max_pure_bytes = config.get_gasless_max_pure_input_bytes();
+        let mut unused_pure_count = 0u64;
+
+        for (i, input) in self.inputs.iter().enumerate() {
+            let is_used = used_inputs[i];
+            match input {
+                CallArg::Pure(bytes) => {
+                    fp_ensure!(
+                        bytes.len() as u64 <= max_pure_bytes,
+                        UserInputError::Unsupported(format!(
+                            "Input {} has size {} bytes, but gasless transactions \
+                             allow at most {} bytes per Pure input",
+                            i,
+                            bytes.len(),
+                            max_pure_bytes
+                        ))
+                    );
+                    if !is_used {
+                        unused_pure_count += 1;
+                    }
+                }
+                CallArg::Object(_) if !is_used => {
+                    return Err(UserInputError::Unsupported(format!(
+                        "Gasless transactions do not allow unused Object inputs (input {})",
+                        i
+                    )));
+                }
+                CallArg::FundsWithdrawal(_) if !is_used => {
+                    return Err(UserInputError::Unsupported(format!(
+                        "Gasless transactions do not allow unused FundsWithdrawal inputs (input {})",
+                        i
+                    )));
+                }
+                CallArg::Object(_) | CallArg::FundsWithdrawal(_) => {}
+            }
+        }
+
+        fp_ensure!(
+            unused_pure_count <= max_unused_pure,
+            UserInputError::Unsupported(format!(
+                "Gasless transactions allow at most {} unused Pure inputs, but found {}",
+                max_unused_pure, unused_pure_count
+            ))
+        );
+
+        Ok(())
+    }
+}
+
+/// Caches gasless allowed token types for the most recently seen protocol version.
+pub fn get_gasless_allowed_token_types(config: &ProtocolConfig) -> Arc<BTreeMap<TypeTag, u64>> {
+    #[allow(clippy::type_complexity)]
+    static CACHE: RwLock<Option<(u64, Arc<BTreeMap<TypeTag, u64>>)>> = RwLock::new(None);
+
+    let version = config.version.as_u64();
+
+    // Fast path: read lock only.
+    if let Some((v, map)) = CACHE.read().unwrap().as_ref()
+        && *v == version
+    {
+        return apply_test_token_overrides(Arc::clone(map));
+    }
+
+    // Parse from ProtocolConfig if it changed.
+    let mut cache = CACHE.write().unwrap();
+    if let Some((v, map)) = cache.as_ref()
+        && *v == version
+    {
+        return apply_test_token_overrides(Arc::clone(map));
+    }
+    let map: BTreeMap<TypeTag, u64> = config
+        .gasless_allowed_token_types()
+        .iter()
+        .map(|(s, min_amount)| {
+            let tag: TypeTag = s
+                .parse()
+                .unwrap_or_else(|e| panic!("invalid gasless token type {s:?}: {e}"));
+            (tag, *min_amount)
+        })
+        .collect();
+    let arc = Arc::new(map);
+    *cache = Some((version, Arc::clone(&arc)));
+    apply_test_token_overrides(arc)
+}
+
+fn apply_test_token_overrides(base: Arc<BTreeMap<TypeTag, u64>>) -> Arc<BTreeMap<TypeTag, u64>> {
+    #[cfg(feature = "testing")]
+    {
+        let overrides = GASLESS_TOKENS_FOR_TESTING.read().unwrap();
+        if !overrides.is_empty() {
+            let mut types = (*base).clone();
+            for (s, min_transfer) in overrides.iter() {
+                match s.parse() {
+                    Ok(tag) => {
+                        types.insert(tag, *min_transfer);
+                    }
+                    Err(e) => {
+                        debug_fatal!("invalid gasless token override {s:?}: {e}");
+                    }
+                }
+            }
+            return Arc::new(types);
+        }
+    }
+    base
 }
 
 /// A single command in a programmable transaction.
@@ -1078,6 +1329,133 @@ impl ProgrammableMoveCall {
                 UserInputError::InvalidIdentifier {
                     error: self.module.clone()
                 }
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_gasless_transaction(
+        &self,
+        allowed_token_types: &BTreeMap<TypeTag, u64>,
+    ) -> UserInputResult {
+        type FunctionIdent = (AccountAddress, &'static IdentStr, &'static IdentStr);
+
+        enum TypeArgConstraint {
+            /// Type arg is the fund type directly (e.g. `send_funds<USDC>`).
+            FundType,
+            /// Type arg is `Balance<T>`; extract `T` as the fund type.
+            BalanceType,
+        }
+        use TypeArgConstraint::*;
+
+        const SUI_BALANCE_SEND_FUNDS: FunctionIdent = (
+            SUI_FRAMEWORK_ADDRESS,
+            BALANCE_MODULE_NAME,
+            BALANCE_SEND_FUNDS_FUNCTION_NAME,
+        );
+        const SUI_BALANCE_REDEEM_FUNDS: FunctionIdent = (
+            SUI_FRAMEWORK_ADDRESS,
+            BALANCE_MODULE_NAME,
+            BALANCE_REDEEM_FUNDS_FUNCTION_NAME,
+        );
+        const SUI_BALANCE_SPLIT: FunctionIdent = (
+            SUI_FRAMEWORK_ADDRESS,
+            BALANCE_MODULE_NAME,
+            BALANCE_SPLIT_FUNCTION_NAME,
+        );
+        const SUI_BALANCE_ZERO: FunctionIdent = (
+            SUI_FRAMEWORK_ADDRESS,
+            BALANCE_MODULE_NAME,
+            BALANCE_ZERO_FUNCTION_NAME,
+        );
+        const SUI_FUNDS_ACCUMULATOR_WITHDRAWAL_SPLIT: FunctionIdent = (
+            SUI_FRAMEWORK_ADDRESS,
+            FUNDS_ACCUMULATOR_MODULE_NAME,
+            WITHDRAWAL_SPLIT_FUNC_NAME,
+        );
+        const SUI_COIN_INTO_BALANCE: FunctionIdent = (
+            SUI_FRAMEWORK_ADDRESS,
+            COIN_MODULE_NAME,
+            INTO_BALANCE_FUNC_NAME,
+        );
+        const SUI_COIN_REDEEM_FUNDS: FunctionIdent = (
+            SUI_FRAMEWORK_ADDRESS,
+            COIN_MODULE_NAME,
+            REDEEM_FUNDS_FUNC_NAME,
+        );
+        const SUI_COIN_SEND_FUNDS: FunctionIdent = (
+            SUI_FRAMEWORK_ADDRESS,
+            COIN_MODULE_NAME,
+            SEND_FUNDS_FUNC_NAME,
+        );
+        const SUI_COIN_PUT: FunctionIdent =
+            (SUI_FRAMEWORK_ADDRESS, COIN_MODULE_NAME, PUT_FUNC_NAME);
+
+        const GASLESS_FUNCTIONS: &[(FunctionIdent, &[Option<TypeArgConstraint>])] = &[
+            (SUI_BALANCE_SEND_FUNDS, &[Some(FundType)]),
+            (SUI_BALANCE_REDEEM_FUNDS, &[Some(FundType)]),
+            (SUI_BALANCE_SPLIT, &[Some(FundType)]),
+            (SUI_BALANCE_ZERO, &[Some(FundType)]),
+            (SUI_FUNDS_ACCUMULATOR_WITHDRAWAL_SPLIT, &[Some(BalanceType)]),
+            (SUI_COIN_INTO_BALANCE, &[Some(FundType)]),
+            (SUI_COIN_REDEEM_FUNDS, &[Some(FundType)]),
+            (SUI_COIN_SEND_FUNDS, &[Some(FundType)]),
+            (SUI_COIN_PUT, &[Some(FundType)]),
+        ];
+
+        let Some((_, type_arg_constraints)) =
+            GASLESS_FUNCTIONS
+                .iter()
+                .find(|((addr, module, function), _)| {
+                    *addr == AccountAddress::from(self.package)
+                        && module.as_str() == self.module
+                        && function.as_str() == self.function
+                })
+        else {
+            return Err(UserInputError::Unsupported(format!(
+                "Function {}::{}::{} is not supported in gasless transactions",
+                self.package, self.module, self.function
+            )));
+        };
+
+        fp_ensure!(
+            type_arg_constraints.len() == self.type_arguments.len(),
+            UserInputError::Unsupported(format!(
+                "Function {}::{}::{} requires {} type arguments, but {} were provided",
+                self.package,
+                self.module,
+                self.function,
+                type_arg_constraints.len(),
+                self.type_arguments.len()
+            ))
+        );
+
+        for (type_arg_constraint, type_input) in type_arg_constraints
+            .iter()
+            .zip_debug_eq(&self.type_arguments)
+        {
+            let Some(type_arg_constraint) = type_arg_constraint else {
+                continue;
+            };
+            let type_arg = type_input.to_type_tag().map_err(|e| {
+                UserInputError::Unsupported(format!(
+                    "Failed to parse type argument {type_input} as a type tag: {e}"
+                ))
+            })?;
+            let fund_type = match type_arg_constraint {
+                TypeArgConstraint::FundType => type_arg,
+                TypeArgConstraint::BalanceType => Balance::maybe_get_balance_type_param(&type_arg)
+                    .ok_or_else(|| {
+                        UserInputError::Unsupported(format!(
+                            "Expected a type Balance<_> but got {type_input}",
+                        ))
+                    })?,
+            };
+            fp_ensure!(
+                allowed_token_types.contains_key(&fund_type),
+                UserInputError::Unsupported(format!(
+                    "Fund type {fund_type} is not currently allowed in gasless transactions"
+                ))
             );
         }
         Ok(())
@@ -1207,6 +1585,20 @@ impl Command {
         Ok(())
     }
 
+    fn validate_gasless_transaction(
+        &self,
+        allowed_token_types: &BTreeMap<TypeTag, u64>,
+    ) -> UserInputResult {
+        match self {
+            Command::MoveCall(call) => call.validate_gasless_transaction(allowed_token_types),
+            Command::MergeCoins(_, _) | Command::SplitCoins(_, _) => Ok(()),
+            _ => Err(UserInputError::Unsupported(
+                "Gasless transactions only support MoveCall, MergeCoins, and SplitCoins commands"
+                    .to_string(),
+            )),
+        }
+    }
+
     fn is_input_arg_used(&self, input_arg: u16) -> bool {
         self.is_argument_used(Argument::Input(input_arg))
     }
@@ -1216,16 +1608,29 @@ impl Command {
     }
 
     pub fn is_argument_used(&self, argument: Argument) -> bool {
+        self.arguments().any(|a| a == &argument)
+    }
+
+    fn input_arguments(&self) -> impl Iterator<Item = u16> + '_ {
+        self.arguments().filter_map(|arg| match arg {
+            Argument::Input(i) => Some(*i),
+            _ => None,
+        })
+    }
+
+    /// Iterates over arguments in command-argument order.
+    pub(crate) fn arguments(&self) -> Box<dyn Iterator<Item = &Argument> + '_> {
         match self {
-            Command::MoveCall(c) => c.arguments.iter().any(|a| a == &argument),
-            Command::TransferObjects(args, arg)
-            | Command::MergeCoins(arg, args)
-            | Command::SplitCoins(arg, args) => {
-                args.iter().chain(once(arg)).any(|a| a == &argument)
+            Command::MoveCall(c) => Box::new(c.arguments.iter()),
+            Command::TransferObjects(args, recipient) => {
+                Box::new(args.iter().chain(std::iter::once(recipient)))
             }
-            Command::MakeMoveVec(_, args) => args.iter().any(|a| a == &argument),
-            Command::Upgrade(_, _, _, arg) => arg == &argument,
-            Command::Publish(_, _) => false,
+            Command::SplitCoins(coin, amounts) | Command::MergeCoins(coin, amounts) => {
+                Box::new(std::iter::once(coin).chain(amounts))
+            }
+            Command::MakeMoveVec(_, args) => Box::new(args.iter()),
+            Command::Upgrade(_, _, _, arg) => Box::new(std::iter::once(arg)),
+            Command::Publish(_, _) => Box::new(std::iter::empty()),
         }
     }
 }
@@ -1313,6 +1718,9 @@ impl ProgrammableTransaction {
         for command in commands {
             command.validity_check(config)?;
         }
+        if config.validate_ptb_argument_indices() {
+            self.validate_argument_indices()?;
+        }
 
         // If randomness is used, it must be enabled by protocol config.
         // A command that uses Random can only be followed by TransferObjects or MergeCoins.
@@ -1346,6 +1754,18 @@ impl ProgrammableTransaction {
         }
 
         Ok(())
+    }
+
+    /// Return all coin reservation object references used by the transaction inputs.
+    pub fn coin_reservation_obj_refs(&self) -> impl Iterator<Item = ObjectRef> + '_ {
+        self.inputs.iter().filter_map(|arg| match arg {
+            CallArg::Object(ObjectArg::ImmOrOwnedObject(obj_ref))
+                if ParsedDigest::is_coin_reservation_digest(&obj_ref.2) =>
+            {
+                Some(*obj_ref)
+            }
+            _ => None,
+        })
     }
 
     pub fn shared_input_objects(&self) -> impl Iterator<Item = SharedInputObject> + '_ {
@@ -1507,6 +1927,14 @@ impl SharedInputObject {
     pub fn is_accessed_exclusively(&self) -> bool {
         self.mutability.is_exclusive()
     }
+
+    /// Whether this input object may be mutated by the transaction, either exclusively or non-exclusively.
+    pub fn may_mutate(&self) -> bool {
+        match self.mutability {
+            SharedObjectMutability::Immutable => false,
+            SharedObjectMutability::Mutable | SharedObjectMutability::NonExclusiveWrite => true,
+        }
+    }
 }
 
 impl TransactionKind {
@@ -1538,6 +1966,11 @@ impl TransactionKind {
             self,
             TransactionKind::EndOfEpochTransaction(_) | TransactionKind::ChangeEpoch(_)
         )
+    }
+
+    pub fn mutates_implicitly_read_system_object(&self) -> bool {
+        self.shared_input_objects()
+            .any(|obj| obj.may_mutate() && obj.id.is_implicitly_read_system_object())
     }
 
     pub fn is_accumulator_barrier_settle_tx(&self) -> bool {
@@ -1742,7 +2175,9 @@ impl TransactionKind {
         Ok(input_objects)
     }
 
-    fn get_funds_withdrawals<'a>(&'a self) -> impl Iterator<Item = &'a FundsWithdrawalArg> + 'a {
+    pub fn get_funds_withdrawals<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = &'a FundsWithdrawalArg> + 'a {
         let TransactionKind::ProgrammableTransaction(pt) = &self else {
             return Either::Left(iter::empty());
         };
@@ -1759,17 +2194,11 @@ impl TransactionKind {
         let TransactionKind::ProgrammableTransaction(pt) = &self else {
             return Either::Left(iter::empty());
         };
-        Either::Right(pt.inputs.iter().filter_map(|input| {
-            if let CallArg::Object(ObjectArg::ImmOrOwnedObject(obj_ref)) = input {
-                if ParsedDigest::is_coin_reservation_digest(&obj_ref.2) {
-                    Some(*obj_ref)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }))
+        Either::Right(pt.coin_reservation_obj_refs())
+    }
+
+    pub fn has_coin_reservations(&self) -> bool {
+        self.get_coin_reservation_obj_refs().next().is_some()
     }
 
     pub fn validity_check(&self, config: &ProtocolConfig) -> UserInputResult {
@@ -1977,7 +2406,11 @@ pub fn is_gas_paid_from_address_balance(
         )
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize)]
+pub fn is_gasless_transaction(gas_data: &GasData, transaction_kind: &TransactionKind) -> bool {
+    is_gas_paid_from_address_balance(gas_data, transaction_kind) && gas_data.price == 0
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub enum TransactionExpiration {
     /// The transaction has no expiration
     None,
@@ -2007,19 +2440,106 @@ pub enum TransactionExpiration {
         /// User-provided uniqueness identifier to differentiate otherwise identical transactions
         nonce: u32,
     },
+    /// Everything in `ValidDuring`, plus a restriction on which validators may propose the
+    /// transaction in consensus.
+    Validity {
+        /// Transaction invalid before this epoch. Must equal current epoch.
+        min_epoch: Option<EpochId>,
+        /// Transaction expires after this epoch. Must equal current epoch
+        max_epoch: Option<EpochId>,
+        /// Future support for sub-epoch timing (not yet implemented)
+        min_timestamp: Option<u64>,
+        /// Future support for sub-epoch timing (not yet implemented)
+        max_timestamp: Option<u64>,
+        /// Network identifier to prevent cross-chain replay
+        chain: ChainIdentifier,
+        /// User-provided uniqueness identifier to differentiate otherwise identical transactions
+        nonce: u32,
+        /// The validators allowed to propose this transaction in consensus, if it restricts them.
+        allowed_proposers: Option<AllowedProposers>,
+    },
 }
+
+/// The validators allowed to propose a transaction in consensus. Proposal by any other validator
+/// is byzantine behavior and invalidates the whole block.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+pub struct AllowedProposers {
+    /// The epoch whose committee `proposers` indexes into. Committee indices are only meaningful
+    /// against one committee, so a set recorded for any other epoch is ignored entirely — see
+    /// `TransactionExpiration::allowed_proposers`.
+    pub epoch: EpochId,
+    /// Committee indices of the allowed proposers. Must be strictly increasing, and each index
+    /// must be within the committee.
+    ///
+    /// SIP-45 bounds the length by the gas price: see `MAX_UNPAID_ALLOWED_PROPOSERS`.
+    #[serde(with = "nonempty_as_vec")]
+    pub proposers: NonEmpty<u32>,
+}
+
+/// The number of allowed proposers a transaction may name without paying for amplification.
+/// Beyond this, SIP-45 caps the proposer set at `gas_price / reference_gas_price`.
+///
+/// Naming several proposers is also what keeps a transaction submittable when some of them are
+/// offline, so this is a floor as much as it is an allowance.
+pub const MAX_UNPAID_ALLOWED_PROPOSERS: u64 = 3;
 
 impl TransactionExpiration {
     /// Validators remember all executed transaction digests from the current and previous
-    /// epoch. Therefore, ValidDuring with a one or two epoch range provides replay protection.
+    /// epoch. Therefore, a one or two epoch validity window provides replay protection.
     /// Either the transaction is statically invalid (current epoch not within range) or the
     /// validator will remember if the transaction was already executed.
     pub fn is_replay_protected(&self) -> bool {
-        matches!(self, TransactionExpiration::ValidDuring {
+        matches!(
+            self,
+            TransactionExpiration::ValidDuring {
                 min_epoch: Some(min_epoch),
                 max_epoch: Some(max_epoch),
                 ..
-            } if *max_epoch == *min_epoch || *max_epoch == min_epoch.saturating_add(1))
+            }
+            | TransactionExpiration::Validity {
+                min_epoch: Some(min_epoch),
+                max_epoch: Some(max_epoch),
+                ..
+            } if *max_epoch == *min_epoch || *max_epoch == min_epoch.saturating_add(1)
+        )
+    }
+
+    /// The validators allowed to propose this transaction in consensus during `epoch`.
+    ///
+    /// A set recorded for any other epoch indexes into a committee that is not the one deciding
+    /// this transaction, so it is ignored entirely and the transaction is treated as naming no
+    /// proposers. The incentive to record the current epoch is on the signer, who is the party
+    /// the restriction protects; transactions without a usable set may in future be subject to
+    /// submission delays to limit amplification.
+    pub fn allowed_proposers(&self, epoch: EpochId) -> Option<&AllowedProposers> {
+        match self {
+            TransactionExpiration::Validity {
+                allowed_proposers: Some(allowed),
+                ..
+            } if allowed.epoch == epoch => Some(allowed),
+            _ => None,
+        }
+    }
+
+    /// Whether the transaction restricts its proposers during `epoch`. Only such a transaction has
+    /// its consensus amplification bounded by `validity_check`.
+    pub fn restricts_proposers(&self, epoch: EpochId) -> bool {
+        self.allowed_proposers(epoch).is_some()
+    }
+
+    /// Whether `proposer` (an index into `epoch`'s committee) may propose this transaction in
+    /// consensus.
+    pub fn is_allowed_proposer(&self, proposer: u32, epoch: EpochId) -> bool {
+        self.allowed_proposers(epoch).is_none_or(|allowed| {
+            // The set is strictly increasing, so stop as soon as it passes `proposer`. An
+            // unsorted set is rejected by validity_check; reading it as a miss here is
+            // deterministic across validators, which is all block verification requires.
+            allowed
+                .proposers
+                .iter()
+                .find(|p| **p >= proposer)
+                .is_some_and(|p| *p == proposer)
+        })
     }
 }
 
@@ -2126,6 +2646,20 @@ impl TransactionData {
             sender,
             gas_data,
             expiration: TransactionExpiration::None,
+        })
+    }
+
+    pub fn new_with_gas_data_and_expiration(
+        kind: TransactionKind,
+        sender: SuiAddress,
+        gas_data: GasData,
+        expiration: TransactionExpiration,
+    ) -> Self {
+        TransactionData::V1(TransactionDataV1 {
+            kind,
+            sender,
+            gas_data,
+            expiration,
         })
     }
 
@@ -2352,6 +2886,10 @@ impl TransactionData {
                 | Owner::ConsensusAddressOwner {
                     start_version: initial_shared_version,
                     ..
+                }
+                | Owner::Party {
+                    start_version: initial_shared_version,
+                    ..
                 } => ObjectArg::SharedObject {
                     id: upgrade_capability.0,
                     initial_shared_version,
@@ -2524,10 +3062,10 @@ pub trait TransactionDataAPI {
         &self,
     ) -> UserInputResult<(Vec<ObjectRef>, Vec<ObjectID>, Vec<ObjectRef>)>;
 
-    /// Processes funds withdraws and returns a map from funds account object ID to total
-    /// reserved amount. This method aggregates all withdraw operations for the same account by
-    /// merging their reservations. Each account object ID is derived from the type parameter of
-    /// each withdraw operation.
+    /// Processes funds withdraws and returns a map from funds account object ID to (total
+    /// reserved amount, type tag, owner address). This method aggregates all withdraw operations
+    /// for the same account by merging their reservations. Each account object ID is derived from
+    /// the owner address and the type parameter of each withdraw operation.
     ///
     /// This method is used at signing time, and can reject a transaction if it contains
     /// invalid reservations.
@@ -2535,7 +3073,16 @@ pub trait TransactionDataAPI {
         &self,
         chain_identifier: ChainIdentifier,
         coin_resolver: &dyn CoinReservationResolverTrait,
-    ) -> UserInputResult<BTreeMap<AccumulatorObjId, u64>>;
+    ) -> UserInputResult<BTreeMap<AccumulatorObjId, (u64, TypeTag, SuiAddress)>>;
+
+    /// Like `process_funds_withdrawals_for_signing`, but excludes the implicit gas payment
+    /// withdrawal. This is used during gas selection estimation to avoid double-counting the
+    /// gas budget when determining available address balance.
+    fn process_funds_withdrawals_for_estimation(
+        &self,
+        chain_identifier: ChainIdentifier,
+        coin_resolver: &dyn CoinReservationResolverTrait,
+    ) -> UserInputResult<BTreeMap<AccumulatorObjId, (u64, TypeTag, SuiAddress)>>;
 
     /// Like `process_funds_withdrawals_for_signing`, but must only be called on a certified
     /// transaction, i.e. one that is known to be valid.
@@ -2544,11 +3091,13 @@ pub trait TransactionDataAPI {
         chain_identifier: ChainIdentifier,
     ) -> BTreeMap<AccumulatorObjId, u64>;
 
+    /// Validates the declared funder, the spender, and the funds type of each
+    /// `WithdrawFrom::SenderAllowance` against its loaded input object. Execution trusts the
+    /// declared funder, which is immutable on the allowance. Policy checks live in Move.
+    fn check_allowance_inputs(&self, input_objects: &InputObjects) -> UserInputResult<()>;
+
     // A cheap way to quickly check if the transaction has funds withdraws.
     fn has_funds_withdrawals(&self) -> bool;
-
-    // Get all the funds withdrawals args in the transaction.
-    fn get_funds_withdrawals(&self) -> Vec<FundsWithdrawalArg>;
 
     fn coin_reservation_obj_refs(
         &self,
@@ -2556,8 +3105,6 @@ pub trait TransactionDataAPI {
     ) -> Vec<ParsedObjectRefWithdrawal>;
 
     fn validity_check(&self, context: &TxValidityCheckContext<'_>) -> SuiResult;
-
-    fn validity_check_no_gas_check(&self, config: &ProtocolConfig) -> UserInputResult;
 
     /// Check if the transaction is compliant with sponsorship.
     fn check_sponsorship(&self) -> UserInputResult;
@@ -2575,6 +3122,8 @@ pub trait TransactionDataAPI {
     fn is_sponsored_tx(&self) -> bool;
 
     fn is_gas_paid_from_address_balance(&self) -> bool;
+
+    fn is_gasless_transaction(&self) -> bool;
 
     fn sender_mut_for_testing(&mut self) -> &mut SuiAddress;
 
@@ -2649,6 +3198,7 @@ impl TransactionDataAPI for TransactionDataV1 {
             inputs.extend(
                 self.gas()
                     .iter()
+                    .filter(|obj_ref| !ParsedDigest::is_coin_reservation_digest(&obj_ref.2))
                     .map(|obj_ref| InputObjectKind::ImmOrOwnedMoveObject(*obj_ref)),
             );
         }
@@ -2688,50 +3238,23 @@ impl TransactionDataAPI for TransactionDataV1 {
         &self,
         chain_identifier: ChainIdentifier,
         coin_resolver: &dyn CoinReservationResolverTrait,
-    ) -> UserInputResult<BTreeMap<AccumulatorObjId, u64>> {
-        let mut withdraws = self.get_funds_withdrawals();
+    ) -> UserInputResult<BTreeMap<AccumulatorObjId, (u64, TypeTag, SuiAddress)>> {
+        self.accumulate_funds_withdrawals(chain_identifier, coin_resolver, true)
+    }
 
-        for withdraw in self.parsed_coin_reservations(chain_identifier) {
-            let withdrawal_arg = coin_resolver.resolve_funds_withdrawal(self.sender(), withdraw)?;
-            withdraws.push(withdrawal_arg);
-        }
-
-        withdraws.extend(self.get_funds_withdrawal_for_gas_payment());
-
-        // Accumulate all withdraws per account.
-        let mut withdraw_map: BTreeMap<_, u64> = BTreeMap::new();
-        for withdraw in withdraws {
-            let reserved_amount = match &withdraw.reservation {
-                Reservation::MaxAmountU64(amount) => {
-                    assert!(*amount > 0, "verified in validity check");
-                    *amount
-                }
-            };
-
-            let account_address = withdraw.owner_for_withdrawal(self);
-            let account_id =
-                AccumulatorValue::get_field_id(account_address, &withdraw.type_arg.to_type_tag())
-                    .map_err(|e| UserInputError::InvalidWithdrawReservation {
-                    error: e.to_string(),
-                })?;
-
-            let current_amount = withdraw_map.entry(account_id).or_default();
-            *current_amount = current_amount.checked_add(reserved_amount).ok_or(
-                UserInputError::InvalidWithdrawReservation {
-                    error: "Balance withdraw reservation overflow".to_string(),
-                },
-            )?;
-        }
-
-        Ok(withdraw_map)
+    fn process_funds_withdrawals_for_estimation(
+        &self,
+        chain_identifier: ChainIdentifier,
+        coin_resolver: &dyn CoinReservationResolverTrait,
+    ) -> UserInputResult<BTreeMap<AccumulatorObjId, (u64, TypeTag, SuiAddress)>> {
+        self.accumulate_funds_withdrawals(chain_identifier, coin_resolver, false)
     }
 
     fn process_funds_withdrawals_for_execution(
         &self,
         chain_identifier: ChainIdentifier,
     ) -> BTreeMap<AccumulatorObjId, u64> {
-        let mut withdraws = self.get_funds_withdrawals();
-
+        let mut withdraws: Vec<_> = self.get_funds_withdrawals().collect();
         withdraws.extend(self.get_funds_withdrawal_for_gas_payment());
 
         // Accumulate all withdraws per account.
@@ -2760,6 +3283,7 @@ impl TransactionDataAPI for TransactionDataV1 {
         // the accumulator object may not exist any more. This is okay, as the scheduler will simply
         // cancel the transaction if there are no funds available.
         for obj in self.coin_reservation_obj_refs() {
+            assert_reachable!("processing coin reservation withdrawal");
             // unwrap safe because of signing time checks
             let parsed = ParsedObjectRefWithdrawal::parse(&obj, chain_identifier).unwrap();
             let value = withdraw_map
@@ -2776,8 +3300,70 @@ impl TransactionDataAPI for TransactionDataV1 {
         withdraw_map
     }
 
+    fn check_allowance_inputs(&self, input_objects: &InputObjects) -> UserInputResult<()> {
+        let allowance_withdrawals: Vec<_> = self
+            .get_funds_withdrawals()
+            .filter_map(|w| match w.withdraw_from {
+                WithdrawFrom::SenderAllowance { funder, allowance } => {
+                    Some((funder, allowance, w.type_arg.to_type_tag()))
+                }
+                _ => None,
+            })
+            .collect();
+        if allowance_withdrawals.is_empty() {
+            return Ok(());
+        }
+        // An allowance must be among the tx's inputs, or it fails to resolve here.
+        let objects_by_id: BTreeMap<ObjectID, &Object> = input_objects
+            .iter()
+            .filter_map(|input| Some((input.id(), input.as_object()?)))
+            .collect();
+        // Two withdrawals may source the same allowance with different declared funders
+        // (and should be rejected).
+        let mut resolved_allowances: BTreeMap<ObjectID, ResolvedAllowance> = BTreeMap::new();
+        for (specified_funder, allowance, requested_funds_type) in allowance_withdrawals {
+            let resolved: &ResolvedAllowance = match resolved_allowances.entry(allowance) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let object = objects_by_id.get(&allowance).ok_or_else(|| {
+                        UserInputError::InvalidWithdrawReservation {
+                            error: format!(
+                                "Specified allowance {allowance} not found among the tx inputs"
+                            ),
+                        }
+                    })?;
+                    entry.insert(parse_allowance_object(object)?)
+                }
+            };
+            if resolved.funder != specified_funder {
+                return Err(UserInputError::InvalidWithdrawReservation {
+                    error: format!(
+                        "Specified funder {specified_funder} does not match the funder of \
+                        allowance {allowance}"
+                    ),
+                });
+            }
+            if resolved.spender != Some(self.sender()) {
+                return Err(UserInputError::InvalidWithdrawReservation {
+                    error: format!(
+                        "Transaction sender is not the spender of allowance {allowance}"
+                    ),
+                });
+            }
+            if resolved.funds_type != requested_funds_type {
+                return Err(UserInputError::InvalidWithdrawReservation {
+                    error: format!(
+                        "Allowance {allowance} is for {}, not {requested_funds_type}",
+                        resolved.funds_type
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn has_funds_withdrawals(&self) -> bool {
-        if self.is_gas_paid_from_address_balance() {
+        if self.is_gas_paid_from_address_balance() && self.gas_data().budget > 0 {
             return true;
         }
         if let TransactionKind::ProgrammableTransaction(pt) = &self.kind {
@@ -2791,10 +3377,6 @@ impl TransactionDataAPI for TransactionDataV1 {
             return true;
         }
         false
-    }
-
-    fn get_funds_withdrawals(&self) -> Vec<FundsWithdrawalArg> {
-        self.kind.get_funds_withdrawals().cloned().collect()
     }
 
     fn coin_reservation_obj_refs(
@@ -2823,8 +3405,86 @@ impl TransactionDataAPI for TransactionDataV1 {
                 min_timestamp,
                 max_timestamp,
                 chain,
-                nonce: _,
+                ..
+            }
+            | TransactionExpiration::Validity {
+                min_epoch,
+                max_epoch,
+                min_timestamp,
+                max_timestamp,
+                chain,
+                ..
             } => {
+                // The variant itself is gated regardless of whether its proposer set is usable,
+                // so that a transaction accepted after the upgrade cannot be accepted before it.
+                if matches!(self.expiration(), TransactionExpiration::Validity { .. }) {
+                    fp_ensure!(
+                        config.allowed_proposers(),
+                        UserInputError::Unsupported(
+                            "Restricting the proposers of a transaction is not supported"
+                                .to_string(),
+                        )
+                        .into()
+                    );
+                }
+
+                // A proposer set recorded for another epoch is ignored, so there is nothing to
+                // check: the transaction is treated as if it named no proposers at all.
+                if let Some(allowed_proposers) = self.expiration().allowed_proposers(context.epoch)
+                {
+                    let proposers = &allowed_proposers.proposers;
+
+                    // SIP-45: submitting the same transaction to several proposers amplifies its
+                    // consensus cost, which must be paid for with a raised gas price. Sizing the
+                    // proposer set is the sender's declaration of how much it intends to amplify.
+                    // No gas price buys more proposers than there are validators.
+                    //
+                    // Checked first, so that everything below walks a bounded list.
+                    let max_proposers = MAX_UNPAID_ALLOWED_PROPOSERS
+                        .max(self.gas_data.price / context.reference_gas_price.max(1))
+                        .min(context.committee_size as u64);
+                    fp_ensure!(
+                        proposers.len() as u64 <= max_proposers,
+                        UserInputError::InvalidExpiration {
+                            error: format!(
+                                "allowed_proposers has {} entries, but at most {max_proposers} \
+                                 are permitted with gas price {}, reference gas price {}, and a \
+                                 committee of {}",
+                                proposers.len(),
+                                self.gas_data.price,
+                                context.reference_gas_price,
+                                context.committee_size,
+                            ),
+                        }
+                        .into()
+                    );
+
+                    // Canonical encoding: a proposer set cannot be padded with duplicates, and
+                    // lookups can rely on the ordering.
+                    fp_ensure!(
+                        proposers.iter().is_sorted_by(|a, b| a < b),
+                        UserInputError::InvalidExpiration {
+                            error: "allowed_proposers must be strictly increasing".to_string(),
+                        }
+                        .into()
+                    );
+
+                    // An out-of-range index names no one, so it can only make the transaction
+                    // unproposable.
+                    if let Some(out_of_range) =
+                        proposers.iter().find(|i| **i >= context.committee_size)
+                    {
+                        return Err(UserInputError::InvalidExpiration {
+                            error: format!(
+                                "allowed_proposers contains index {out_of_range}, but the \
+                                 committee has {} members",
+                                context.committee_size,
+                            ),
+                        }
+                        .into());
+                    }
+                }
+
                 if min_timestamp.is_some() || max_timestamp.is_some() {
                     return Err(UserInputError::Unsupported(
                         "Timestamp-based transaction expiration is not yet supported".to_string(),
@@ -2832,9 +3492,9 @@ impl TransactionDataAPI for TransactionDataV1 {
                     .into());
                 }
 
-                // Legacy behavior: If ValidDuring is present, it must have either one- or two-epoch
-                // validity, even if the transaction is has other replay-protection.
-                // New behavior: ValidDuring can specify any epoch range. Replay protection is enforced
+                // Legacy behavior: If a validity window is present, it must have either one- or
+                // two-epoch validity, even if the transaction has other replay-protection.
+                // New behavior: any epoch range can be specified. Replay protection is enforced
                 // by sui_transaction_checks::check_replay_protection.
                 match (min_epoch, max_epoch) {
                     _ if config.relax_valid_during_for_owned_inputs() => (),
@@ -2910,6 +3570,17 @@ impl TransactionDataAPI for TransactionDataV1 {
                         }
                         .into());
                     }
+                    // The allowance itself is checked after input loading, in
+                    // `check_allowance_inputs`.
+                    WithdrawFrom::SenderAllowance { .. } => {
+                        fp_ensure!(
+                            config.enable_allowances(),
+                            UserInputError::Unsupported(
+                                "Allowance withdrawals are not enabled".to_string()
+                            )
+                            .into()
+                        );
+                    }
                 }
 
                 match withdraw.reservation {
@@ -2942,6 +3613,13 @@ impl TransactionDataAPI for TransactionDataV1 {
                 }
             }
 
+            // Count implicit gas budget as a withdrawal when gas is paid from address balance
+            if config.enable_address_balance_gas_payments()
+                && self.is_gas_paid_from_address_balance()
+            {
+                num_reservations += 1;
+            }
+
             fp_ensure!(
                 num_reservations <= max_withdraws,
                 UserInputError::InvalidWithdrawReservation {
@@ -2970,7 +3648,8 @@ impl TransactionDataAPI for TransactionDataV1 {
                 );
             }
 
-            if config.address_balance_gas_check_rgp_at_signing() {
+            let is_gasless = config.enable_gasless() && self.is_gasless_transaction();
+            if config.address_balance_gas_check_rgp_at_signing() && !is_gasless {
                 fp_ensure!(
                     self.gas_data.price >= context.reference_gas_price,
                     UserInputError::GasPriceUnderRGP {
@@ -3025,16 +3704,45 @@ impl TransactionDataAPI for TransactionDataV1 {
             .into()
         );
 
-        for (_, _, gas_digest) in self.gas().iter().copied() {
-            fp_ensure!(
-                ParsedDigest::try_from(gas_digest).is_err(),
-                // This is not the most appropriate error, but we can't introduce a new one
-                // since the point here is to achieve backward compatibility.
-                UserInputError::GasObjectNotOwnedObject {
-                    owner: Owner::AddressOwner(self.sender)
+        if !config.enable_coin_reservation_obj_refs() {
+            for (_, _, gas_digest) in self.gas() {
+                fp_ensure!(
+                    !ParsedDigest::is_coin_reservation_digest(gas_digest),
+                    UserInputError::GasObjectNotOwnedObject {
+                        owner: Owner::AddressOwner(self.sender)
+                    }
+                    .into()
+                );
+            }
+        } else {
+            // When coin reservations are enabled, validate that gas coin reservations are for SUI,
+            // and that they are owned by the sender. (Sponsorship via coin reservations is not supported.)
+            let sui_accumulator_id =
+                *AccumulatorValue::get_field_id(self.sender, &Balance::type_tag(GAS::type_tag()))?
+                    .inner();
+
+            for gas_ref in self.gas() {
+                if let Some(parsed) =
+                    ParsedObjectRefWithdrawal::parse(gas_ref, context.chain_identifier)
+                {
+                    // Coin reservations draw from the sender's address balance, so they cannot
+                    // be used in sponsored transactions where gas is paid by someone else.
+                    fp_ensure!(
+                        self.gas_owner() == self.sender,
+                        UserInputError::GasObjectNotOwnedObject {
+                            owner: Owner::AddressOwner(self.sender)
+                        }
+                        .into()
+                    );
+                    fp_ensure!(
+                        parsed.unmasked_object_id == sui_accumulator_id,
+                        UserInputError::GasObjectNotOwnedObject {
+                            owner: Owner::AddressOwner(self.sender)
+                        }
+                        .into()
+                    );
                 }
-                .into()
-            );
+            }
         }
 
         if !self.is_system_tx() {
@@ -3056,25 +3764,42 @@ impl TransactionDataAPI for TransactionDataV1 {
                 }
                 .into()
             );
-            fp_ensure!(
-                self.gas_data.budget >= cost_table.min_transaction_cost,
-                UserInputError::GasBudgetTooLow {
-                    gas_budget: self.gas_data.budget,
-                    min_budget: cost_table.min_transaction_cost,
-                }
-                .into()
-            );
+            let is_gasless = config.enable_gasless() && self.is_gasless_transaction();
+            if is_gasless {
+                fp_ensure!(
+                    self.gas_data.budget == 0,
+                    UserInputError::Unsupported(
+                        "gas_budget must be 0 for gasless transactions".to_string()
+                    )
+                    .into()
+                );
+            } else {
+                fp_ensure!(
+                    self.gas_data.budget >= cost_table.min_transaction_cost,
+                    UserInputError::GasBudgetTooLow {
+                        gas_budget: self.gas_data.budget,
+                        min_budget: cost_table.min_transaction_cost,
+                    }
+                    .into()
+                );
+            }
         }
 
-        self.validity_check_no_gas_check(config)?;
-        Ok(())
-    }
-
-    // Keep all the logic for validity here, we need this for dry run where the gas
-    // may not be provided and created "on the fly"
-    fn validity_check_no_gas_check(&self, config: &ProtocolConfig) -> UserInputResult {
         self.kind().validity_check(config)?;
-        self.check_sponsorship()
+
+        if config.enable_gasless() && self.is_gasless_transaction() {
+            let TransactionKind::ProgrammableTransaction(pt) = &self.kind else {
+                debug_fatal!("gasless transaction is not a ProgrammableTransaction");
+                return Err(UserInputError::Unsupported(
+                    "Gasless transactions must be programmable transactions".to_string(),
+                )
+                .into());
+            };
+            pt.validate_gasless_transaction(config)?;
+        }
+
+        self.check_sponsorship()?;
+        Ok(())
     }
 
     /// Check if the transaction is sponsored (namely gas owner != sender)
@@ -3082,8 +3807,15 @@ impl TransactionDataAPI for TransactionDataV1 {
         self.gas_owner() != self.sender
     }
 
+    // Note: it is possible to pay gas from a coin reservation, which ultimately draws from
+    // the address balance. This function still returns false in that case. In other words,
+    // it indicates use of the first-class API for address balance gas payments, not the legacy API.
     fn is_gas_paid_from_address_balance(&self) -> bool {
         is_gas_paid_from_address_balance(&self.gas_data, &self.kind)
+    }
+
+    fn is_gasless_transaction(&self) -> bool {
+        is_gasless_transaction(&self.gas_data, &self.kind)
     }
 
     /// Check if the transaction is compliant with sponsorship.
@@ -3144,8 +3876,63 @@ impl TransactionDataAPI for TransactionDataV1 {
 }
 
 impl TransactionDataV1 {
+    fn accumulate_funds_withdrawals(
+        &self,
+        chain_identifier: ChainIdentifier,
+        coin_resolver: &dyn CoinReservationResolverTrait,
+        include_gas_payment: bool,
+    ) -> UserInputResult<BTreeMap<AccumulatorObjId, (u64, TypeTag, SuiAddress)>> {
+        let mut withdraws: Vec<_> = self.get_funds_withdrawals().collect();
+
+        for withdraw in self.parsed_coin_reservations(chain_identifier) {
+            let withdrawal_arg =
+                coin_resolver.resolve_funds_withdrawal(self.sender(), withdraw, None)?;
+            withdraws.push(withdrawal_arg);
+        }
+
+        if include_gas_payment {
+            withdraws.extend(self.get_funds_withdrawal_for_gas_payment());
+        }
+
+        let mut withdraw_map: BTreeMap<AccumulatorObjId, (u64, TypeTag, SuiAddress)> =
+            BTreeMap::new();
+        for withdraw in withdraws {
+            let reserved_amount = match &withdraw.reservation {
+                Reservation::MaxAmountU64(amount) => {
+                    if *amount == 0 {
+                        return Err(UserInputError::InvalidWithdrawReservation {
+                            error: "Balance withdraw reservation amount must be non-zero"
+                                .to_string(),
+                        });
+                    }
+                    *amount
+                }
+            };
+
+            let account_address = withdraw.owner_for_withdrawal(self);
+            let type_tag = withdraw.type_arg.to_type_tag();
+            let account_id =
+                AccumulatorValue::get_field_id(account_address, &type_tag).map_err(|e| {
+                    UserInputError::InvalidWithdrawReservation {
+                        error: e.to_string(),
+                    }
+                })?;
+
+            let (current_amount, _, _) = withdraw_map
+                .entry(account_id)
+                .or_insert_with(|| (0, type_tag, account_address));
+            *current_amount = current_amount.checked_add(reserved_amount).ok_or(
+                UserInputError::InvalidWithdrawReservation {
+                    error: "Balance withdraw reservation overflow".to_string(),
+                },
+            )?;
+        }
+
+        Ok(withdraw_map)
+    }
+
     fn get_funds_withdrawal_for_gas_payment(&self) -> Option<FundsWithdrawalArg> {
-        if self.is_gas_paid_from_address_balance() {
+        if self.is_gas_paid_from_address_balance() && self.gas_data().budget > 0 {
             Some(if self.sender() != self.gas_owner() {
                 FundsWithdrawalArg::balance_from_sponsor(self.gas_data().budget, GAS::type_tag())
             } else {
@@ -3156,9 +3943,20 @@ impl TransactionDataV1 {
         }
     }
 
+    fn get_funds_withdrawals(&self) -> impl Iterator<Item = FundsWithdrawalArg> + '_ {
+        self.kind.get_funds_withdrawals().cloned()
+    }
+
     fn coin_reservation_obj_refs(&self) -> impl Iterator<Item = ObjectRef> {
-        // TODO(address-balances): add gas coin obj refs
-        self.kind.get_coin_reservation_obj_refs()
+        self.kind
+            .get_coin_reservation_obj_refs()
+            .chain(self.gas().iter().filter_map(|gas_ref| {
+                if ParsedDigest::is_coin_reservation_digest(&gas_ref.2) {
+                    Some(*gas_ref)
+                } else {
+                    None
+                }
+            }))
     }
 
     fn parsed_coin_reservations(
@@ -3176,6 +3974,8 @@ pub struct TxValidityCheckContext<'a> {
     pub epoch: EpochId,
     pub chain_identifier: ChainIdentifier,
     pub reference_gas_price: u64,
+    /// Number of validators in the current epoch's committee, used to bound committee indices.
+    pub committee_size: u32,
 }
 
 impl<'a> TxValidityCheckContext<'a> {
@@ -3185,6 +3985,7 @@ impl<'a> TxValidityCheckContext<'a> {
             epoch: 0,
             chain_identifier: ChainIdentifier::default(),
             reference_gas_price: 1000,
+            committee_size: 4,
         }
     }
 }
@@ -3375,7 +4176,7 @@ impl SenderSignedData {
         for sig in &self.inner().tx_signatures {
             match sig {
                 GenericSignature::MultiSig(_) => {
-                    if !config.supports_upgraded_multisig() {
+                    if !config.upgraded_multisig_supported() {
                         return Err(SuiErrorKind::UserInputError {
                             error: UserInputError::Unsupported(
                                 "upgraded multisig format not enabled on this network".to_string(),
@@ -3447,6 +4248,22 @@ impl SenderSignedData {
             }
             .into()
         );
+
+        if context.config.enable_gasless() && tx_data.is_gasless_transaction() {
+            let gasless_max = context.config.get_gasless_max_tx_size_bytes();
+            fp_ensure!(
+                tx_size as u64 <= gasless_max,
+                SuiErrorKind::UserInputError {
+                    error: UserInputError::SizeLimitExceeded {
+                        limit: format!(
+                            "serialized gasless transaction size exceeded maximum of {gasless_max}"
+                        ),
+                        value: tx_size.to_string(),
+                    }
+                }
+                .into()
+            );
+        }
 
         tx_data.validity_check(context)?;
 
@@ -3813,58 +4630,8 @@ impl SignedTransaction {
 pub type CertifiedTransaction = Envelope<SenderSignedData, AuthorityStrongQuorumSignInfo>;
 
 impl CertifiedTransaction {
-    pub fn certificate_digest(&self) -> CertificateDigest {
-        let mut digest = DefaultHash::default();
-        bcs::serialize_into(&mut digest, self).expect("serialization should not fail");
-        let hash = digest.finalize();
-        CertificateDigest::new(hash.into())
-    }
-
     pub fn gas_price(&self) -> u64 {
         self.data().transaction_data().gas_price()
-    }
-
-    // TODO: Eventually we should remove all calls to verify_signature
-    // and make sure they all call verify to avoid repeated verifications.
-    pub fn verify_signatures_authenticated(
-        &self,
-        committee: &Committee,
-        verify_params: &VerifyParams,
-        zklogin_inputs_cache: Arc<VerifiedDigestCache<ZKLoginInputsDigest>>,
-    ) -> SuiResult {
-        verify_sender_signed_data_message_signatures(
-            self.data(),
-            committee.epoch(),
-            verify_params,
-            zklogin_inputs_cache,
-            vec![],
-        )?;
-        self.auth_sig().verify_secure(
-            self.data(),
-            Intent::sui_app(IntentScope::SenderSignedTransaction),
-            committee,
-        )
-    }
-
-    pub fn try_into_verified_for_testing(
-        self,
-        committee: &Committee,
-        verify_params: &VerifyParams,
-    ) -> SuiResult<VerifiedCertificate> {
-        self.verify_signatures_authenticated(
-            committee,
-            verify_params,
-            Arc::new(VerifiedDigestCache::new_empty()),
-        )?;
-        Ok(VerifiedCertificate::new_from_verified(self))
-    }
-
-    pub fn verify_committee_sigs_only(&self, committee: &Committee) -> SuiResult {
-        self.auth_sig().verify_secure(
-            self.data(),
-            Intent::sui_app(IntentScope::SenderSignedTransaction),
-            committee,
-        )
     }
 }
 
