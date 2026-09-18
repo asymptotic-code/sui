@@ -5185,6 +5185,7 @@ fn unused_module_members(
             || fun.attributes.contains_key_(&AttributeKind_::RandTest)
             || fun.attributes.contains_key_(&AttributeKind_::Spec)
             || fun.attributes.contains_key_(&AttributeKind_::SpecOnly)
+            || fun.attributes.is_spec_mode()
         {
             // functions with #[test] or R[random_test] attribute are implicitly used
             continue;

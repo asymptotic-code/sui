@@ -569,11 +569,23 @@ impl Attributes {
         modes.contains_(&ModeAttribute::TEST.into())
     }
 
+    /// `#[mode(spec)]`: spec code, compiled only for the prover.
+    pub fn is_spec_mode(&self) -> bool {
+        let Some(attr) = self.get_(&known_attributes::AttributeKind_::Mode) else {
+            return false;
+        };
+        let KnownAttribute::Mode(ModeAttribute { modes }) = &attr.value else {
+            unreachable!()
+        };
+        modes.contains_(&known_attributes::VerificationAttribute::SPEC.into())
+    }
+
     pub fn is_spec_or_spec_only(&self) -> bool {
         self.get_(&known_attributes::AttributeKind_::Spec).is_some()
             || self
                 .get_(&known_attributes::AttributeKind_::SpecOnly)
                 .is_some()
+            || self.is_spec_mode()
     }
 }
 
