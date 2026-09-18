@@ -1,12 +1,11 @@
 ---
 source: crates/move-compiler/tests/move_check_testsuite.rs
-assertion_line: 276
 info:
   flavor: core
   edition: 2024.alpha
   lint: false
 ---
-warning[W09002]: unused variable
+warning[WC09002]: unused variable
   ┌─ tests/move_2024/verification/spec_only_do_filter_binding2.move:8:13
   │
 8 │         let x0 = _x.to_int();
@@ -14,7 +13,7 @@ warning[W09002]: unused variable
   │
   = This warning can be suppressed with '#[allow(unused_variable)]' applied to the 'module' or module member ('const', 'fun', or 'struct')
 
-error[E04023]: invalid method call
+error[EC04023]: invalid method call
   ┌─ tests/move_2024/verification/spec_only_do_filter_binding2.move:8:18
   │
 8 │         let x0 = _x.to_int();

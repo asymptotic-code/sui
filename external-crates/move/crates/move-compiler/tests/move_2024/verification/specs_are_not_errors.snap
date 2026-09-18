@@ -1,12 +1,11 @@
 ---
 source: crates/move-compiler/tests/move_check_testsuite.rs
-assertion_line: 277
 info:
   flavor: core
   edition: 2024.alpha
   lint: false
 ---
-error[E01002]: unexpected token
+error[EC01002]: unexpected token
   ┌─ tests/move_2024/verification/specs_are_not_errors.move:4:5
   │
 4 │     spec foo {}
@@ -15,7 +14,7 @@ error[E01002]: unexpected token
   │     Unexpected 'spec'
   │     Expected a module member: 'use', 'friend', 'const', 'fun', 'struct', or 'enum'
 
-error[E01002]: unexpected token
+error[EC01002]: unexpected token
    ┌─ tests/move_2024/verification/specs_are_not_errors.move:12:1
    │
 12 │ spec a::m {
