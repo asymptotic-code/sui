@@ -1,0 +1,5 @@
+[package]
+name = "Wormhole"
+
+[addresses]
+wormhole = "0x5"

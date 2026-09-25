@@ -732,6 +732,14 @@ impl Move2024PathExpander {
                 {
                     NR::Address(loc, make_address(context, name, name.loc, *address))
                 } else {
+                    // An unbound name gets the placeholder address an unbound `module <name>::`
+                    // declaration gets (see `top_level_address_`), so `::pkg::m::x` reaches the
+                    // modules of a package whose own name has no address assigned -- the
+                    // move-package-alt model, where a package's name is always its address.
+                    let address = top_level_address(context, false, sp(loc, LN::Name(name)));
+                    if !matches!(address, E::Address::NamedUnassigned(_)) {
+                        return NR::Address(loc, address);
+                    }
                     NR::ResolutionFailure(
                         Box::new(NR::UnresolvedName(loc, name)),
                         NF::UnresolvedAlias(name),

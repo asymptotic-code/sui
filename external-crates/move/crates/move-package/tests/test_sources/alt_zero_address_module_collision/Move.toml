@@ -1,0 +1,11 @@
+[package]
+name = "Root"
+edition = "2024"
+
+[dependencies]
+A = { local = "./deps_only/a" }
+B = { local = "./deps_only/b" }
+C = { local = "./deps_only/c" }
+
+[addresses]
+root = "0x0"

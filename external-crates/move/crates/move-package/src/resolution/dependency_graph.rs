@@ -1769,6 +1769,14 @@ impl fmt::Display for SubstTOML<'_> {
                         &account.to_canonical_string(/* with_prefix */ false),
                     )?)?;
                 }
+
+                PM::SubstOrRename::PackageRename(named) => {
+                    f.write_str(&str_escape(&format!(
+                        "{}{}",
+                        crate::source_package::manifest_parser::PACKAGE_RENAME_PREFIX,
+                        named
+                    ))?)?;
+                }
             }
 
             Ok(())

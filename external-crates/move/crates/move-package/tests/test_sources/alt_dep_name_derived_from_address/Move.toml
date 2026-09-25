@@ -1,0 +1,9 @@
+[package]
+name = "Root"
+edition = "2024"
+
+[dependencies]
+wormhole = { local = "./deps_only/wormhole" }
+
+[addresses]
+root = "0x0"

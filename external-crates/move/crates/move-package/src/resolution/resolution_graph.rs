@@ -95,6 +95,9 @@ impl ResolvedGraph {
             DG::DependencyMode::Always
         };
 
+        let relocations =
+            zero_address_relocations(&graph, &build_options, dependency_cache, progress_output)?;
+
         // Resolve transitive dependencies in reverse topological order so that a package's
         // dependencies get resolved before it does.
         for pkg_id in graph.topological_order().into_iter().rev() {
@@ -138,7 +141,13 @@ impl ResolvedGraph {
 
                         let dep_path = &resolved_pkg.package_path.join(local_path(&internal.kind));
                         let dep_manifest = parse_move_manifest_from_file(dep_path)?;
-                        if dep_name != &dep_manifest.package.name {
+                        let rename_from = package_rename(internal.subst.as_ref(), dep_name);
+                        if !dep_name_matches_manifest(
+                            dep_name,
+                            rename_from,
+                            &dep_manifest,
+                            dep_path,
+                        ) {
                             bail!(
                                 "Name of dependency '{}' does not match dependency's package name '{}'",
                                 dep_name,
@@ -152,7 +161,11 @@ impl ResolvedGraph {
             let pkg_name = resolved_pkg.source_package.package.name;
 
             resolved_pkg
-                .define_addresses_in_package(&mut resolving_table, &chain_id)
+                .define_addresses_in_package(
+                    &mut resolving_table,
+                    &chain_id,
+                    relocations.get(&pkg_id).copied(),
+                )
                 .with_context(|| format!("Resolving addresses for '{pkg_name}'"))?;
 
             for (dep_id, dep, _pkg) in graph.immediate_dependencies(pkg_id, dep_mode) {
@@ -430,10 +443,13 @@ impl Package {
     ///
     /// Addresses are pulled from the `Move.lock` only when a package is published or upgraded on-chain.
     /// Local builds only consult the `Move.toml` manifest.
+    ///
+    /// `relocation` moves the package's 0x0 addresses off 0x0 (see `zero_address_relocations`).
     fn define_addresses_in_package(
         &self,
         resolving_table: &mut ResolvingTable,
         chain_id: &Option<String>,
+        relocation: Option<AccountAddress>,
     ) -> Result<()> {
         let pkg_id = custom_resolve_pkg_id(&self.source_package).with_context(|| {
             format!(
@@ -448,6 +464,10 @@ impl Package {
                 // `Move.lock` when a package is to be published or upgraded.
                 if let Some(original_id) = self.resolve_original_id_from_lock(chain_id) {
                     let addr = AccountAddress::from_str(&original_id)?;
+                    resolving_table.define((pkg_id, *name), Some(addr))?;
+                    continue;
+                }
+                if let Some(addr) = relocation {
                     resolving_table.define((pkg_id, *name), Some(addr))?;
                     continue;
                 }
@@ -514,6 +534,16 @@ impl Package {
 
                     dep_renaming.insert(*from, *to);
                 }
+
+                SubstOrRename::PackageRename(from) => {
+                    if !resolving_table.contains((dep_id, *from)) {
+                        bail!(
+                            "'{dep_name}' is declared with rename-from = \"{from}\", \
+                             however '{dep_name}' does not contain that address",
+                        )
+                    }
+                    dep_renaming.insert(*from, *to);
+                }
             }
         }
 
@@ -522,9 +552,22 @@ impl Package {
             .map(|(from, _)| from)
             .collect();
 
+        let own_names = self.own_address_names();
         for from in bound_in_dep {
             let to = *dep_renaming.get(&from).unwrap_or(&from);
-            resolving_table.unify((pkg_id, to), (dep_id, from))?;
+            if let Err(conflict) = resolving_table.unify((pkg_id, to), (dep_id, from)) {
+                // A modern package (no [addresses]) sees only its own name and its direct
+                // dependencies' names (move-package-alt `named_addresses`); the transitive names
+                // the legacy scope also carries are a convenience. When two dependencies bring the
+                // same transitive name at different addresses, that name is dropped from this
+                // package's scope instead of failing the build -- the package cannot be using it,
+                // or the new resolver would reject it too.
+                if self.is_modern() && to != dep_name && !own_names.contains(&to) {
+                    resolving_table.hide((pkg_id, to));
+                    continue;
+                }
+                return Err(conflict);
+            }
         }
 
         let Some(resolved_dep) = package_table.get(&dep_id) else {
@@ -545,6 +588,41 @@ impl Package {
         }
 
         Ok(())
+    }
+
+    /// A package written for the modern package system: a 2024-edition manifest with none of the
+    /// legacy-only sections (move-package-alt's `try_load_legacy_manifest` rule) and no legacy
+    /// `addr_subst` on a dependency. Older manifests keep the legacy address scope unchanged.
+    fn is_modern(&self) -> bool {
+        let pkg = &self.source_package;
+        pkg.addresses.is_none()
+            && pkg.dev_address_assignments.is_none()
+            && pkg.dev_dependencies.is_empty()
+            && pkg
+                .package
+                .edition
+                .is_some_and(|e| e.edition.as_str() == "2024")
+            && pkg.dependencies.values().all(|dep| match dep {
+                PM::Dependency::Internal(internal) => internal
+                    .subst
+                    .iter()
+                    .flatten()
+                    .all(|(_, s)| matches!(s, SubstOrRename::PackageRename(_))),
+                PM::Dependency::External(_) => true,
+            })
+    }
+
+    /// The names this package binds itself: its package name and its declared addresses.
+    fn own_address_names(&self) -> BTreeSet<NamedAddress> {
+        let mut names: BTreeSet<NamedAddress> = self
+            .source_package
+            .addresses
+            .iter()
+            .flatten()
+            .map(|(name, _)| *name)
+            .collect();
+        names.insert(self.source_package.package.name);
+        names
     }
 
     fn finalize_address_resolution(&mut self, resolving_table: &ResolvingTable) -> Result<()> {
@@ -658,6 +736,254 @@ impl Package {
             warning_filter: empty_filter_scope(),
         }
     }
+}
+
+/// The environment whose publication records (`Published.toml`) give a relocated package its
+/// address: `MOVE_BUILD_ENV`, else `mainnet` (the `sui move build --build-env` counterpart).
+fn build_env() -> String {
+    std::env::var("MOVE_BUILD_ENV")
+        .ok()
+        .filter(|e| !e.trim().is_empty())
+        .unwrap_or_else(|| "mainnet".to_string())
+}
+
+/// Packages that must leave 0x0, and the address each moves to.
+///
+/// Every legacy package binds its own address to 0x0, so two unpublished packages declaring the
+/// same module (`deepbook::registry` and `bs_oracle::registry`) define it twice at 0x0.
+/// move-package-alt never puts two packages at one address: a published dependency sits at its
+/// `original-id` for the build environment, an unpublished one at a per-package dummy address.
+/// Here only packages that actually collide move, so every build that works today keeps the
+/// exact addresses it has. The root and, after it, packages local to the repository keep 0x0;
+/// the others take their `Published.toml` `original-id` for `build_env()`, else a dummy address.
+fn zero_address_relocations<Progress: Write>(
+    graph: &DG::DependencyGraph,
+    build_options: &BuildConfig,
+    dependency_cache: &mut DependencyCache,
+    progress_output: &mut Progress,
+) -> Result<BTreeMap<PackageName, AccountAddress>> {
+    let mut modules: BTreeMap<String, Vec<PackageName>> = BTreeMap::new();
+    let mut paths: BTreeMap<PackageName, PathBuf> = BTreeMap::new();
+    for pkg_id in graph.topological_order() {
+        if !(build_options.dev_mode || graph.always_deps.contains(&pkg_id)) {
+            continue;
+        }
+        let path = if pkg_id == graph.root_package_id {
+            graph.root_path.clone()
+        } else {
+            let pkg = &graph.package_table[&pkg_id];
+            if matches!(pkg.kind, PM::DependencyKind::OnChain(_)) {
+                continue;
+            }
+            dependency_cache
+                .download_and_update_if_remote(pkg_id, &pkg.kind, progress_output)
+                .with_context(|| format!("Fetching '{pkg_id}'"))?;
+            graph.root_path.join(local_path(&pkg.kind))
+        };
+        let Ok(manifest) = parse_move_manifest_from_file(&path) else {
+            continue;
+        };
+        let zero: BTreeSet<String> = manifest
+            .addresses
+            .iter()
+            .flatten()
+            .filter(|(_, addr)| **addr == Some(AccountAddress::ZERO))
+            .map(|(name, _)| name.to_string())
+            .collect();
+        if zero.is_empty() {
+            continue;
+        }
+        for (addr, module) in module_decls(&path.join(SourcePackageLayout::Sources.path()), 8) {
+            if zero.contains(&addr) {
+                modules.entry(module).or_default().push(pkg_id);
+            }
+        }
+        paths.insert(pkg_id, path);
+    }
+
+    let keeps_zero = |pkg: &PackageName| {
+        if *pkg == graph.root_package_id {
+            0
+        } else if matches!(
+            graph.package_table.get(pkg).map(|p| &p.kind),
+            Some(PM::DependencyKind::Local(_))
+        ) {
+            1
+        } else {
+            2
+        }
+    };
+    let env = build_env();
+    let mut relocations = BTreeMap::new();
+    for pkgs in modules.into_values() {
+        let mut pkgs: Vec<PackageName> = pkgs
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if pkgs.len() < 2 {
+            continue;
+        }
+        pkgs.sort_by_key(|p| (keeps_zero(p), p.as_str().to_string()));
+        for pkg in pkgs.into_iter().skip(1) {
+            if relocations.contains_key(&pkg) {
+                continue;
+            }
+            let source = graph.package_table.get(&pkg).map(|p| &p.kind);
+            let addr = published_original_id(&paths[&pkg], &env)?
+                .unwrap_or_else(|| dummy_address(pkg, source));
+            relocations.insert(pkg, addr);
+        }
+    }
+    Ok(relocations)
+}
+
+/// `[published.<env>] original-id` from the package's `Published.toml`.
+fn published_original_id(package_path: &Path, env: &str) -> Result<Option<AccountAddress>> {
+    let path = package_path.join("Published.toml");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let doc: toml::Value =
+        toml::from_str(&text).with_context(|| format!("Parsing {}", path.display()))?;
+    let Some(id) = doc
+        .get("published")
+        .and_then(|p| p.get(env))
+        .and_then(|e| e.get("original-id"))
+        .and_then(|v| v.as_str())
+    else {
+        return Ok(None);
+    };
+    let addr = AccountAddress::from_hex_literal(id)
+        .with_context(|| format!("Invalid original-id '{id}' in {}", path.display()))?;
+    Ok((addr != AccountAddress::ZERO).then_some(addr))
+}
+
+/// A stable address for an unpublished package that cannot stay at 0x0, derived from its name
+/// and its source as the root declares it -- git url, rev and subdir, or the path relative to the
+/// root -- so every machine derives the same one (move-package-alt's `dummy_addr`, widened to the
+/// full address so it cannot land on a framework address).
+fn dummy_address(pkg: PackageName, source: Option<&PM::DependencyKind>) -> AccountAddress {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"move-package-unpublished:");
+    hasher.update(pkg.as_str().as_bytes());
+    hasher.update(b":");
+    match source {
+        Some(PM::DependencyKind::Git(git)) => {
+            hasher.update(git.git_url.as_str().as_bytes());
+            hasher.update(b"@");
+            hasher.update(git.git_rev.as_str().as_bytes());
+            hasher.update(b"/");
+            hasher.update(git.subdir.to_string_lossy().as_bytes());
+        }
+        Some(PM::DependencyKind::Local(path)) => hasher.update(path.to_string_lossy().as_bytes()),
+        Some(PM::DependencyKind::OnChain(info)) => hasher.update(info.id.as_str().as_bytes()),
+        None => {}
+    }
+    let mut bytes: [u8; AccountAddress::LENGTH] = hasher.finalize().into();
+    bytes[0] |= 0x80;
+    AccountAddress::new(bytes)
+}
+
+/// The `rename-from` of the dependency `dep_name`, if its declaration carries one.
+fn package_rename(
+    subst: Option<&PM::Substitution>,
+    dep_name: &PackageName,
+) -> Option<NamedAddress> {
+    match subst?.get(dep_name)? {
+        SubstOrRename::PackageRename(from) => Some(*from),
+        _ => None,
+    }
+}
+
+/// Whether a dependency key names the package it points at. Besides the manifest's
+/// `package.name`, accept the name move-package-alt derives for a legacy manifest
+/// (`derive_modern_name`): its single 0x0 / unassigned named address, else the one address its
+/// modules are declared under. A legacy package named `Wormhole` whose modules are
+/// `wormhole::*` is depended on as `wormhole = { ... }` by modern manifests, which
+/// `sui move build` accepts. With `rename-from`, the renamed name is what must match.
+fn dep_name_matches_manifest(
+    dep_name: &PackageName,
+    rename_from: Option<NamedAddress>,
+    manifest: &SourceManifest,
+    dep_path: &Path,
+) -> bool {
+    let wanted = rename_from.unwrap_or(*dep_name);
+    if wanted == manifest.package.name {
+        return true;
+    }
+    derived_package_names(manifest, dep_path).contains(wanted.as_str())
+}
+
+/// move-package-alt's modern name for a legacy manifest: its single 0x0 / unassigned named
+/// address if there is exactly one, else the address names its modules are declared under
+/// (a name only when that is unambiguous).
+fn derived_package_names(manifest: &SourceManifest, dep_path: &Path) -> BTreeSet<String> {
+    let zero: Vec<&PM::NamedAddress> = manifest
+        .addresses
+        .iter()
+        .flatten()
+        .filter(|(_, addr)| addr.is_none_or(|a| a == AccountAddress::ZERO))
+        .map(|(name, _)| name)
+        .collect();
+    if zero.len() == 1 {
+        return BTreeSet::from([zero[0].to_string()]);
+    }
+    let names = module_address_names(&dep_path.join(SourcePackageLayout::Sources.path()), 8);
+    if names.len() == 1 {
+        names
+    } else {
+        BTreeSet::new()
+    }
+}
+
+/// The named addresses `module <addr>::<name>` declarations use under `dir`.
+fn module_address_names(dir: &Path, depth: usize) -> BTreeSet<String> {
+    module_decls(dir, depth)
+        .into_iter()
+        .map(|(addr, _)| addr)
+        .collect()
+}
+
+/// Every `(address name, module name)` a `module <addr>::<name>` declaration under `dir` uses.
+fn module_decls(dir: &Path, depth: usize) -> BTreeSet<(String, String)> {
+    let mut out = BTreeSet::new();
+    if depth == 0 {
+        return out;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(module_decls(&path, depth - 1));
+        } else if extension_equals(&path, "move") {
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            for line in text.lines() {
+                let line = line.split("//").next().unwrap_or("").trim_start();
+                let Some(rest) = line.strip_prefix("module ") else {
+                    continue;
+                };
+                let Some((addr, module)) = rest.trim_start().split_once("::") else {
+                    continue;
+                };
+                let addr = addr.trim();
+                let module: String = module
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !addr.is_empty() && !addr.starts_with("0x") && !module.is_empty() {
+                    out.insert((addr.to_string(), module));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn source_paths_for_config(package_path: &Path, config: &BuildConfig) -> Vec<PathBuf> {

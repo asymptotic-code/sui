@@ -1,0 +1,320 @@
+---
+source: crates/move-package/tests/test_runner.rs
+---
+ResolvedGraph {
+    graph: DependencyGraph {
+        root_path: "tests/test_sources/alt_rename_from_two_versions",
+        root_package_id: "root_pkg",
+        root_package_name: "root_pkg",
+        package_graph: {
+            "root_pkg": [
+                (
+                    "PythV1",
+                    Outgoing,
+                ),
+                (
+                    "PythV2",
+                    Outgoing,
+                ),
+            ],
+            "PythV1": [
+                (
+                    "root_pkg",
+                    Incoming,
+                ),
+                (
+                    "Wormhole1",
+                    Outgoing,
+                ),
+            ],
+            "Wormhole1": [
+                (
+                    "PythV1",
+                    Incoming,
+                ),
+            ],
+            "PythV2": [
+                (
+                    "root_pkg",
+                    Incoming,
+                ),
+                (
+                    "Wormhole2",
+                    Outgoing,
+                ),
+            ],
+            "Wormhole2": [
+                (
+                    "PythV2",
+                    Incoming,
+                ),
+            ],
+        },
+        package_table: {
+            "PythV1": Package {
+                kind: Local(
+                    "deps_only/pyth_v1",
+                ),
+                version: None,
+                resolver: None,
+            },
+            "PythV2": Package {
+                kind: Local(
+                    "deps_only/pyth_v2",
+                ),
+                version: None,
+                resolver: None,
+            },
+            "Wormhole1": Package {
+                kind: Local(
+                    "deps_only/wormhole_v1",
+                ),
+                version: None,
+                resolver: None,
+            },
+            "Wormhole2": Package {
+                kind: Local(
+                    "deps_only/wormhole_v2",
+                ),
+                version: None,
+                resolver: None,
+            },
+        },
+        always_deps: {
+            "PythV1",
+            "PythV2",
+            "Wormhole1",
+            "Wormhole2",
+            "root_pkg",
+        },
+        manifest_digest: "342A8F5DB239E156D75269671D4B5A0B4466436B05016AC6BEE5EC2E0F82FB41",
+        deps_digest: "3C4103934B1E040BB6B23F1D610B4EF9F2F1166A50A104EADCF77467C004C600",
+    },
+    build_options: BuildConfig {
+        dev_mode: true,
+        test_mode: false,
+        generate_docs: false,
+        save_disassembly: false,
+        install_dir: Some(
+            "ELIDED_FOR_TEST",
+        ),
+        force_recompilation: false,
+        lock_file: Some(
+            "ELIDED_FOR_TEST",
+        ),
+        fetch_deps_only: false,
+        skip_fetch_latest_git_deps: false,
+        default_flavor: None,
+        default_edition: None,
+        deps_as_root: false,
+        silence_warnings: false,
+        warnings_are_errors: false,
+        json_errors: false,
+        additional_named_addresses: {},
+        lint_flag: LintFlag {
+            no_lint: false,
+            lint: false,
+        },
+        modes: [],
+        implicit_dependencies: {},
+        force_lock_file: false,
+    },
+    package_table: {
+        "PythV1": Package {
+            source_package: SourceManifest {
+                package: PackageInfo {
+                    name: "PythV1",
+                    authors: [],
+                    license: None,
+                    edition: None,
+                    flavor: None,
+                    custom_properties: {},
+                },
+                addresses: Some(
+                    {
+                        "pyth": Some(
+                            0000000000000000000000000000000000000000000000000000000000000011,
+                        ),
+                    },
+                ),
+                dev_address_assignments: None,
+                build: None,
+                dependencies: {
+                    "Wormhole1": Internal(
+                        InternalDependency {
+                            kind: Local(
+                                "../wormhole_v1",
+                            ),
+                            subst: None,
+                            digest: None,
+                            dep_override: false,
+                        },
+                    ),
+                },
+                dev_dependencies: {},
+            },
+            package_path: "ELIDED_FOR_TEST",
+            renaming: {},
+            resolved_table: {
+                "pyth": 0000000000000000000000000000000000000000000000000000000000000011,
+                "wormhole": 0000000000000000000000000000000000000000000000000000000000000021,
+            },
+            source_digest: "ELIDED_FOR_TEST",
+        },
+        "PythV2": Package {
+            source_package: SourceManifest {
+                package: PackageInfo {
+                    name: "PythV2",
+                    authors: [],
+                    license: None,
+                    edition: None,
+                    flavor: None,
+                    custom_properties: {},
+                },
+                addresses: Some(
+                    {
+                        "pyth": Some(
+                            0000000000000000000000000000000000000000000000000000000000000012,
+                        ),
+                    },
+                ),
+                dev_address_assignments: None,
+                build: None,
+                dependencies: {
+                    "Wormhole2": Internal(
+                        InternalDependency {
+                            kind: Local(
+                                "../wormhole_v2",
+                            ),
+                            subst: None,
+                            digest: None,
+                            dep_override: false,
+                        },
+                    ),
+                },
+                dev_dependencies: {},
+            },
+            package_path: "ELIDED_FOR_TEST",
+            renaming: {},
+            resolved_table: {
+                "pyth": 0000000000000000000000000000000000000000000000000000000000000012,
+                "wormhole": 0000000000000000000000000000000000000000000000000000000000000022,
+            },
+            source_digest: "ELIDED_FOR_TEST",
+        },
+        "Wormhole1": Package {
+            source_package: SourceManifest {
+                package: PackageInfo {
+                    name: "Wormhole1",
+                    authors: [],
+                    license: None,
+                    edition: None,
+                    flavor: None,
+                    custom_properties: {},
+                },
+                addresses: Some(
+                    {
+                        "wormhole": Some(
+                            0000000000000000000000000000000000000000000000000000000000000021,
+                        ),
+                    },
+                ),
+                dev_address_assignments: None,
+                build: None,
+                dependencies: {},
+                dev_dependencies: {},
+            },
+            package_path: "ELIDED_FOR_TEST",
+            renaming: {},
+            resolved_table: {
+                "wormhole": 0000000000000000000000000000000000000000000000000000000000000021,
+            },
+            source_digest: "ELIDED_FOR_TEST",
+        },
+        "Wormhole2": Package {
+            source_package: SourceManifest {
+                package: PackageInfo {
+                    name: "Wormhole2",
+                    authors: [],
+                    license: None,
+                    edition: None,
+                    flavor: None,
+                    custom_properties: {},
+                },
+                addresses: Some(
+                    {
+                        "wormhole": Some(
+                            0000000000000000000000000000000000000000000000000000000000000022,
+                        ),
+                    },
+                ),
+                dev_address_assignments: None,
+                build: None,
+                dependencies: {},
+                dev_dependencies: {},
+            },
+            package_path: "ELIDED_FOR_TEST",
+            renaming: {},
+            resolved_table: {
+                "wormhole": 0000000000000000000000000000000000000000000000000000000000000022,
+            },
+            source_digest: "ELIDED_FOR_TEST",
+        },
+        "root_pkg": Package {
+            source_package: SourceManifest {
+                package: PackageInfo {
+                    name: "root_pkg",
+                    authors: [],
+                    license: None,
+                    edition: Some(
+                        Edition {
+                            edition: "2024",
+                            release: None,
+                        },
+                    ),
+                    flavor: None,
+                    custom_properties: {},
+                },
+                addresses: None,
+                dev_address_assignments: None,
+                build: None,
+                dependencies: {
+                    "pyth": Internal(
+                        InternalDependency {
+                            kind: Local(
+                                "deps_only/pyth_v1",
+                            ),
+                            subst: None,
+                            digest: None,
+                            dep_override: false,
+                        },
+                    ),
+                    "pyth_upgraded": Internal(
+                        InternalDependency {
+                            kind: Local(
+                                "deps_only/pyth_v2",
+                            ),
+                            subst: Some(
+                                {
+                                    "pyth_upgraded": PackageRename(
+                                        "pyth",
+                                    ),
+                                },
+                            ),
+                            digest: None,
+                            dep_override: false,
+                        },
+                    ),
+                },
+                dev_dependencies: {},
+            },
+            package_path: "ELIDED_FOR_TEST",
+            renaming: {},
+            resolved_table: {
+                "pyth": 0000000000000000000000000000000000000000000000000000000000000011,
+                "pyth_upgraded": 0000000000000000000000000000000000000000000000000000000000000012,
+            },
+            source_digest: "ELIDED_FOR_TEST",
+        },
+    },
+}

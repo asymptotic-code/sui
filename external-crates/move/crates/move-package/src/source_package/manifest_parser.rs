@@ -26,6 +26,9 @@ const DEPENDENCY_NAME: &str = "dependencies";
 const DEV_DEPENDENCY_NAME: &str = "dev-dependencies";
 
 const EXTERNAL_RESOLVER_PREFIX: &str = "r";
+const RENAME_FROM_NAME: &str = "rename-from";
+/// Lock-file spelling of `SubstOrRename::PackageRename` inside `addr_subst`.
+pub const PACKAGE_RENAME_PREFIX: &str = "rename-from:";
 
 const KNOWN_NAMES: &[&str] = &[
     PACKAGE_NAME,
@@ -207,9 +210,32 @@ pub fn parse_dependencies(tval: TV) -> Result<PM::Dependencies> {
     match tval {
         TV::Table(table) => {
             let mut deps = BTreeMap::new();
-            for (dep_name, dep) in table.into_iter() {
+            for (dep_name, mut dep) in table.into_iter() {
                 let dep_name_ident = PM::PackageName::from(dep_name.clone());
-                let dep = parse_dependency(dep)?;
+                let rename_from = dep
+                    .as_table_mut()
+                    .and_then(|t| t.remove(RENAME_FROM_NAME))
+                    .map(|v| match v {
+                        TV::String(s) => Ok(PM::NamedAddress::from(s.as_str())),
+                        x => bail!(
+                            "Malformed '{RENAME_FROM_NAME}' for dependency '{dep_name}'. \
+                             Expected a string, but encountered a {}",
+                            x.type_str()
+                        ),
+                    })
+                    .transpose()?;
+                let mut dep = parse_dependency(dep)?;
+                if let Some(from) = rename_from {
+                    let PM::Dependency::Internal(internal) = &mut dep else {
+                        bail!(
+                            "'{RENAME_FROM_NAME}' is not supported on externally resolved dependency '{dep_name}'"
+                        );
+                    };
+                    internal
+                        .subst
+                        .get_or_insert_with(BTreeMap::new)
+                        .insert(dep_name_ident, PM::SubstOrRename::PackageRename(from));
+                }
                 deps.insert(dep_name_ident, dep);
             }
             Ok(deps)
@@ -473,7 +499,12 @@ pub fn parse_substitution(tval: TV) -> Result<PM::Substitution> {
                 let addr_ident = PM::NamedAddress::from(addr_name.as_str());
                 match tval {
                     TV::String(addr_or_name) => {
-                        if let Ok(addr) = AccountAddress::from_hex_literal(&addr_or_name) {
+                        if let Some(from) = addr_or_name.strip_prefix(PACKAGE_RENAME_PREFIX) {
+                            subst.insert(
+                                addr_ident,
+                                PM::SubstOrRename::PackageRename(PM::NamedAddress::from(from)),
+                            );
+                        } else if let Ok(addr) = AccountAddress::from_hex_literal(&addr_or_name) {
                             subst.insert(addr_ident, PM::SubstOrRename::Assign(addr));
                         } else {
                             let rename_from = PM::NamedAddress::from(addr_or_name.as_str());
