@@ -1,0 +1,8 @@
+[package]
+name = "PythV1"
+
+[dependencies]
+Wormhole1 = { local = "../wormhole_v1" }
+
+[addresses]
+pyth = "0x11"

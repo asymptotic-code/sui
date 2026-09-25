@@ -1,0 +1,4 @@
+---
+source: crates/move-package/tests/test_runner.rs
+---
+Processing dependency 'pyth_upgraded' of 'root_legacy': Conflicting assignments for address 'wormhole': '0x21' and '0x22'.

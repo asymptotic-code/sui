@@ -92,6 +92,12 @@ pub struct BuildInfo {
 pub enum SubstOrRename {
     RenameFrom(NamedAddress),
     Assign(AccountAddress),
+    /// `rename-from = "<name>"` on a dependency (the move-package-alt field): the dependency's
+    /// own address `<name>` is visible in the depending package under the dependency's key, and
+    /// `<name>` itself is not. Keyed by the dependency's key in `InternalDependency::subst`.
+    /// Unlike `RenameFrom` it records no package renaming: the renamed name is bound directly in
+    /// the depending package's address scope, so the model builder still sees a flat resolution.
+    PackageRename(NamedAddress),
 }
 
 impl DependencyKind {

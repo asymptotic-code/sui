@@ -1,7 +1,7 @@
 // Copyright (c) The Move Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, anyhow};
 use move_core_types::account_address::AccountAddress;
@@ -22,6 +22,10 @@ pub struct ResolvingTable {
 
     /// Mapping named addresses to an entry in the `assignments` table.
     redirection: BTreeMap<QualifiedAddress, usize>,
+
+    /// Names removed from their package's scope by `hide`: later `define`/`unify` calls on them
+    /// are no-ops, so they never re-enter the scope.
+    hidden: BTreeSet<QualifiedAddress>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -42,6 +46,7 @@ impl ResolvingTable {
         ResolvingTable {
             assignments: Vec::new(),
             redirection: BTreeMap::new(),
+            hidden: BTreeSet::new(),
         }
     }
 
@@ -75,6 +80,9 @@ impl ResolvingTable {
     /// bindings between two account addresses that are unequal to each other), and succeeds
     /// otherwise.
     pub fn define(&mut self, name: QualifiedAddress, addr: Option<AccountAddress>) -> Result<()> {
+        if self.hidden.contains(&name) {
+            return Ok(());
+        }
         let ix = self.get_or_create_assignment(name);
         let Assignment::Assign(slot) = &mut self.assignments[ix] else {
             unreachable!("Non-root assignment");
@@ -97,6 +105,9 @@ impl ResolvingTable {
     /// through bindings between two account addresses that are unequal to each other), and succeeds
     /// otherwise.
     pub fn unify(&mut self, a: QualifiedAddress, b: QualifiedAddress) -> Result<()> {
+        if self.hidden.contains(&a) || self.hidden.contains(&b) {
+            return Ok(());
+        }
         let ix = self.get_or_create_assignment(a);
         let jx = self.get_or_create_assignment(b);
 
@@ -125,6 +136,13 @@ impl ResolvingTable {
         };
 
         Ok(())
+    }
+
+    /// Remove `name` from its package's scope for good. Other names it was unified with keep
+    /// their value; only this package stops seeing the name.
+    pub fn hide(&mut self, name: QualifiedAddress) {
+        self.redirection.remove(&name);
+        self.hidden.insert(name);
     }
 
     /// Returns the index of the "root" assignment (i.e. not a link to another assignment) for

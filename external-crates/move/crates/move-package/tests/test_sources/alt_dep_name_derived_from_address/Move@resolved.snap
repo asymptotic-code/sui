@@ -1,0 +1,145 @@
+---
+source: crates/move-package/tests/test_runner.rs
+---
+ResolvedGraph {
+    graph: DependencyGraph {
+        root_path: "tests/test_sources/alt_dep_name_derived_from_address",
+        root_package_id: "Root",
+        root_package_name: "Root",
+        package_graph: {
+            "Root": [
+                (
+                    "Wormhole",
+                    Outgoing,
+                ),
+            ],
+            "Wormhole": [
+                (
+                    "Root",
+                    Incoming,
+                ),
+            ],
+        },
+        package_table: {
+            "Wormhole": Package {
+                kind: Local(
+                    "deps_only/wormhole",
+                ),
+                version: None,
+                resolver: None,
+            },
+        },
+        always_deps: {
+            "Root",
+            "Wormhole",
+        },
+        manifest_digest: "7B99C7658F1E8DACB3E0D1D3FA9C75AA5C14D4AE24788B75465CC8D01279AB4B",
+        deps_digest: "F8BBB0CCB2491CA29A3DF03D6F92277A4F3574266507ACD77214D37ECA3F3082",
+    },
+    build_options: BuildConfig {
+        dev_mode: true,
+        test_mode: false,
+        generate_docs: false,
+        save_disassembly: false,
+        install_dir: Some(
+            "ELIDED_FOR_TEST",
+        ),
+        force_recompilation: false,
+        lock_file: Some(
+            "ELIDED_FOR_TEST",
+        ),
+        fetch_deps_only: false,
+        skip_fetch_latest_git_deps: false,
+        default_flavor: None,
+        default_edition: None,
+        deps_as_root: false,
+        silence_warnings: false,
+        warnings_are_errors: false,
+        json_errors: false,
+        additional_named_addresses: {},
+        lint_flag: LintFlag {
+            no_lint: false,
+            lint: false,
+        },
+        modes: [],
+        implicit_dependencies: {},
+        force_lock_file: false,
+    },
+    package_table: {
+        "Root": Package {
+            source_package: SourceManifest {
+                package: PackageInfo {
+                    name: "Root",
+                    authors: [],
+                    license: None,
+                    edition: Some(
+                        Edition {
+                            edition: "2024",
+                            release: None,
+                        },
+                    ),
+                    flavor: None,
+                    custom_properties: {},
+                },
+                addresses: Some(
+                    {
+                        "root": Some(
+                            0000000000000000000000000000000000000000000000000000000000000000,
+                        ),
+                    },
+                ),
+                dev_address_assignments: None,
+                build: None,
+                dependencies: {
+                    "wormhole": Internal(
+                        InternalDependency {
+                            kind: Local(
+                                "deps_only/wormhole",
+                            ),
+                            subst: None,
+                            digest: None,
+                            dep_override: false,
+                        },
+                    ),
+                },
+                dev_dependencies: {},
+            },
+            package_path: "ELIDED_FOR_TEST",
+            renaming: {},
+            resolved_table: {
+                "root": 0000000000000000000000000000000000000000000000000000000000000000,
+                "wormhole": 0000000000000000000000000000000000000000000000000000000000000005,
+            },
+            source_digest: "ELIDED_FOR_TEST",
+        },
+        "Wormhole": Package {
+            source_package: SourceManifest {
+                package: PackageInfo {
+                    name: "Wormhole",
+                    authors: [],
+                    license: None,
+                    edition: None,
+                    flavor: None,
+                    custom_properties: {},
+                },
+                addresses: Some(
+                    {
+                        "wormhole": Some(
+                            0000000000000000000000000000000000000000000000000000000000000005,
+                        ),
+                    },
+                ),
+                dev_address_assignments: None,
+                build: None,
+                dependencies: {},
+                dev_dependencies: {},
+            },
+            package_path: "ELIDED_FOR_TEST",
+            renaming: {},
+            resolved_table: {
+                "wormhole": 0000000000000000000000000000000000000000000000000000000000000005,
+            },
+            source_digest: "ELIDED_FOR_TEST",
+        },
+    },
+}

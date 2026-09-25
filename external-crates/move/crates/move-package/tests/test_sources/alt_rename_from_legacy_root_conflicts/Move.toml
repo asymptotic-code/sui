@@ -1,0 +1,7 @@
+[package]
+name = "root_legacy"
+edition = "legacy"
+
+[dependencies]
+pyth = { local = "./deps_only/pyth_v1" }
+pyth_upgraded = { local = "./deps_only/pyth_v2", rename-from = "pyth" }
