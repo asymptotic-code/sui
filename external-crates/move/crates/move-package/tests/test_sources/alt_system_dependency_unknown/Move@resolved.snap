@@ -1,0 +1,4 @@
+---
+source: crates/move-package/tests/test_runner.rs
+---
+System dependency 'bridge' of 'hashi_like' names no system package provided to this build (expected one of SuiSystem)
