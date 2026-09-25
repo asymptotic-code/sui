@@ -1,0 +1,6 @@
+[package]
+name = "SuiSystem"
+edition = "2024"
+
+[addresses]
+sui_system = "0x3"

@@ -1,0 +1,6 @@
+[package]
+name = "hashi_like"
+edition = "2024"
+
+[dependencies]
+sui_system = { system = "sui_system" }

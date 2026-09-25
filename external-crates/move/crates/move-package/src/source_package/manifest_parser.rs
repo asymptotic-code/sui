@@ -27,6 +27,9 @@ const DEV_DEPENDENCY_NAME: &str = "dev-dependencies";
 
 const EXTERNAL_RESOLVER_PREFIX: &str = "r";
 const RENAME_FROM_NAME: &str = "rename-from";
+/// How a `{ system = "<name>" }` dependency (move-package-alt) is carried until the dependency
+/// graph resolves it to the injected system package: `Dependency::External("system:<name>")`.
+pub const SYSTEM_DEP_PREFIX: &str = "system:";
 /// Lock-file spelling of `SubstOrRename::PackageRename` inside `addr_subst`.
 pub const PACKAGE_RENAME_PREFIX: &str = "rename-from:";
 
@@ -395,6 +398,16 @@ pub fn parse_dependency(mut tval: TV) -> Result<PM::Dependency> {
     let Some(table) = tval.as_table_mut() else {
         bail!("Malformed dependency {}", tval);
     };
+
+    if let Some(system) = table.remove("system") {
+        let Some(system) = system.as_str() else {
+            bail!("'system' dependency name not a string");
+        };
+        warn_if_unknown_field_names(table, &[]);
+        return Ok(PM::Dependency::External(Symbol::from(format!(
+            "{SYSTEM_DEP_PREFIX}{system}"
+        ))));
+    }
 
     if let Some(external_resolver_binary_name) = table
         .get(EXTERNAL_RESOLVER_PREFIX)

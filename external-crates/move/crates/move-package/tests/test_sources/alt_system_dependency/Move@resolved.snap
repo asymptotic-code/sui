@@ -1,0 +1,147 @@
+---
+source: crates/move-package/tests/test_runner.rs
+---
+ResolvedGraph {
+    graph: DependencyGraph {
+        root_path: "tests/test_sources/alt_system_dependency",
+        root_package_id: "hashi_like",
+        root_package_name: "hashi_like",
+        package_graph: {
+            "hashi_like": [
+                (
+                    "SuiSystem",
+                    Outgoing,
+                ),
+            ],
+            "SuiSystem": [
+                (
+                    "hashi_like",
+                    Incoming,
+                ),
+            ],
+        },
+        package_table: {
+            "SuiSystem": Package {
+                kind: Local(
+                    "deps_only/sui_system",
+                ),
+                version: None,
+                resolver: None,
+            },
+        },
+        always_deps: {
+            "SuiSystem",
+            "hashi_like",
+        },
+        manifest_digest: "F266186C20C22F7648D84C23AE3EFFB8C10FA31421A321ACC0603DAD451C5387",
+        deps_digest: "F8BBB0CCB2491CA29A3DF03D6F92277A4F3574266507ACD77214D37ECA3F3082",
+    },
+    build_options: BuildConfig {
+        dev_mode: true,
+        test_mode: false,
+        generate_docs: false,
+        save_disassembly: false,
+        install_dir: Some(
+            "ELIDED_FOR_TEST",
+        ),
+        force_recompilation: false,
+        lock_file: Some(
+            "ELIDED_FOR_TEST",
+        ),
+        fetch_deps_only: false,
+        skip_fetch_latest_git_deps: false,
+        default_flavor: None,
+        default_edition: None,
+        deps_as_root: false,
+        silence_warnings: false,
+        warnings_are_errors: false,
+        json_errors: false,
+        additional_named_addresses: {},
+        lint_flag: LintFlag {
+            no_lint: false,
+            lint: false,
+        },
+        modes: [],
+        implicit_dependencies: {
+            "SuiSystem": Internal(
+                InternalDependency {
+                    kind: Local(
+                        "deps_only/sui_system",
+                    ),
+                    subst: None,
+                    digest: None,
+                    dep_override: true,
+                },
+            ),
+        },
+        force_lock_file: false,
+    },
+    package_table: {
+        "SuiSystem": Package {
+            source_package: SourceManifest {
+                package: PackageInfo {
+                    name: "SuiSystem",
+                    authors: [],
+                    license: None,
+                    edition: Some(
+                        Edition {
+                            edition: "2024",
+                            release: None,
+                        },
+                    ),
+                    flavor: None,
+                    custom_properties: {},
+                },
+                addresses: Some(
+                    {
+                        "sui_system": Some(
+                            0000000000000000000000000000000000000000000000000000000000000003,
+                        ),
+                    },
+                ),
+                dev_address_assignments: None,
+                build: None,
+                dependencies: {},
+                dev_dependencies: {},
+            },
+            package_path: "ELIDED_FOR_TEST",
+            renaming: {},
+            resolved_table: {
+                "sui_system": 0000000000000000000000000000000000000000000000000000000000000003,
+            },
+            source_digest: "ELIDED_FOR_TEST",
+        },
+        "hashi_like": Package {
+            source_package: SourceManifest {
+                package: PackageInfo {
+                    name: "hashi_like",
+                    authors: [],
+                    license: None,
+                    edition: Some(
+                        Edition {
+                            edition: "2024",
+                            release: None,
+                        },
+                    ),
+                    flavor: None,
+                    custom_properties: {},
+                },
+                addresses: None,
+                dev_address_assignments: None,
+                build: None,
+                dependencies: {
+                    "sui_system": External(
+                        "system:sui_system",
+                    ),
+                },
+                dev_dependencies: {},
+            },
+            package_path: "ELIDED_FOR_TEST",
+            renaming: {},
+            resolved_table: {
+                "sui_system": 0000000000000000000000000000000000000000000000000000000000000003,
+            },
+            source_digest: "ELIDED_FOR_TEST",
+        },
+    },
+}

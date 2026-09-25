@@ -379,6 +379,11 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
             ));
         }
 
+        // `{ system = "<name>" }` dependencies (move-package-alt) name one of the implicit system
+        // packages; they are resolved to it below rather than to a package of their own.
+        let system_deps = take_system_deps(&mut root_manifest);
+        let system_dev_deps = take_system_deps_from(&mut root_manifest.dev_dependencies);
+
         // implicits deps should be skipped if the manifest contains any of them
         // explicitly (or if the manifest is for a system package).
         let explicit_implicits: Vec<&Symbol> = self
@@ -407,6 +412,34 @@ impl<Progress: Write> DependencyGraphBuilder<Progress> {
                 move_compiler::format_oxford_list!("and", "{}", explicit_implicits),
                 SourcePackageLayout::Manifest.location_str(),
             );
+        }
+
+        for (section, names) in [
+            (&mut root_manifest.dependencies, system_deps),
+            (&mut root_manifest.dev_dependencies, system_dev_deps),
+        ] {
+            for name in names {
+                let legacy = legacy_system_package_name(&name);
+                if root_manifest.package.name.as_str() == legacy {
+                    continue;
+                }
+                if section.contains_key(&Symbol::from(legacy)) {
+                    continue;
+                }
+                let Some(dep) = self.implicit_deps.get(&Symbol::from(legacy)) else {
+                    bail!(
+                        "System dependency '{name}' of '{}' names no system package provided \
+                         to this build (expected one of {})",
+                        root_manifest.package.name,
+                        self.implicit_deps
+                            .keys()
+                            .map(|k| k.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                };
+                section.insert(Symbol::from(legacy), dep.clone());
+            }
         }
 
         // collect sub-graphs for "regular" and "dev" dependencies
@@ -1976,6 +2009,42 @@ fn dep_path_from_root(
 
             Ok(path.join(" -> "))
         }
+    }
+}
+
+/// Remove the `{ system = "<name>" }` dependencies from `manifest.dependencies`, returning names.
+fn take_system_deps(manifest: &mut PM::SourceManifest) -> Vec<String> {
+    take_system_deps_from(&mut manifest.dependencies)
+}
+
+fn take_system_deps_from(deps: &mut PM::Dependencies) -> Vec<String> {
+    let prefix = crate::source_package::manifest_parser::SYSTEM_DEP_PREFIX;
+    let names: Vec<(PM::PackageName, String)> = deps
+        .iter()
+        .filter_map(|(key, dep)| match dep {
+            PM::Dependency::External(r) => r
+                .as_str()
+                .strip_prefix(prefix)
+                .map(|name| (*key, name.to_string())),
+            PM::Dependency::Internal(_) => None,
+        })
+        .collect();
+    for (key, _) in &names {
+        deps.remove(key);
+    }
+    names.into_iter().map(|(_, name)| name).collect()
+}
+
+/// The legacy (capitalized) name of the system package a `system = "<name>"` dependency means,
+/// as the Sui flavor maps them (`SuiFlavor::system_deps_by_name`).
+fn legacy_system_package_name(name: &str) -> &str {
+    match name {
+        "sui" => "Sui",
+        "std" => "MoveStdlib",
+        "sui_system" => "SuiSystem",
+        "deepbook" => "DeepBook",
+        "bridge" => "Bridge",
+        other => other,
     }
 }
 
